@@ -1,0 +1,2 @@
+ALTER TABLE public.app_settings ADD COLUMN IF NOT EXISTS card_color text NOT NULL DEFAULT '#0f172a';
+ALTER TABLE public.app_settings ADD COLUMN IF NOT EXISTS result_row_color text NOT NULL DEFAULT '#1e293b';

@@ -1,0 +1,6 @@
+{
+  "name": "Pizarra de Animalitos",
+  "description": "Resultados de loterías de animalitos en tiempo real con tableros diarios y semanales",
+  "permissions": [],
+  "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
