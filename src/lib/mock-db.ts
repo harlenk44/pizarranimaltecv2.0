@@ -147,6 +147,20 @@ function buildInitialEntries(): MockStore["animal_entries"] {
 }
 
 function buildInitialImages(): MockStore["animal_images"] {
+  if (typeof window !== "undefined") {
+    try {
+      const saved = localStorage.getItem("pizarra_custom_animal_images");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   const images: MockStore["animal_images"] = [];
   const lottoGame = INITIAL_GAMES.find((g) => g.slug === "lotto-activo");
   if (lottoGame) {
@@ -195,8 +209,19 @@ if (!globalThis.__APPLET_MOCK_STORE__) {
         subscription_expires_at: "2030-01-01T00:00:00Z",
         created_at: new Date().toISOString(),
       },
+      {
+        id: "00000000-0000-0000-0000-000000000002",
+        email: "m4rl0nh3rn4nd3z@gmail.com",
+        role: "admin",
+        subscription_status: "active",
+        subscription_expires_at: "2030-01-01T00:00:00Z",
+        created_at: new Date().toISOString(),
+      },
     ],
-    user_roles: [{ user_id: ADMIN_ID, role: "admin" }],
+    user_roles: [
+      { user_id: ADMIN_ID, role: "admin" },
+      { user_id: "00000000-0000-0000-0000-000000000002", role: "admin" },
+    ],
   };
 }
 
@@ -334,10 +359,71 @@ export async function syncTuazarDirectly(): Promise<number> {
 // Initial sync on module load
 syncTuazarDirectly();
 
+function parsePostgrestCond(cond: string) {
+  const trimmed = cond.trim();
+  const firstDot = trimmed.indexOf(".");
+  if (firstDot === -1) return null;
+  const col = trimmed.slice(0, firstDot);
+  const rest = trimmed.slice(firstDot + 1);
+  const secondDot = rest.indexOf(".");
+  if (secondDot === -1) return null;
+  const op = rest.slice(0, secondDot);
+  const valStr = rest.slice(secondDot + 1);
+  return { col, op, valStr };
+}
+
+function evaluatePostgrestCond(row: Record<string, unknown>, cond: string): boolean {
+  const parsed = parsePostgrestCond(cond);
+  if (!parsed) return true;
+  const { col, op, valStr } = parsed;
+  const cell = row[col];
+
+  if (op === "is") {
+    if (valStr === "null") return cell === null || cell === undefined;
+    if (valStr === "true") return cell === true;
+    if (valStr === "false") return cell === false;
+    return cell === valStr;
+  }
+  if (op === "eq") {
+    return String(cell) === valStr || cell === valStr;
+  }
+  if (op === "neq") {
+    return String(cell) !== valStr && cell !== valStr;
+  }
+  if (op === "gte") {
+    if (cell === null || cell === undefined) return false;
+    return (cell as string | number) >= valStr;
+  }
+  if (op === "lte") {
+    if (cell === null || cell === undefined) return false;
+    return (cell as string | number) <= valStr;
+  }
+  if (op === "gt") {
+    if (cell === null || cell === undefined) return false;
+    return (cell as string | number) > valStr;
+  }
+  if (op === "lt") {
+    if (cell === null || cell === undefined) return false;
+    return (cell as string | number) < valStr;
+  }
+  if (op === "ilike" || op === "like") {
+    if (cell === null || cell === undefined) return false;
+    const cleanPattern = valStr.replace(/^%|%$/g, "").toLowerCase();
+    return String(cell).toLowerCase().includes(cleanPattern);
+  }
+  return true;
+}
+
 function createMockQueryBuilder(table: string) {
   const filters: Array<(row: Record<string, unknown>) => boolean> = [];
-  let sortFn: ((a: Record<string, unknown>, b: Record<string, unknown>) => number) | null = null;
+  const sortSpecs: Array<{ col: string; ascending: boolean }> = [];
   let isSingle = false;
+  let limitCount: number | null = null;
+  let rangeFrom: number | null = null;
+  let rangeTo: number | null = null;
+  let isDelete = false;
+  let isUpdate = false;
+  let updatePayload: Record<string, unknown> | null = null;
 
   const builder = {
     select() {
@@ -347,14 +433,64 @@ function createMockQueryBuilder(table: string) {
       filters.push((row) => row[col] === val);
       return builder;
     },
-    order(col: string, { ascending = true }: { ascending?: boolean } = {}) {
-      sortFn = (a, b) => {
-        const valA = a[col] as string | number;
-        const valB = b[col] as string | number;
-        if (valA < valB) return ascending ? -1 : 1;
-        if (valA > valB) return ascending ? 1 : -1;
-        return 0;
-      };
+    neq(col: string, val: unknown) {
+      filters.push((row) => row[col] !== val);
+      return builder;
+    },
+    gt(col: string, val: unknown) {
+      filters.push((row) => (row[col] as number | string) > (val as number | string));
+      return builder;
+    },
+    gte(col: string, val: unknown) {
+      filters.push((row) => (row[col] as number | string) >= (val as number | string));
+      return builder;
+    },
+    lt(col: string, val: unknown) {
+      filters.push((row) => (row[col] as number | string) < (val as number | string));
+      return builder;
+    },
+    lte(col: string, val: unknown) {
+      filters.push((row) => (row[col] as number | string) <= (val as number | string));
+      return builder;
+    },
+    is(col: string, val: unknown) {
+      filters.push((row) => row[col] === val);
+      return builder;
+    },
+    in(col: string, vals: unknown[]) {
+      filters.push((row) => vals.includes(row[col]));
+      return builder;
+    },
+    or(filtersString: string) {
+      const parts = filtersString.split(",");
+      filters.push((row) => parts.some((p) => evaluatePostgrestCond(row, p)));
+      return builder;
+    },
+    ilike(col: string, pattern: string) {
+      const clean = pattern.replace(/^%|%$/g, "").toLowerCase();
+      filters.push((row) =>
+        String(row[col] ?? "")
+          .toLowerCase()
+          .includes(clean),
+      );
+      return builder;
+    },
+    like(col: string, pattern: string) {
+      const clean = pattern.replace(/^%|%$/g, "");
+      filters.push((row) => String(row[col] ?? "").includes(clean));
+      return builder;
+    },
+    order(col: string, { ascending = true }: { ascending?: boolean; nullsFirst?: boolean } = {}) {
+      sortSpecs.push({ col, ascending });
+      return builder;
+    },
+    limit(count: number) {
+      limitCount = count;
+      return builder;
+    },
+    range(from: number, to: number) {
+      rangeFrom = from;
+      rangeTo = to;
       return builder;
     },
     maybeSingle() {
@@ -374,17 +510,9 @@ function createMockQueryBuilder(table: string) {
       return Promise.resolve({ data: rows, error: null });
     },
     update(changes: Record<string, unknown>) {
-      return {
-        eq(col: string, val: unknown) {
-          const storeList = ((mockStore as unknown as Record<string, unknown[]>)[table] ??= []);
-          for (const item of storeList) {
-            if (item[col] === val) {
-              Object.assign(item, changes);
-            }
-          }
-          return Promise.resolve({ data: changes, error: null });
-        },
-      };
+      isUpdate = true;
+      updatePayload = changes;
+      return builder;
     },
     upsert(
       rowOrRows: Record<string, unknown> | Array<Record<string, unknown>>,
@@ -404,18 +532,20 @@ function createMockQueryBuilder(table: string) {
           storeList.push({ id: row["id"] ?? `id-${Date.now()}-${Math.random()}`, ...row });
         }
       }
+
+      if (table === "animal_images" && typeof window !== "undefined") {
+        try {
+          localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(storeList));
+        } catch {
+          // ignore
+        }
+      }
+
       return Promise.resolve({ data: rowOrRows, error: null });
     },
     delete() {
-      return {
-        eq(col: string, val: unknown) {
-          const storeList = ((mockStore as unknown as Record<string, unknown[]>)[table] ??= []);
-          (mockStore as unknown as Record<string, unknown[]>)[table] = storeList.filter(
-            (item) => item[col] !== val,
-          );
-          return Promise.resolve({ data: null, error: null });
-        },
-      };
+      isDelete = true;
+      return builder;
     },
     async then<TResult1 = { data: unknown; error: null }, TResult2 = never>(
       onFulfilled?:
@@ -425,60 +555,218 @@ function createMockQueryBuilder(table: string) {
       if (table === "results" && mockStore.results.length === 0 && typeof window !== "undefined") {
         await syncTuazarDirectly();
       }
-      const storeList = ((mockStore as unknown as Record<string, unknown[]>)[table] ??
+      const storeList = ((mockStore as unknown as Record<string, unknown[]>)[table] ??=
         []) as Record<string, unknown>[];
+
+      if (isDelete) {
+        const remaining = storeList.filter((item) => !filters.every((f) => f(item)));
+        (mockStore as unknown as Record<string, unknown[]>)[table] = remaining;
+        if (table === "animal_images" && typeof window !== "undefined") {
+          try {
+            localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(remaining));
+          } catch {
+            // ignore
+          }
+        }
+        return Promise.resolve({ data: null, error: null }).then(onFulfilled, onRejected);
+      }
+
+      if (isUpdate && updatePayload) {
+        const updatedRows: Record<string, unknown>[] = [];
+        for (const item of storeList) {
+          if (filters.every((f) => f(item))) {
+            Object.assign(item, updatePayload);
+            updatedRows.push(item);
+          }
+        }
+        return Promise.resolve({ data: updatedRows, error: null }).then(onFulfilled, onRejected);
+      }
+
       const filtered = storeList.filter((item) => filters.every((f) => f(item)));
-      if (sortFn) filtered.sort(sortFn);
-      const data = isSingle ? (filtered[0] ?? null) : filtered;
+      if (sortSpecs.length > 0) {
+        filtered.sort((a, b) => {
+          for (const { col, ascending } of sortSpecs) {
+            const valA = a[col];
+            const valB = b[col];
+            if (valA === valB) continue;
+            if (valA === undefined || valA === null) return ascending ? 1 : -1;
+            if (valB === undefined || valB === null) return ascending ? -1 : 1;
+            if (valA < valB) return ascending ? -1 : 1;
+            if (valA > valB) return ascending ? 1 : -1;
+          }
+          return 0;
+        });
+      }
+
+      let resultData = filtered;
+      if (rangeFrom !== null && rangeTo !== null) {
+        resultData = resultData.slice(rangeFrom, rangeTo + 1);
+      } else if (limitCount !== null && limitCount >= 0) {
+        resultData = resultData.slice(0, limitCount);
+      }
+
+      const data = isSingle ? (resultData[0] ?? null) : resultData;
       return Promise.resolve({ data, error: null }).then(onFulfilled, onRejected);
     },
   };
   return builder;
 }
 
-export function createMockSupabaseClient() {
-  const session = {
-    access_token: "mock-admin-token",
+const MOCK_AUTH_STORAGE_KEY = "pizarra_mock_session";
+const authSubscribers = new Set<(event: string, session: unknown) => void>();
+
+function getPersistedSession() {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(MOCK_AUTH_STORAGE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function persistSession(session: unknown) {
+  if (typeof window === "undefined") return;
+  try {
+    if (session) {
+      localStorage.setItem(MOCK_AUTH_STORAGE_KEY, JSON.stringify(session));
+    } else {
+      localStorage.removeItem(MOCK_AUTH_STORAGE_KEY);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function notifySubscribers(event: string, session: unknown) {
+  for (const sub of authSubscribers) {
+    try {
+      sub(event, session);
+    } catch (err) {
+      console.warn("Auth subscriber error:", err);
+    }
+  }
+}
+
+function createSessionForUser(email: string) {
+  const normEmail = (email || "admin@pizarra.com").trim().toLowerCase();
+  let profile = mockStore.profiles.find((p) => p.email.toLowerCase() === normEmail);
+
+  if (!profile) {
+    const newId = `user-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    profile = {
+      id: newId,
+      email: normEmail,
+      role: "admin",
+      subscription_status: "active",
+      subscription_expires_at: "2030-01-01T00:00:00Z",
+      created_at: new Date().toISOString(),
+    };
+    mockStore.profiles.push(profile);
+    mockStore.user_roles.push({ user_id: newId, role: "admin" });
+  } else {
+    profile.subscription_status = "active";
+    if (!profile.subscription_expires_at) {
+      profile.subscription_expires_at = "2030-01-01T00:00:00Z";
+    }
+    const hasRole = mockStore.user_roles.some((r) => r.user_id === profile!.id);
+    if (!hasRole) {
+      mockStore.user_roles.push({ user_id: profile.id, role: "admin" });
+    }
+  }
+
+  return {
+    access_token: `mock-token-${profile.id}`,
     token_type: "bearer",
     expires_in: 3600,
     expires_at: Math.floor(Date.now() / 1000) + 3600,
-    refresh_token: "mock-refresh-token",
+    refresh_token: `mock-refresh-${profile.id}`,
     user: {
-      id: ADMIN_ID,
-      email: "admin@pizarra.com",
+      id: profile.id,
+      email: profile.email,
       app_metadata: {},
       user_metadata: {},
       aud: "authenticated",
-      created_at: new Date().toISOString(),
+      created_at: profile.created_at,
     },
   };
+}
 
+const mockStorageFiles = new Map<string, string>();
+
+export function createMockSupabaseClient() {
   return {
     auth: {
       async getSession() {
-        return { data: { session }, error: null };
+        const stored = getPersistedSession();
+        if (stored?.user?.id) {
+          // Verify profile exists in mockStore
+          let p = mockStore.profiles.find((prof) => prof.id === stored.user.id);
+          if (!p) {
+            p = {
+              id: stored.user.id,
+              email: stored.user.email,
+              role: "admin",
+              subscription_status: "active",
+              subscription_expires_at: "2030-01-01T00:00:00Z",
+              created_at: new Date().toISOString(),
+            };
+            mockStore.profiles.push(p);
+            mockStore.user_roles.push({ user_id: stored.user.id, role: "admin" });
+          }
+          return { data: { session: stored }, error: null };
+        }
+        return { data: { session: null }, error: null };
       },
-      onAuthStateChange(callback: (event: string, session: typeof session) => void) {
-        setTimeout(() => callback("SIGNED_IN", session), 0);
+      onAuthStateChange(callback: (event: string, session: unknown) => void) {
+        authSubscribers.add(callback);
+        const current = getPersistedSession();
+        setTimeout(() => {
+          callback(current ? "SIGNED_IN" : "SIGNED_OUT", current);
+        }, 0);
         return {
           data: {
             subscription: {
-              unsubscribe: () => {},
+              unsubscribe: () => {
+                authSubscribers.delete(callback);
+              },
             },
           },
         };
       },
-      async signInWithPassword() {
+      async signInWithPassword({ email }: { email: string; password?: string }) {
+        if (!email) {
+          return {
+            data: { session: null, user: null },
+            error: new Error("Por favor ingresa un correo electrónico válido"),
+          };
+        }
+        const session = createSessionForUser(email);
+        persistSession(session);
+        notifySubscribers("SIGNED_IN", session);
         return { data: { session, user: session.user }, error: null };
       },
-      async signUp() {
+      async signUp({ email }: { email: string; password?: string }) {
+        if (!email) {
+          return {
+            data: { session: null, user: null },
+            error: new Error("Por favor ingresa un correo electrónico válido"),
+          };
+        }
+        const session = createSessionForUser(email);
+        persistSession(session);
+        notifySubscribers("SIGNED_IN", session);
         return { data: { user: session.user, session }, error: null };
       },
       async signOut() {
+        persistSession(null);
+        notifySubscribers("SIGNED_OUT", null);
         return { error: null };
       },
       async getUser() {
-        return { data: { user: session.user }, error: null };
+        const session = getPersistedSession();
+        return { data: { user: session?.user ?? null }, error: null };
       },
     },
     from(tableName: string) {
@@ -523,13 +811,65 @@ export function createMockSupabaseClient() {
     },
     removeChannel() {},
     storage: {
-      from() {
+      from(bucket: string = "animal-images") {
         return {
           async createSignedUrl(path: string) {
-            return { data: { signedUrl: path }, error: null };
+            let dataUrl = mockStorageFiles.get(`${bucket}:${path}`) || mockStorageFiles.get(path);
+            if (!dataUrl && typeof window !== "undefined") {
+              try {
+                dataUrl = localStorage.getItem(`pizarra_storage_${bucket}_${path}`) ?? undefined;
+              } catch {
+                // ignore
+              }
+            }
+            return { data: { signedUrl: dataUrl || path }, error: null };
           },
-          async upload(path: string) {
-            return { data: { path }, error: null };
+          async upload(path: string, file: File | Blob | string, _options?: unknown) {
+            return new Promise<{ data: { path: string }; error: null }>((resolve) => {
+              if (typeof file === "string") {
+                mockStorageFiles.set(`${bucket}:${path}`, file);
+                try {
+                  localStorage.setItem(`pizarra_storage_${bucket}_${path}`, file);
+                } catch {
+                  // ignore
+                }
+                resolve({ data: { path }, error: null });
+                return;
+              }
+              if (typeof FileReader !== "undefined" && file instanceof Blob) {
+                const reader = new FileReader();
+                reader.onload = () => {
+                  const dataUrl = reader.result as string;
+                  mockStorageFiles.set(`${bucket}:${path}`, dataUrl);
+                  try {
+                    localStorage.setItem(`pizarra_storage_${bucket}_${path}`, dataUrl);
+                  } catch {
+                    // ignore quota limits, Map still has it in memory
+                  }
+                  resolve({ data: { path }, error: null });
+                };
+                reader.onerror = () => {
+                  resolve({ data: { path }, error: null });
+                };
+                reader.readAsDataURL(file);
+              } else {
+                resolve({ data: { path }, error: null });
+              }
+            });
+          },
+          async remove(paths: string[]) {
+            for (const p of paths) {
+              mockStorageFiles.delete(`${bucket}:${p}`);
+              mockStorageFiles.delete(p);
+              if (typeof window !== "undefined") {
+                try {
+                  localStorage.removeItem(`pizarra_storage_${bucket}_${p}`);
+                } catch {
+                  // ignore
+                }
+              }
+            }
+            return { data: paths, error: null };
           },
         };
       },

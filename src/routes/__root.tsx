@@ -78,14 +78,20 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Pizarra de Animalitos" },
-      { name: "description", content: "Resultados de loterías de animalitos" },
-      { name: "author", content: "Lovable" },
-      { property: "og:title", content: "Pizarra de Animalitos" },
-      { property: "og:description", content: "Resultados de loterías de animalitos" },
+      { title: "pizarraianimaltec" },
+      {
+        name: "description",
+        content: "Resultados de loterías de animalitos en tiempo real - pizarraianimaltec",
+      },
+      { name: "author", content: "pizarraianimaltec" },
+      { property: "og:title", content: "pizarraianimaltec" },
+      {
+        property: "og:description",
+        content: "Resultados de loterías de animalitos en tiempo real - pizarraianimaltec",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
-      { name: "twitter:site", content: "@Lovable" },
+      { name: "twitter:site", content: "@pizarraianimaltec" },
     ],
     links: [
       {
@@ -107,7 +113,7 @@ function RootShell({ children }: { children: ReactNode }) {
       <head>
         <script
           dangerouslySetInnerHTML={{
-            __html: `(function(){try{var f=window.fetch;if(f){Object.defineProperty(window,'fetch',{value:f,writable:true,configurable:true,enumerable:true});}}catch(e){}})();`,
+            __html: `(function(){try{var _f=typeof window!=="undefined"&&window.fetch?window.fetch.bind(window):null;var d={get:function(){return _f;},set:function(v){_f=v;},configurable:true,enumerable:true};try{Object.defineProperty(window,"fetch",d);}catch(e){}try{if(typeof Window!=="undefined"&&Window.prototype){Object.defineProperty(Window.prototype,"fetch",d);}}catch(e){}}catch(e){}})();`,
           }}
         />
         <HeadContent />

@@ -319,7 +319,9 @@ function WeeklyGridCell({
                     className="display-animal-image object-contain rounded"
                   />
                 ) : (
-                  <span className="display-animal-emoji">{getEmojiForNumber(r.animal_number)}</span>
+                  <span className="display-animal-emoji">
+                    {getEmojiForNumber(r.animal_number, displayName)}
+                  </span>
                 )}
                 <span className="display-number font-black tabular-nums">{displayLabel}</span>
                 <span className="display-name font-bold">{displayName}</span>

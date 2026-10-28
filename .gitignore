@@ -16,6 +16,9 @@ dist-ssr
 .nitro
 *.local
 
+# AI Studio
+.aistudio/
+
 # Wrangler / Cloudflare
 .wrangler/
 .dev.vars

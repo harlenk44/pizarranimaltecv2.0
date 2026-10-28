@@ -1,6 +1,6 @@
 {
-  "name": "Pizarra de Animalitos",
-  "description": "Resultados de loterías de animalitos en tiempo real con tableros diarios y semanales",
+  "name": "pizarraianimaltec",
+  "description": "Resultados de loterías de animalitos en tiempo real con tableros diarios y semanales - pizarraianimaltec",
   "permissions": [],
   "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

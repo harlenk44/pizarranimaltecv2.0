@@ -40,7 +40,7 @@ export default function LoginPage() {
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 mb-4 shadow-lg shadow-blue-600/30">
             <Ticket className="w-8 h-8 text-white" />
           </div>
-          <h1 className="text-3xl font-bold text-white">Pizarra Animalitos</h1>
+          <h1 className="text-3xl font-bold text-white tracking-tight">pizarraianimaltec</h1>
           <p className="text-slate-400 mt-2">Resultados de Lotería en Tiempo Real</p>
         </div>
 
@@ -129,16 +129,39 @@ export default function LoginPage() {
             <button
               type="submit"
               disabled={busy}
-              className="w-full py-3.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-medium rounded-xl transition-all shadow-lg shadow-blue-600/20 flex items-center justify-center gap-2"
+              className="w-full py-3.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-medium rounded-xl transition-all shadow-lg shadow-blue-600/20 flex items-center justify-center gap-2 cursor-pointer"
             >
               {busy && <Loader2 className="w-5 h-5 animate-spin" />}
-              {mode === "signin" ? "Entrar" : "Crear Cuenta"}
+              {mode === "signin" ? "Entrar a la Pizarra" : "Crear Cuenta"}
             </button>
+
+            {/* Quick 1-click login button for administrator */}
+            <div className="pt-2 border-t border-slate-700/60">
+              <button
+                type="button"
+                onClick={async () => {
+                  setError(null);
+                  setBusy(true);
+                  const targetEmail = email.trim() || "m4rl0nh3rn4nd3z@gmail.com";
+                  setEmail(targetEmail);
+                  setPassword("admin123");
+                  const { error: err } = await signIn(targetEmail, "admin123");
+                  if (err) setError(err);
+                  setBusy(false);
+                }}
+                disabled={busy}
+                className="w-full py-2.5 px-4 rounded-xl bg-slate-700/60 hover:bg-slate-700 text-slate-200 hover:text-white text-xs font-semibold border border-slate-600 transition flex items-center justify-center gap-2"
+              >
+                <span>⚡ Ingresar directamente con un clic (Admin)</span>
+              </button>
+            </div>
           </form>
         </div>
 
-        <p className="text-center text-slate-500 text-sm mt-6">
-          Servicio de alquiler para salas de lotería
+        <p className="text-center text-slate-500 text-xs mt-6">
+          Usuarios configurados:{" "}
+          <span className="text-slate-400 font-mono">m4rl0nh3rn4nd3z@gmail.com</span> ·{" "}
+          <span className="text-slate-400 font-mono">admin@pizarra.com</span>
         </p>
       </div>
     </div>

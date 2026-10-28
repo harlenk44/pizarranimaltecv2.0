@@ -55,7 +55,6 @@ export function getAnimalName(num: number): string {
 }
 
 // Generate a default animal list for games that don't have custom entries.
-// Uses the standard list for 0-37, then cycles with "(NN)" suffix for higher numbers.
 export function generateDefaultAnimals(count: number): Animal[] {
   const result: Animal[] = [];
   for (let i = 0; i < count; i++) {
@@ -69,47 +68,257 @@ export function generateDefaultAnimals(count: number): Animal[] {
   return result;
 }
 
-export function getEmojiForNumber(num: number): string {
-  const emojis: Record<number, string> = {
-    0: "🐬",
-    1: "🐏",
-    2: "🐂",
-    3: "🐛",
-    4: "🦂",
-    5: "🦁",
-    6: "🐸",
-    7: "🦜",
-    8: "🐭",
-    9: "🦅",
-    10: "🐯",
-    11: "🐱",
-    12: "🐴",
-    13: "🐵",
-    14: "🕊️",
-    15: "🦊",
-    16: "🐻",
-    17: "🦃",
-    18: "🐴",
-    19: "🐐",
-    20: "🐖",
-    21: "🐓",
-    22: "🐪",
-    23: "🦓",
-    24: "🦎",
-    25: "🐔",
-    26: "🐮",
-    27: "🐶",
-    28: "🦅",
-    29: "🐘",
-    30: "🐍",
-    31: "🦫",
-    32: "🐿️",
-    33: "🐟",
-    34: "🦌",
-    35: "🦒",
-    36: "🐖",
-    37: "🐋",
-  };
-  if (emojis[num] !== undefined) return emojis[num];
-  return emojis[num % 38] ?? "🎯";
+/** Complete Venezuelan lottery animal emoji dictionary by official number (0 to 100) */
+export const ANIMAL_EMOJIS_BY_NUMBER: Record<number, string> = {
+  0: "🐬", // Delfín
+  1: "🐏", // Carnero
+  2: "🐂", // Toro
+  3: "🐛", // Ciempiés
+  4: "🦂", // Alacrán
+  5: "🦁", // León
+  6: "🐸", // Rana
+  7: "🦜", // Perico
+  8: "🐭", // Ratón
+  9: "🦅", // Águila
+  10: "🐯", // Tigre
+  11: "🐱", // Gato
+  12: "🐴", // Caballo
+  13: "🐵", // Mono
+  14: "🕊️", // Paloma
+  15: "🦊", // Zorro
+  16: "🐻", // Oso
+  17: "🦃", // Pavo
+  18: "🫏", // Burro
+  19: "🐐", // Chivo / Cabro
+  20: "🐖", // Cochino
+  21: "🐓", // Gallo
+  22: "🐪", // Camello
+  23: "🦓", // Cebra
+  24: "🦎", // Iguana
+  25: "🐔", // Gallina
+  26: "🐮", // Vaca
+  27: "🐶", // Perro
+  28: "🦅", // Zamuro
+  29: "🐘", // Elefante
+  30: "🐊", // Caimán
+  31: "🦫", // Lapa
+  32: "🐿️", // Ardilla
+  33: "🐟", // Pescado
+  34: "🦌", // Venado
+  35: "🦒", // Jirafa
+  36: "🐍", // Culebra
+  37: "🐢", // Tortuga
+  38: "🦬", // Búfalo
+  39: "🦉", // Lechuza
+  40: "🐝", // Avispa
+  41: "🦘", // Canguro
+  42: "🦜", // Tucán
+  43: "🦋", // Mariposa
+  44: "🦫", // Chigüire
+  45: "🦩", // Garza
+  46: "🐆", // Puma
+  47: "🦚", // Pavo Real
+  48: "🦔", // Puercoespín
+  49: "🦥", // Pereza
+  50: "🐤", // Canario
+  51: "🦤", // Pelícano (¡Pelícano, NUNCA mono!)
+  52: "🐙", // Pulpo
+  53: "🐌", // Caracol
+  54: "🦗", // Grillo
+  55: "🦡", // Oso Hormiguero
+  56: "🦈", // Tiburón
+  57: "🦆", // Pato
+  58: "🐜", // Hormiga
+  59: "🐆", // Pantera
+  60: "🦎", // Camaleón
+  61: "🐼", // Panda
+  62: "🦔", // Cachicamo
+  63: "🦀", // Cangrejo
+  64: "🦅", // Gavilán
+  65: "🕷️", // Araña
+  66: "🐺", // Lobo
+  67: "🦤", // Avestruz
+  68: "🐆", // Jaguar
+  69: "🐰", // Conejo
+  70: "🦬", // Bisonte
+  71: "🦜", // Guacamaya
+  72: "🦍", // Gorila
+  73: "🦛", // Hipopótamo
+  74: "🐤", // Turpial
+  75: "🦇", // Guácharo
+  76: "🐋", // Ballena
+  77: "🐧", // Pingüino
+  78: "🦌", // Antílope
+  79: "🦑", // Calamar
+  80: "🦇", // Murciélago
+  81: "🐦‍⬛", // Cuervo
+  82: "🪳", // Cucaracha
+  83: "🦉", // Búho
+  84: "🦐", // Camarón
+  85: "🐹", // Hámster
+  86: "🐂", // Buey
+  87: "🐐", // Cabra
+  88: "🐡", // Erizo de Mar
+  89: "🐍", // Anguila
+  90: "🦡", // Hurón
+  91: "🐢", // Morrocoy
+  92: "🦢", // Cisne
+  93: "🕊️", // Gaviota
+  94: "🦃", // Paujil
+  95: "🪲", // Escarabajo
+  96: "🐡", // Caballito de Mar
+  97: "🦜", // Loro
+  98: "🐊", // Cocodrilo
+  99: "🦅", // Guacharito / Halcón
+  100: "🐋", // Ballena
+};
+
+/** Accurate emoji lookup by animal name (accents and case insensitive) */
+export const ANIMAL_EMOJIS_BY_NAME: Record<string, string> = {
+  DELFIN: "🐬",
+  CARNERO: "🐏",
+  TORO: "🐂",
+  CIEMPIES: "🐛",
+  CIENPIES: "🐛",
+  ALACRAN: "🦂",
+  LEON: "🦁",
+  RANA: "🐸",
+  PERICO: "🦜",
+  RATON: "🐭",
+  AGUILA: "🦅",
+  TIGRE: "🐯",
+  GATO: "🐱",
+  CABALLO: "🐴",
+  MONO: "🐵",
+  PALOMA: "🕊️",
+  ZORRO: "🦊",
+  OSO: "🐻",
+  PAVO: "🦃",
+  BURRO: "🫏",
+  CHIVO: "🐐",
+  CABRO: "🐐",
+  COCHINO: "🐖",
+  GALLO: "🐓",
+  CAMELLO: "🐪",
+  CEBRA: "🦓",
+  IGUANA: "🦎",
+  GALLINA: "🐔",
+  VACA: "🐮",
+  PERRO: "🐶",
+  ZAMURO: "🦅",
+  ELEFANTE: "🐘",
+  CAIMAN: "🐊",
+  LAPA: "🦫",
+  ARDILLA: "🐿️",
+  PESCADO: "🐟",
+  VENADO: "🦌",
+  JIRAFA: "🦒",
+  CULEBRA: "🐍",
+  COCHINERA: "🐖",
+  TORTUGA: "🐢",
+  BALLENA: "🐋",
+  BUFALO: "🦬",
+  LECHUZA: "🦉",
+  AVISPA: "🐝",
+  CANGURO: "🦘",
+  TUCAN: "🦜",
+  MARIPOSA: "🦋",
+  CHIGUIRE: "🦫",
+  CHUGUIRE: "🦫",
+  GARZA: "🦩",
+  PUMA: "🐆",
+  "PAVO REAL": "🦚",
+  PAVOREAL: "🦚",
+  PUERCOESPIN: "🦔",
+  PEREZA: "🦥",
+  CANARIO: "🐤",
+  PELICANO: "🦤",
+  PULPO: "🐙",
+  CARACOL: "🐌",
+  GRILLO: "🦗",
+  "OSO HORMIGUERO": "🦡",
+  OSOHORMIGUERO: "🦡",
+  TIBURON: "🦈",
+  PATO: "🦆",
+  HORMIGA: "🐜",
+  PANTERA: "🐆",
+  CAMALEON: "🦎",
+  PANDA: "🐼",
+  CACHICAMO: "🦔",
+  CANGREJO: "🦀",
+  GAVILAN: "🦅",
+  ARANA: "🕷️",
+  LOBO: "🐺",
+  AVESTRUZ: "🦤",
+  JAGUAR: "🐆",
+  CONEJO: "🐰",
+  BISONTE: "🦬",
+  GUACAMAYA: "🦜",
+  GORILA: "🦍",
+  HIPOPOTAMO: "🦛",
+  TURPIAL: "🐤",
+  GUACHARO: "🦇",
+  RINOCERONTE: "🦏",
+  PINGUINO: "🐧",
+  ANTILOPE: "🦌",
+  CALAMAR: "🦑",
+  MURCIELAGO: "🦇",
+  CUERVO: "🐦‍⬛",
+  CUCARACHA: "🪳",
+  BUHO: "🦉",
+  CAMARON: "🦐",
+  HAMSTER: "🐹",
+  BUEY: "🐂",
+  CABRA: "🐐",
+  "ERIZO DE MAR": "🐡",
+  ERIZO: "🐡",
+  ANGUILA: "🐍",
+  HURON: "🦡",
+  MORROCOY: "🐢",
+  CISNE: "🦢",
+  GAVIOTA: "🕊️",
+  PAUJIL: "🦃",
+  ESCARABAJO: "🪲",
+  "CABALLITO DE MAR": "🐡",
+  CABALLITO: "🐡",
+  LORO: "🦜",
+  COCODRILO: "🐊",
+  GUACHARITO: "🦅",
+  HALCON: "🦅",
+};
+
+function normalizeKey(str: string): string {
+  return str
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9 ]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Returns the exact emoji for an animal by name and/or number.
+ * Priority:
+ * 1. Matching by animal name (guarantees Pelícano is always a bird, Mono is a monkey).
+ * 2. Matching by number from official 0-100 animal table.
+ * 3. Default lottery icon "🎯". (NEVER modulo % 38).
+ */
+export function getEmojiForNumber(num: number, name?: string): string {
+  if (name) {
+    const key = normalizeKey(name);
+    if (ANIMAL_EMOJIS_BY_NAME[key]) {
+      return ANIMAL_EMOJIS_BY_NAME[key]!;
+    }
+  }
+
+  if (ANIMAL_EMOJIS_BY_NUMBER[num] !== undefined) {
+    return ANIMAL_EMOJIS_BY_NUMBER[num]!;
+  }
+
+  return "🎯";
+}
+
+export function getEmojiForAnimal(name?: string, num?: number): string {
+  return getEmojiForNumber(num ?? -1, name);
 }

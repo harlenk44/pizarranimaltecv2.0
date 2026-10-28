@@ -1,12 +1,23 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/lib/supabase";
 import { getEmojiForNumber } from "@/lib/animals";
 import type { Game, Result, GameWithResults, AnimalImage, AnimalEntry } from "@/lib/types";
-import { Clock, LogOut, Settings, RefreshCw, CalendarDays } from "lucide-react";
+import {
+  Clock,
+  LogOut,
+  Settings,
+  RefreshCw,
+  CalendarDays,
+  Volume2,
+  VolumeX,
+  Sliders,
+} from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { useBoardSettings } from "@/context/BoardSettingsContext";
 import WeeklyBoard from "@/components/WeeklyBoard";
 import AdBanner from "@/components/AdBanner";
+import ResultAlertModal, { type ResultAlertItem } from "@/components/ResultAlertModal";
+import VoiceSettingsModal from "@/components/VoiceSettingsModal";
 import { lotteryDate, LOTTERY_TIMEZONE } from "@/lib/lottery-date";
 
 interface BoardPageProps {
@@ -28,8 +39,8 @@ function formatTime(timeStr: string): string {
   return `${displayHour}:${m} ${ampm}`;
 }
 
-function getAnimalEmoji(num: number): string {
-  return getEmojiForNumber(num);
+function getAnimalEmoji(num: number, name?: string): string {
+  return getEmojiForNumber(num, name);
 }
 
 export default function BoardPage({ onAdminClick }: BoardPageProps) {
@@ -44,6 +55,24 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [clock, setClock] = useState(new Date());
   const [showWeekly, setShowWeekly] = useState(false);
+  const [showVoiceSettings, setShowVoiceSettings] = useState(false);
+  const [alertQueue, setAlertQueue] = useState<ResultAlertItem[]>([]);
+  const [voiceEnabled, setVoiceEnabled] = useState<boolean>(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("lottery_voice_enabled");
+      return saved !== null ? saved === "true" : true;
+    }
+    return true;
+  });
+  const isInitialLoadRef = useRef(true);
+  const prevSignaturesRef = useRef<Map<string, string>>(new Map());
+
+  const handleVoiceToggle = (enabled: boolean) => {
+    setVoiceEnabled(enabled);
+    if (typeof window !== "undefined") {
+      localStorage.setItem("lottery_voice_enabled", String(enabled));
+    }
+  };
 
   useEffect(() => {
     if (settings.start_view === "weekly") setShowWeekly(true);
@@ -87,11 +116,6 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     ]);
 
     const map: Record<string, Result[]> = {};
-    for (const r of resultsPromises) {
-      map[r.gameId] = r.results;
-    }
-    setResultsMap(map);
-
     const imgMap: AnimalImageMap = {};
     for (const img of (imagesData.data ?? []) as AnimalImage[]) {
       imgMap[`${img.game_id}:${img.animal_number}`] = img.image_url;
@@ -106,6 +130,52 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     }
     setAnimalNames(nameMap);
     setAnimalLabels(labelMap);
+
+    const newAlerts: ResultAlertItem[] = [];
+
+    for (const r of resultsPromises) {
+      map[r.gameId] = r.results;
+      const gameObj = (gamesData as Game[]).find((g) => g.id === r.gameId);
+      if (!gameObj) continue;
+
+      for (const res of r.results) {
+        const sig = `${res.animal_number}:${res.animal_name}:${res.draw_time}`;
+        const prevSig = prevSignaturesRef.current.get(res.id);
+
+        if (!isInitialLoadRef.current) {
+          if (prevSig === undefined || prevSig !== sig) {
+            const displayName = nameMap[`${res.game_id}:${res.animal_number}`] ?? res.animal_name;
+            const displayLabel =
+              labelMap[`${res.game_id}:${res.animal_number}`] ??
+              String(res.animal_number).padStart(2, "0");
+            const imgUrl = imgMap[`${res.game_id}:${res.animal_number}`];
+
+            newAlerts.push({
+              id: `${res.id}-${Date.now()}`,
+              gameId: gameObj.id,
+              gameName: gameObj.name,
+              gameColor: gameObj.color,
+              gameLogoUrl: gameObj.logo_url,
+              drawDate: res.draw_date,
+              drawTime: res.draw_time,
+              animalNumber: res.animal_number,
+              animalName: displayName,
+              animalLabel: displayLabel,
+              animalImageUrl: imgUrl,
+              animalEmoji: getAnimalEmoji(res.animal_number, displayName),
+            });
+          }
+        }
+        prevSignaturesRef.current.set(res.id, sig);
+      }
+    }
+    setResultsMap(map);
+
+    if (isInitialLoadRef.current) {
+      isInitialLoadRef.current = false;
+    } else if (newAlerts.length > 0) {
+      setAlertQueue((prev) => [...prev, ...newAlerts]);
+    }
 
     setLastUpdate(new Date());
     setLoading(false);
@@ -143,13 +213,76 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       })
       .catch(() => {});
 
+    // Listen to real-time result changes
+    const channel = supabase
+      .channel("public:results")
+      .on("postgres_changes", { event: "*", schema: "public", table: "results" }, () => {
+        fetchAll();
+      })
+      .subscribe();
+
     const refreshInterval = setInterval(fetchAll, 30000);
     const clockInterval = setInterval(() => setClock(new Date()), 1000);
     return () => {
+      supabase.removeChannel(channel);
       clearInterval(refreshInterval);
       clearInterval(clockInterval);
     };
   }, [fetchAll]);
+
+  const handleTestAlert = () => {
+    const allResults: Array<{ res: Result; game: Game }> = [];
+    for (const g of games) {
+      const gResults = resultsMap[g.id] ?? [];
+      for (const r of gResults) {
+        allResults.push({ res: r, game: g });
+      }
+    }
+
+    const sample = allResults.length > 0 ? allResults[allResults.length - 1] : null;
+    if (sample) {
+      const g = sample.game;
+      const r = sample.res;
+      const displayName = animalNames[`${g.id}:${r.animal_number}`] ?? r.animal_name;
+      const displayLabel =
+        animalLabels[`${g.id}:${r.animal_number}`] ?? String(r.animal_number).padStart(2, "0");
+      const imgUrl = animalImages[`${g.id}:${r.animal_number}`];
+      setAlertQueue([
+        {
+          id: `test-${Date.now()}`,
+          gameId: g.id,
+          gameName: g.name,
+          gameColor: g.color,
+          gameLogoUrl: g.logo_url,
+          drawDate: r.draw_date,
+          drawTime: r.draw_time,
+          animalNumber: r.animal_number,
+          animalName: displayName,
+          animalLabel: displayLabel,
+          animalImageUrl: imgUrl,
+          animalEmoji: getAnimalEmoji(r.animal_number, displayName),
+        },
+      ]);
+    } else if (games.length > 0) {
+      const g = games[0]!;
+      setAlertQueue([
+        {
+          id: `test-${Date.now()}`,
+          gameId: g.id,
+          gameName: g.name,
+          gameColor: g.color,
+          gameLogoUrl: g.logo_url,
+          drawDate: lotteryDate(),
+          drawTime: "10:00:00",
+          animalNumber: 4,
+          animalName: "Alacrán",
+          animalLabel: "04",
+          animalImageUrl: null,
+          animalEmoji: getAnimalEmoji(4, "Alacrán"),
+        },
+      ]);
+    }
+  };
 
   const gameCards: GameWithResults[] = games.map((g) => ({
     ...g,
@@ -157,7 +290,19 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
   }));
 
   if (showWeekly) {
-    return <WeeklyBoard onClose={() => setShowWeekly(false)} />;
+    return (
+      <>
+        <WeeklyBoard onClose={() => setShowWeekly(false)} />
+        {alertQueue.length > 0 && (
+          <ResultAlertModal
+            alerts={alertQueue}
+            voiceEnabled={voiceEnabled}
+            onToggleVoice={handleVoiceToggle}
+            onClose={() => setAlertQueue([])}
+          />
+        )}
+      </>
+    );
   }
 
   return (
@@ -175,7 +320,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
             <span className="text-xl">🎯</span>
           </div>
           <div>
-            <h1 className="text-xl font-bold tracking-tight">Pizarra de Animalitos</h1>
+            <h1 className="text-xl font-bold tracking-tight">pizarraianimaltec</h1>
             <p className="text-xs text-slate-400">Resultados en vivo</p>
           </div>
         </div>
@@ -204,6 +349,37 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
               Actualizado:{" "}
               {lastUpdate.toLocaleTimeString("es-VE", { hour: "2-digit", minute: "2-digit" })}
             </span>
+            <button
+              onClick={handleTestAlert}
+              className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 transition flex items-center gap-1.5 text-xs text-slate-300"
+              title="Probar alerta visual y de voz"
+            >
+              <Volume2 className="w-4 h-4 text-emerald-400" />
+              <span className="hidden md:inline">Probar voz</span>
+            </button>
+            <button
+              onClick={() => setShowVoiceSettings(true)}
+              className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 transition flex items-center gap-1.5 text-xs text-slate-300"
+              title="Configurar voz natural (seleccionar voz humana, velocidad y tono)"
+            >
+              <Sliders className="w-4 h-4 text-amber-400" />
+              <span className="hidden lg:inline">Ajustar voz</span>
+            </button>
+            <button
+              onClick={() => handleVoiceToggle(!voiceEnabled)}
+              className={`p-2 rounded-lg transition ${
+                voiceEnabled
+                  ? "bg-blue-600/20 text-blue-400 hover:bg-blue-600/30"
+                  : "bg-slate-800 text-slate-500 hover:bg-slate-700"
+              }`}
+              title={
+                voiceEnabled
+                  ? "Voz activada (clic para silenciar)"
+                  : "Voz silenciada (clic para activar)"
+              }
+            >
+              {voiceEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+            </button>
             <button
               onClick={() => setShowWeekly(true)}
               className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 transition"
@@ -271,8 +447,44 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           {profile?.email} · {profile?.role === "admin" ? "Administrador" : "Visualizador"}
         </p>
       </footer>
+
+      {/* Real-time result announcement modal with speech synthesis */}
+      {alertQueue.length > 0 && (
+        <ResultAlertModal
+          alerts={alertQueue}
+          voiceEnabled={voiceEnabled}
+          onToggleVoice={handleVoiceToggle}
+          onClose={() => setAlertQueue([])}
+        />
+      )}
+
+      {/* Voice configuration modal */}
+      <VoiceSettingsModal isOpen={showVoiceSettings} onClose={() => setShowVoiceSettings(false)} />
     </div>
   );
+}
+
+function AnimalAvatar({
+  imageUrl,
+  name,
+  number,
+}: {
+  imageUrl?: string;
+  name: string;
+  number: number;
+}) {
+  const [hasError, setHasError] = useState(false);
+  if (imageUrl && !hasError) {
+    return (
+      <img
+        src={imageUrl}
+        alt={name}
+        onError={() => setHasError(true)}
+        className="display-animal-image object-contain rounded"
+      />
+    );
+  }
+  return <span className="display-animal-emoji">{getAnimalEmoji(number, name)}</span>;
 }
 
 function GameCard({
@@ -340,15 +552,7 @@ function GameCard({
 
                 {/* Animal image/emoji + number + name */}
                 <div className="display-animal">
-                  {imgUrl ? (
-                    <img
-                      src={imgUrl}
-                      alt={displayName}
-                      className="display-animal-image object-contain rounded"
-                    />
-                  ) : (
-                    <span className="display-animal-emoji">{getAnimalEmoji(r.animal_number)}</span>
-                  )}
+                  <AnimalAvatar imageUrl={imgUrl} name={displayName} number={r.animal_number} />
                   <span className="display-number font-black tabular-nums">{displayLabel}</span>
                   <span className="display-name font-bold">{displayName}</span>
                 </div>

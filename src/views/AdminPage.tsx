@@ -1,6 +1,11 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { supabase, getMediaUrl } from "@/lib/supabase";
-import { ANIMALS as DEFAULT_ANIMALS, generateDefaultAnimals, getAnimalName } from "@/lib/animals";
+import {
+  ANIMALS as DEFAULT_ANIMALS,
+  generateDefaultAnimals,
+  getAnimalName,
+  getEmojiForNumber,
+} from "@/lib/animals";
 import type {
   Game,
   Result,
@@ -1005,10 +1010,26 @@ function AnimalsManager({ games }: { games: Game[] }) {
     const base = fileName.replace(/\.[^.]+$/, "");
     const normalizedFile = normalizeText(base);
 
-    // 1. Try matching by animal name first (handles Delfín vs Ballena conflict)
+    // Special check for "00" or "ballena"
+    if (base === "00" || normalizedFile === "00" || normalizedFile.includes("ballena")) {
+      const ballena = animalList.find(
+        (a) => a.label === "00" || normalizeText(a.name) === "ballena",
+      );
+      if (ballena) return ballena.number;
+    }
+
+    // Special check for "0" or "delfin"
+    if (base === "0" || normalizedFile === "0" || normalizedFile.includes("delfin")) {
+      const delfin = animalList.find(
+        (a) => a.label === "0" || a.number === 0 || normalizeText(a.name) === "delfin",
+      );
+      if (delfin) return delfin.number;
+    }
+
+    // 1. Try matching by animal name first
     for (const animal of animalList) {
       const normalizedAnimal = normalizeText(animal.name);
-      if (normalizedAnimal.length >= 4 && normalizedFile.includes(normalizedAnimal)) {
+      if (normalizedAnimal.length >= 3 && normalizedFile.includes(normalizedAnimal)) {
         return animal.number;
       }
     }
@@ -1057,31 +1078,52 @@ function AnimalsManager({ games }: { games: Game[] }) {
   async function handleUpload(animalNumber: number, file: File) {
     if (!selectedGame) return;
     if (!bulkUploading) setUploadingFor(animalNumber);
-    const ext = file.name.split(".").pop()?.toLowerCase() ?? "png";
-    const fileName = `${selectedGame}/animal-${animalNumber}.${ext}`;
+    try {
+      const ext = file.name.split(".").pop()?.toLowerCase() ?? "png";
+      const fileName = `${selectedGame}/animal-${animalNumber}.${ext}`;
 
-    const { error: uploadError } = await supabase.storage
-      .from("animal-images")
-      .upload(fileName, file, { upsert: true });
+      // Convert file directly to DataURL for 100% reliable local preview and rendering
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
 
-    if (uploadError) {
-      setUploadingFor(null);
-      return;
+      await supabase.storage.from("animal-images").upload(fileName, dataUrl, { upsert: true });
+
+      const imageUrl = await getMediaUrl("animal-images", fileName).catch(() => dataUrl);
+      const finalUrl = imageUrl || dataUrl;
+
+      await supabase.from("animal_images").upsert(
+        {
+          game_id: selectedGame,
+          animal_number: animalNumber,
+          image_url: finalUrl,
+        },
+        { onConflict: "game_id,animal_number" },
+      );
+
+      setImages((prev) => ({ ...prev, [animalNumber]: finalUrl }));
+    } catch (err) {
+      console.error("Error al subir imagen:", err);
+    } finally {
+      if (!bulkUploading) setUploadingFor(null);
     }
+  }
 
-    const imageUrl = await getMediaUrl("animal-images", fileName);
-
+  async function handleSetImageUrl(animalNumber: number, url: string) {
+    if (!selectedGame || !url.trim()) return;
+    const finalUrl = url.trim();
     await supabase.from("animal_images").upsert(
       {
         game_id: selectedGame,
         animal_number: animalNumber,
-        image_url: imageUrl,
+        image_url: finalUrl,
       },
       { onConflict: "game_id,animal_number" },
     );
-
-    setImages((prev) => ({ ...prev, [animalNumber]: imageUrl }));
-    if (!bulkUploading) setUploadingFor(null);
+    setImages((prev) => ({ ...prev, [animalNumber]: finalUrl }));
   }
 
   async function handleDeleteImage(animalNumber: number) {
@@ -1349,16 +1391,27 @@ function AnimalsManager({ games }: { games: Game[] }) {
                     {animalDisplayLabel(animal)} · {animal.name}
                   </div>
 
-                  <div className="w-20 h-20 rounded-lg bg-slate-800 flex items-center justify-center overflow-hidden">
-                    {imgUrl ? (
+                  <div className="w-20 h-20 rounded-lg bg-slate-800 flex items-center justify-center overflow-hidden relative">
+                    {imgUrl && (
                       <img
                         src={imgUrl}
                         alt={animal.name}
+                        onError={(e) => {
+                          const target = e.currentTarget;
+                          target.style.display = "none";
+                          const fallback = target.nextElementSibling as HTMLElement;
+                          if (fallback) fallback.style.display = "flex";
+                        }}
                         className="w-full h-full object-contain"
                       />
-                    ) : (
-                      <PawPrint className="w-8 h-8 text-slate-600" />
                     )}
+                    <span
+                      className={`text-3xl select-none items-center justify-center ${
+                        imgUrl ? "hidden" : "flex"
+                      }`}
+                    >
+                      {getEmojiForNumber(animal.number, animal.name)}
+                    </span>
                   </div>
 
                   <input
@@ -1374,23 +1427,39 @@ function AnimalsManager({ games }: { games: Game[] }) {
                     }}
                   />
 
-                  <div className="flex gap-2">
+                  <div className="flex items-center gap-1.5 flex-wrap justify-center">
                     <button
                       onClick={() => fileRefs.current[animal.number]?.click()}
                       disabled={uploadingFor === animal.number}
-                      className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-xs font-medium flex items-center gap-1.5 transition"
+                      className="px-2.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-xs font-medium flex items-center gap-1 transition"
+                      title="Subir archivo desde este dispositivo"
                     >
                       {uploadingFor === animal.number ? (
                         <Loader2 className="w-3.5 h-3.5 animate-spin" />
                       ) : (
                         <Upload className="w-3.5 h-3.5" />
                       )}
-                      {imgUrl ? "Cambiar" : "Subir"}
+                      <span>{imgUrl ? "Cambiar" : "Subir"}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const url = window.prompt(
+                          `Pegar URL directa de imagen para ${animal.name}:`,
+                          imgUrl || "",
+                        );
+                        if (url) handleSetImageUrl(animal.number, url);
+                      }}
+                      className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition"
+                      title="Pegar enlace URL directo"
+                    >
+                      <Link2 className="w-3.5 h-3.5" />
                     </button>
                     {imgUrl && (
                       <button
                         onClick={() => handleDeleteImage(animal.number)}
                         className="p-1.5 rounded-lg text-red-400 hover:bg-red-950/40 transition"
+                        title="Eliminar imagen"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>

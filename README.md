@@ -1,8 +1,6 @@
-# Pixel Perfect Replica
+# pizarraianimaltec
 
-Implement exactly the screenshot and nothing else
-
-This project was built with [Lovable](https://lovable.dev).
+Tablero y resultados de loterías de animalitos en tiempo real (Lotto Activo, La Granjita, etc.) con vistas de tableros diarios, semanales, panel de administración e ingesta automática.
 
 ## Build with Lovable
 
