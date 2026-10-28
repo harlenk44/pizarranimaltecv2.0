@@ -1482,6 +1482,11 @@ function SubscriptionsManager() {
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState<string | null>(null);
   const [filter, setFilter] = useState<"all" | "active" | "inactive">("all");
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [newEmail, setNewEmail] = useState("");
+  const [newDays, setNewDays] = useState(30);
+  const [creatingClient, setCreatingClient] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
 
   const fetchUsers = useCallback(async () => {
     setLoading(true);
@@ -1517,29 +1522,29 @@ function SubscriptionsManager() {
   function statusBadge(p: Profile) {
     if (p.role === "admin") {
       return (
-        <span className="text-xs px-2 py-1 rounded-full bg-amber-950/40 text-amber-300 border border-amber-800/50 flex items-center gap-1 w-fit">
-          <Crown className="w-3 h-3" /> Admin
+        <span className="text-xs px-2.5 py-1 rounded-full bg-amber-950/40 text-amber-300 border border-amber-800/50 flex items-center gap-1 w-fit font-medium">
+          <Crown className="w-3.5 h-3.5" /> Administrador
         </span>
       );
     }
     const active = subscriptionActive(p);
     const label =
       p.subscription_status === "trial"
-        ? "Prueba"
+        ? "Prueba Activa"
         : active
-          ? "Activa"
+          ? "Alquiler Activo"
           : p.subscription_status === "expired"
-            ? "Expirada"
-            : "Inactiva";
+            ? "Expirado"
+            : "Inactivo / Suspendido";
     return (
       <span
-        className={`text-xs px-2 py-1 rounded-full flex items-center gap-1 w-fit ${
+        className={`text-xs px-2.5 py-1 rounded-full flex items-center gap-1.5 w-fit font-medium ${
           active
             ? "bg-green-950/40 text-green-400 border border-green-800/50"
-            : "bg-slate-800 text-slate-500 border border-slate-700"
+            : "bg-red-950/40 text-red-400 border border-red-800/50"
         }`}
       >
-        {active ? <Check className="w-3 h-3" /> : <Ban className="w-3 h-3" />}
+        {active ? <Check className="w-3.5 h-3.5" /> : <Ban className="w-3.5 h-3.5" />}
         {label}
       </span>
     );
@@ -1553,9 +1558,13 @@ function SubscriptionsManager() {
     setUpdating(user.id);
     let expiresAt: string | null = null;
     if (days) {
-      const d = new Date();
-      d.setDate(d.getDate() + days);
-      expiresAt = d.toISOString();
+      // If extending an already active subscription, add to current expiry
+      const baseDate =
+        user.subscription_expires_at && new Date(user.subscription_expires_at) > new Date()
+          ? new Date(user.subscription_expires_at)
+          : new Date();
+      baseDate.setDate(baseDate.getDate() + days);
+      expiresAt = baseDate.toISOString();
     }
     const { error } = await supabase.rpc("set_subscription_status", {
       target_user_id: user.id,
@@ -1574,6 +1583,35 @@ function SubscriptionsManager() {
     }
   }
 
+  async function handleCreateClient(e: React.FormEvent) {
+    e.preventDefault();
+    if (!newEmail.trim()) return;
+    setCreatingClient(true);
+    setCreateError(null);
+    const { error } = await supabase.rpc("create_client_user", {
+      email: newEmail.trim().toLowerCase(),
+      days: Number(newDays) || 30,
+    });
+    setCreatingClient(false);
+    if (error) {
+      setCreateError(error.message);
+    } else {
+      setNewEmail("");
+      setNewDays(30);
+      setShowAddModal(false);
+      fetchUsers();
+    }
+  }
+
+  async function handleDeleteClient(userId: string, email: string) {
+    if (!confirm(`¿Eliminar al cliente ${email}? La pantalla o dispositivo perderá acceso.`))
+      return;
+    setUpdating(userId);
+    await supabase.rpc("delete_client_user", { target_user_id: userId });
+    setUpdating(null);
+    fetchUsers();
+  }
+
   const filtered = users.filter((u) => {
     if (u.role === "admin") return filter === "all";
     if (filter === "active") return subscriptionActive(u);
@@ -1583,38 +1621,125 @@ function SubscriptionsManager() {
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
-      <div className="flex items-center justify-between flex-wrap gap-3">
+      <div className="flex items-center justify-between flex-wrap gap-4">
         <div>
-          <h2 className="text-lg font-semibold flex items-center gap-2">
-            <Users className="w-5 h-5 text-blue-500" /> Usuarios y Suscripciones
+          <h2 className="text-xl font-bold flex items-center gap-2">
+            <Users className="w-5 h-5 text-blue-500" /> Control de Clientes y Alquiler
           </h2>
           <p className="text-sm text-slate-400 mt-1">
-            Activa, desactiva o concede días de prueba a cada usuario.
+            Administra las cuentas de las pantallas y televisores de tus clientes. Solo los usuarios
+            con alquiler activo pueden ver la pizarra.
           </p>
         </div>
-        <div className="flex gap-2">
-          {(["all", "active", "inactive"] as const).map((f) => (
-            <button
-              key={f}
-              onClick={() => setFilter(f)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
-                filter === f
-                  ? "bg-blue-600 text-white"
-                  : "bg-slate-800 text-slate-400 hover:text-white"
-              }`}
-            >
-              {f === "all" ? "Todos" : f === "active" ? "Activos" : "Inactivos"}
-            </button>
-          ))}
+        <div className="flex items-center gap-3">
+          <Button
+            onClick={() => setShowAddModal(true)}
+            className="bg-blue-600 hover:bg-blue-500 text-white font-medium flex items-center gap-2 shadow-lg shadow-blue-600/20"
+          >
+            <Plus className="w-4 h-4" /> Nuevo Cliente / Pantalla
+          </Button>
+          <div className="flex gap-1.5 bg-slate-900 p-1 rounded-xl border border-slate-800">
+            {(["all", "active", "inactive"] as const).map((f) => (
+              <button
+                key={f}
+                onClick={() => setFilter(f)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+                  filter === f ? "bg-blue-600 text-white shadow" : "text-slate-400 hover:text-white"
+                }`}
+              >
+                {f === "all" ? "Todos" : f === "active" ? "Alquilados" : "Inactivos"}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
+
+      {/* Modal para crear cliente */}
+      {showAddModal && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-5">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                <Users className="w-5 h-5 text-blue-500" /> Registrar Cliente para TV
+              </h3>
+              <button
+                onClick={() => setShowAddModal(false)}
+                className="p-1 rounded-lg text-slate-400 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateClient} className="space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                  Correo Electrónico o Usuario del Cliente
+                </label>
+                <input
+                  type="email"
+                  required
+                  value={newEmail}
+                  onChange={(e) => setNewEmail(e.target.value)}
+                  placeholder="ejemplo: agencia-centro@gmail.com"
+                  className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm focus:outline-none focus:border-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                  Tiempo de Alquiler Inicial
+                </label>
+                <select
+                  value={newDays}
+                  onChange={(e) => setNewDays(Number(e.target.value))}
+                  className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm focus:outline-none focus:border-blue-500"
+                >
+                  <option value={7}>Prueba (7 días)</option>
+                  <option value={15}>Medio mes (15 días)</option>
+                  <option value={30}>1 Mes (30 días)</option>
+                  <option value={60}>2 Meses (60 días)</option>
+                  <option value={90}>3 Meses (90 días)</option>
+                  <option value={180}>6 Meses (180 días)</option>
+                  <option value={365}>1 Año (365 días)</option>
+                </select>
+              </div>
+
+              {createError && (
+                <div className="text-xs text-red-400 bg-red-950/40 border border-red-800/50 rounded-lg p-3">
+                  {createError}
+                </div>
+              )}
+
+              <div className="flex gap-3 pt-2">
+                <Button
+                  type="submit"
+                  disabled={creatingClient}
+                  className="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-medium"
+                >
+                  {creatingClient && <Loader2 className="w-4 h-4 animate-spin mr-2" />}
+                  Crear y Activar Alquiler
+                </Button>
+                <button
+                  type="button"
+                  onClick={() => setShowAddModal(false)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl"
+                >
+                  Cancelar
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {loading ? (
         <div className="flex items-center justify-center py-12 text-slate-400">
           <Loader2 className="w-6 h-6 animate-spin" /> <span className="ml-2">Cargando...</span>
         </div>
       ) : filtered.length === 0 ? (
-        <div className="text-slate-500 text-sm py-12 text-center">No hay usuarios que mostrar.</div>
+        <div className="text-slate-500 text-sm py-12 text-center bg-slate-900/50 rounded-2xl border border-slate-800/50">
+          No hay usuarios que coincidan con el filtro.
+        </div>
       ) : (
         <div className="space-y-3">
           {filtered.map((u) => {
@@ -1628,17 +1753,26 @@ function SubscriptionsManager() {
                   {u.email[0]?.toUpperCase()}
                 </div>
                 <div className="flex-1 min-w-[180px]">
-                  <div className="font-medium text-sm">{u.email}</div>
-                  <div className="flex items-center gap-3 mt-1">
+                  <div className="font-medium text-sm flex items-center gap-2">
+                    <span>{u.email}</span>
+                    {u.role === "admin" && (
+                      <span className="text-[10px] text-amber-400 uppercase tracking-wider font-semibold">
+                        (Super Admin)
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-3 mt-1.5">
                     {statusBadge(u)}
                     {u.subscription_expires_at && u.role !== "admin" && (
-                      <span className="text-xs text-slate-500">
+                      <span className="text-xs text-slate-400">
                         Vence:{" "}
-                        {new Date(u.subscription_expires_at).toLocaleDateString("es-VE", {
-                          day: "2-digit",
-                          month: "short",
-                          year: "numeric",
-                        })}
+                        <strong className="text-white">
+                          {new Date(u.subscription_expires_at).toLocaleDateString("es-VE", {
+                            day: "2-digit",
+                            month: "short",
+                            year: "numeric",
+                          })}
+                        </strong>
                       </span>
                     )}
                   </div>
@@ -1649,31 +1783,50 @@ function SubscriptionsManager() {
                     <button
                       onClick={() => setStatus(u, "active", 30)}
                       disabled={updating === u.id}
-                      className="px-3 py-1.5 rounded-lg bg-green-700 hover:bg-green-600 disabled:opacity-50 text-xs font-medium flex items-center gap-1.5 transition"
+                      className="px-3 py-1.5 rounded-lg bg-green-700 hover:bg-green-600 disabled:opacity-50 text-xs font-medium flex items-center gap-1.5 transition text-white shadow-sm"
+                      title="Sumar 30 días de servicio de alquiler"
                     >
                       {updating === u.id ? (
                         <Loader2 className="w-3.5 h-3.5 animate-spin" />
                       ) : (
                         <Check className="w-3.5 h-3.5" />
                       )}
-                      Activar 30d
+                      +30 días
                     </button>
                     <button
                       onClick={() => setStatus(u, "trial", 7)}
                       disabled={updating === u.id}
-                      className="px-3 py-1.5 rounded-lg bg-blue-700 hover:bg-blue-600 disabled:opacity-50 text-xs font-medium flex items-center gap-1.5 transition"
+                      className="px-3 py-1.5 rounded-lg bg-blue-700 hover:bg-blue-600 disabled:opacity-50 text-xs font-medium flex items-center gap-1.5 transition text-white"
+                      title="Asignar 7 días de prueba gratuita"
                     >
                       <Gift className="w-3.5 h-3.5" /> Prueba 7d
                     </button>
-                    {active && (
+                    {active ? (
                       <button
                         onClick={() => setStatus(u, "inactive", null)}
                         disabled={updating === u.id}
-                        className="px-3 py-1.5 rounded-lg bg-red-950/60 hover:bg-red-900/60 text-red-300 disabled:opacity-50 text-xs font-medium flex items-center gap-1.5 transition border border-red-800/50"
+                        className="px-3 py-1.5 rounded-lg bg-amber-950/60 hover:bg-amber-900/60 text-amber-300 disabled:opacity-50 text-xs font-medium flex items-center gap-1.5 transition border border-amber-800/50"
+                        title="Suspender temporalmente el acceso"
                       >
-                        <Ban className="w-3.5 h-3.5" /> Bloquear
+                        <Ban className="w-3.5 h-3.5" /> Pausar
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => setStatus(u, "active", 30)}
+                        disabled={updating === u.id}
+                        className="px-3 py-1.5 rounded-lg bg-emerald-800 hover:bg-emerald-700 text-white disabled:opacity-50 text-xs font-medium flex items-center gap-1.5 transition"
+                      >
+                        Reactivar
                       </button>
                     )}
+                    <button
+                      onClick={() => handleDeleteClient(u.id, u.email)}
+                      disabled={updating === u.id}
+                      className="p-1.5 rounded-lg bg-slate-800 hover:bg-red-950/60 text-slate-400 hover:text-red-400 transition border border-transparent hover:border-red-800/50"
+                      title="Eliminar cliente"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
                   </div>
                 )}
               </div>

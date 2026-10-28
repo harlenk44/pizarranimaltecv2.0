@@ -1,20 +1,20 @@
 import { createFileRoute, ClientOnly } from "@tanstack/react-router";
-import { lazy, Suspense } from "react";
-
-const LotteryApp = lazy(() => import("@/components/LotteryApp"));
+import LotteryApp from "@/components/LotteryApp";
 
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
-      { title: "Pizarra de Animalitos - Resultados de Lotería" },
+      { title: "pizarraianimaltec - Resultados de Lotería en Vivo" },
       {
         name: "description",
-        content: "Resultados diarios y semanales de loterías de animalitos en una pizarra en vivo.",
+        content:
+          "Resultados diarios y semanales de loterías de animalitos en pizarra en vivo - pizarraianimaltec.",
       },
-      { property: "og:title", content: "Pizarra de Animalitos - Resultados de Lotería" },
+      { property: "og:title", content: "pizarraianimaltec - Resultados de Lotería en Vivo" },
       {
         property: "og:description",
-        content: "Resultados diarios y semanales de loterías de animalitos en una pizarra en vivo.",
+        content:
+          "Resultados diarios y semanales de loterías de animalitos en pizarra en vivo - pizarraianimaltec.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
@@ -30,9 +30,7 @@ function Loading() {
 function Index() {
   return (
     <ClientOnly fallback={<Loading />}>
-      <Suspense fallback={<Loading />}>
-        <LotteryApp />
-      </Suspense>
+      <LotteryApp />
     </ClientOnly>
   );
 }

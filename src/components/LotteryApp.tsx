@@ -27,29 +27,35 @@ function AppContent() {
   if (!subscriptionActive) {
     return (
       <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center justify-center px-6 text-center">
-        <div className="w-16 h-16 rounded-2xl bg-amber-500/20 flex items-center justify-center mb-5">
+        <div className="w-16 h-16 rounded-2xl bg-amber-500/20 flex items-center justify-center mb-5 border border-amber-500/30">
           <Lock className="w-8 h-8 text-amber-400" />
         </div>
-        <h1 className="text-2xl font-bold mb-2">Suscripción inactiva</h1>
-        <p className="text-slate-400 max-w-md mb-1">
-          Tu suscripción no está activa o ha expirado. Contacta al administrador para reactivar tu
-          acceso.
+        <h1 className="text-2xl font-bold mb-2">Servicio de Pizarra no Activo</h1>
+        <p className="text-slate-400 max-w-md mb-2">
+          El acceso a la pizarra en esta pantalla requiere una suscripción de alquiler activa.
         </p>
-        {profile.subscription_expires_at && (
-          <p className="text-xs text-slate-500 mb-6">
-            Vencimiento:{" "}
+        <p className="text-xs text-slate-500 mb-1">
+          Cuenta: <span className="font-mono text-slate-300">{profile.email}</span>
+        </p>
+        {profile.subscription_expires_at ? (
+          <p className="text-xs text-red-400 mb-6">
+            El servicio venció el:{" "}
             {new Date(profile.subscription_expires_at).toLocaleDateString("es-VE", {
               day: "2-digit",
               month: "short",
               year: "numeric",
             })}
           </p>
+        ) : (
+          <p className="text-xs text-amber-400/90 mb-6">
+            Contacta a tu proveedor del servicio para activar esta pantalla.
+          </p>
         )}
         <button
           onClick={signOut}
           className="px-5 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-sm font-medium flex items-center gap-2 transition"
         >
-          <LogOut className="w-4 h-4" /> Salir
+          <LogOut className="w-4 h-4" /> Cambiar de Cuenta / Salir
         </button>
       </div>
     );

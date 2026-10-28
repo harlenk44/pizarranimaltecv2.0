@@ -187,6 +187,69 @@ function buildInitialImages(): MockStore["animal_images"] {
   return images;
 }
 
+const SUPER_ADMIN_EMAILS = ["m4rl0nh3rn4nd3z@gmail.com", "admin@pizarra.com"];
+
+function buildInitialProfiles(): Profile[] {
+  if (typeof window !== "undefined") {
+    try {
+      const saved = localStorage.getItem("pizarra_persisted_profiles");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return [
+    {
+      id: "00000000-0000-0000-0000-000000000002",
+      email: "m4rl0nh3rn4nd3z@gmail.com",
+      role: "admin",
+      subscription_status: "active",
+      subscription_expires_at: "2035-01-01T00:00:00Z",
+      created_at: new Date().toISOString(),
+    },
+    {
+      id: ADMIN_ID,
+      email: "admin@pizarra.com",
+      role: "admin",
+      subscription_status: "active",
+      subscription_expires_at: "2035-01-01T00:00:00Z",
+      created_at: new Date().toISOString(),
+    },
+  ];
+}
+
+function buildInitialRoles(): Array<{ user_id: string; role: "admin" | "viewer" }> {
+  if (typeof window !== "undefined") {
+    try {
+      const saved = localStorage.getItem("pizarra_persisted_roles");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return [
+    { user_id: ADMIN_ID, role: "admin" },
+    { user_id: "00000000-0000-0000-0000-000000000002", role: "admin" },
+  ];
+}
+
+export function saveProfilesToStorage() {
+  if (typeof window !== "undefined") {
+    try {
+      localStorage.setItem("pizarra_persisted_profiles", JSON.stringify(mockStore.profiles));
+      localStorage.setItem("pizarra_persisted_roles", JSON.stringify(mockStore.user_roles));
+    } catch {
+      // ignore
+    }
+  }
+}
+
 // Global persistent in-memory store
 declare global {
   var __APPLET_MOCK_STORE__: MockStore | undefined;
@@ -200,28 +263,8 @@ if (!globalThis.__APPLET_MOCK_STORE__) {
     results: [],
     app_settings: [{ ...DEFAULT_APP_SETTINGS, id: "global" }],
     ads: [],
-    profiles: [
-      {
-        id: ADMIN_ID,
-        email: "admin@pizarra.com",
-        role: "admin",
-        subscription_status: "active",
-        subscription_expires_at: "2030-01-01T00:00:00Z",
-        created_at: new Date().toISOString(),
-      },
-      {
-        id: "00000000-0000-0000-0000-000000000002",
-        email: "m4rl0nh3rn4nd3z@gmail.com",
-        role: "admin",
-        subscription_status: "active",
-        subscription_expires_at: "2030-01-01T00:00:00Z",
-        created_at: new Date().toISOString(),
-      },
-    ],
-    user_roles: [
-      { user_id: ADMIN_ID, role: "admin" },
-      { user_id: "00000000-0000-0000-0000-000000000002", role: "admin" },
-    ],
+    profiles: buildInitialProfiles(),
+    user_roles: buildInitialRoles(),
   };
 }
 
@@ -650,7 +693,8 @@ function notifySubscribers(event: string, session: unknown) {
 }
 
 function createSessionForUser(email: string) {
-  const normEmail = (email || "admin@pizarra.com").trim().toLowerCase();
+  const normEmail = (email || "").trim().toLowerCase();
+  const isSuperAdmin = SUPER_ADMIN_EMAILS.includes(normEmail);
   let profile = mockStore.profiles.find((p) => p.email.toLowerCase() === normEmail);
 
   if (!profile) {
@@ -658,22 +702,27 @@ function createSessionForUser(email: string) {
     profile = {
       id: newId,
       email: normEmail,
-      role: "admin",
-      subscription_status: "active",
-      subscription_expires_at: "2030-01-01T00:00:00Z",
+      role: isSuperAdmin ? "admin" : "viewer",
+      subscription_status: isSuperAdmin ? "active" : "inactive",
+      subscription_expires_at: isSuperAdmin ? "2035-01-01T00:00:00Z" : null,
       created_at: new Date().toISOString(),
     };
     mockStore.profiles.push(profile);
-    mockStore.user_roles.push({ user_id: newId, role: "admin" });
+    mockStore.user_roles.push({ user_id: newId, role: isSuperAdmin ? "admin" : "viewer" });
+    saveProfilesToStorage();
   } else {
-    profile.subscription_status = "active";
-    if (!profile.subscription_expires_at) {
-      profile.subscription_expires_at = "2030-01-01T00:00:00Z";
+    if (isSuperAdmin) {
+      profile.role = "admin";
+      profile.subscription_status = "active";
+      if (!profile.subscription_expires_at) {
+        profile.subscription_expires_at = "2035-01-01T00:00:00Z";
+      }
+      if (!mockStore.user_roles.some((r) => r.user_id === profile!.id && r.role === "admin")) {
+        mockStore.user_roles = mockStore.user_roles.filter((r) => r.user_id !== profile!.id);
+        mockStore.user_roles.push({ user_id: profile.id, role: "admin" });
+      }
     }
-    const hasRole = mockStore.user_roles.some((r) => r.user_id === profile!.id);
-    if (!hasRole) {
-      mockStore.user_roles.push({ user_id: profile.id, role: "admin" });
-    }
+    saveProfilesToStorage();
   }
 
   return {
@@ -703,17 +752,22 @@ export function createMockSupabaseClient() {
         if (stored?.user?.id) {
           // Verify profile exists in mockStore
           let p = mockStore.profiles.find((prof) => prof.id === stored.user.id);
-          if (!p) {
+          if (!p && stored.user.email) {
+            const isSuperAdmin = SUPER_ADMIN_EMAILS.includes(stored.user.email.toLowerCase());
             p = {
               id: stored.user.id,
               email: stored.user.email,
-              role: "admin",
-              subscription_status: "active",
-              subscription_expires_at: "2030-01-01T00:00:00Z",
+              role: isSuperAdmin ? "admin" : "viewer",
+              subscription_status: isSuperAdmin ? "active" : "inactive",
+              subscription_expires_at: isSuperAdmin ? "2035-01-01T00:00:00Z" : null,
               created_at: new Date().toISOString(),
             };
             mockStore.profiles.push(p);
-            mockStore.user_roles.push({ user_id: stored.user.id, role: "admin" });
+            mockStore.user_roles.push({
+              user_id: stored.user.id,
+              role: isSuperAdmin ? "admin" : "viewer",
+            });
+            saveProfilesToStorage();
           }
           return { data: { session: stored }, error: null };
         }
@@ -773,6 +827,60 @@ export function createMockSupabaseClient() {
       return createMockQueryBuilder(tableName);
     },
     rpc(fnName: string, args: Record<string, unknown>) {
+      if (fnName === "set_subscription_status") {
+        const { target_user_id, new_status, new_expires_at } = args as {
+          target_user_id: string;
+          new_status: "active" | "inactive" | "trial";
+          new_expires_at: string | null;
+        };
+        const prof = mockStore.profiles.find((p) => p.id === target_user_id);
+        if (prof) {
+          prof.subscription_status = new_status;
+          prof.subscription_expires_at = new_expires_at;
+          saveProfilesToStorage();
+          return Promise.resolve({ data: true, error: null });
+        }
+        return Promise.resolve({ data: false, error: null });
+      }
+      if (fnName === "create_client_user") {
+        const { email, days } = args as {
+          email: string;
+          days: number;
+        };
+        const normEmail = (email || "").trim().toLowerCase();
+        let prof = mockStore.profiles.find((p) => p.email.toLowerCase() === normEmail);
+        const expires = new Date();
+        expires.setDate(expires.getDate() + (days || 30));
+        const expiresAt = expires.toISOString();
+
+        if (prof) {
+          prof.subscription_status = "active";
+          prof.subscription_expires_at = expiresAt;
+          saveProfilesToStorage();
+          return Promise.resolve({ data: prof, error: null });
+        }
+
+        const newId = `client-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        prof = {
+          id: newId,
+          email: normEmail,
+          role: "viewer",
+          subscription_status: "active",
+          subscription_expires_at: expiresAt,
+          created_at: new Date().toISOString(),
+        };
+        mockStore.profiles.push(prof);
+        mockStore.user_roles.push({ user_id: newId, role: "viewer" });
+        saveProfilesToStorage();
+        return Promise.resolve({ data: prof, error: null });
+      }
+      if (fnName === "delete_client_user") {
+        const { target_user_id } = args as { target_user_id: string };
+        mockStore.profiles = mockStore.profiles.filter((p) => p.id !== target_user_id);
+        mockStore.user_roles = mockStore.user_roles.filter((r) => r.user_id !== target_user_id);
+        saveProfilesToStorage();
+        return Promise.resolve({ data: true, error: null });
+      }
       if (fnName === "sync_automatic_result") {
         const { p_game_id, p_draw_date, p_draw_time, p_animal_number, p_animal_name } = args;
         const existing = mockStore.results.find(

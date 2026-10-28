@@ -134,34 +134,11 @@ export default function LoginPage() {
               {busy && <Loader2 className="w-5 h-5 animate-spin" />}
               {mode === "signin" ? "Entrar a la Pizarra" : "Crear Cuenta"}
             </button>
-
-            {/* Quick 1-click login button for administrator */}
-            <div className="pt-2 border-t border-slate-700/60">
-              <button
-                type="button"
-                onClick={async () => {
-                  setError(null);
-                  setBusy(true);
-                  const targetEmail = email.trim() || "m4rl0nh3rn4nd3z@gmail.com";
-                  setEmail(targetEmail);
-                  setPassword("admin123");
-                  const { error: err } = await signIn(targetEmail, "admin123");
-                  if (err) setError(err);
-                  setBusy(false);
-                }}
-                disabled={busy}
-                className="w-full py-2.5 px-4 rounded-xl bg-slate-700/60 hover:bg-slate-700 text-slate-200 hover:text-white text-xs font-semibold border border-slate-600 transition flex items-center justify-center gap-2"
-              >
-                <span>⚡ Ingresar directamente con un clic (Admin)</span>
-              </button>
-            </div>
           </form>
         </div>
 
         <p className="text-center text-slate-500 text-xs mt-6">
-          Usuarios configurados:{" "}
-          <span className="text-slate-400 font-mono">m4rl0nh3rn4nd3z@gmail.com</span> ·{" "}
-          <span className="text-slate-400 font-mono">admin@pizarra.com</span>
+          pizarraianimaltec · Acceso restringido para pantallas y clientes autorizados
         </p>
       </div>
     </div>
