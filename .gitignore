@@ -19,6 +19,9 @@ dist-ssr
 # AI Studio
 .aistudio/
 
+# Vercel
+.vercel/
+
 # Wrangler / Cloudflare
 .wrangler/
 .dev.vars

@@ -20,6 +20,7 @@ export interface SyncGame {
   id: string;
   slug: string;
   loading_mode: LoadingMode;
+  mode?: LoadingMode;
   is_active: boolean;
 }
 export interface ResultsProvider {
@@ -39,7 +40,8 @@ export async function synchronizeGame(
   write: (draw: AutomaticDraw) => Promise<boolean>,
 ): Promise<SyncReport> {
   const report: SyncReport = { game_id: game.id, status: "skipped", written: 0, preserved: 0 };
-  if (!game.is_active || game.loading_mode !== "automatic") return report;
+  const effectiveMode = (game.mode ?? game.loading_mode ?? "automatic").toLowerCase();
+  if (!game.is_active || effectiveMode !== "automatic") return report;
   if (!provider) return { ...report, status: "pending_configuration" };
   const draws = z
     .array(automaticDrawSchema)

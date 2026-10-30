@@ -39,7 +39,7 @@ export const INITIAL_GAMES: Game[] = [
     id: "7d21a00b-0dfa-4bdc-9edf-8115802df1d6",
     name: "LOTTO ACTIVO",
     slug: "lotto-activo",
-    color: "#1a56db",
+    color: "#16a34a",
     logo_url: "https://tuazar.com/in/loteria/logo_lottoactivo.png",
     display_order: 1,
     is_active: true,
@@ -50,7 +50,7 @@ export const INITIAL_GAMES: Game[] = [
     id: "01da9c54-392a-45e3-ab66-9a08befe7694",
     name: "GUACHARO ACTIVO",
     slug: "guacharo",
-    color: "#059669",
+    color: "#dc2626",
     logo_url: "https://tuazar.com/in/loteria/logo_guacharoactivo.png",
     display_order: 2,
     is_active: true,
@@ -61,7 +61,7 @@ export const INITIAL_GAMES: Game[] = [
     id: "0519825d-e7ea-4e59-bf7d-cef2c832edd3",
     name: "EL GUACHARITO MILLONARIO",
     slug: "guacharito",
-    color: "#7c2d12",
+    color: "#eab308",
     logo_url: "https://tuazar.com/in/loteria/logo_elguacharitomillonario.png",
     display_order: 3,
     is_active: true,
@@ -72,7 +72,7 @@ export const INITIAL_GAMES: Game[] = [
     id: "8f3aa087-6a0c-41a1-9ed3-5f6d5ed6918e",
     name: "SELVA PLUS",
     slug: "selva-plus",
-    color: "#0d9488",
+    color: "#22c55e",
     logo_url: "https://tuazar.com/in/loteria/logo_selvaplus.png",
     display_order: 4,
     is_active: true,
@@ -83,7 +83,7 @@ export const INITIAL_GAMES: Game[] = [
     id: "1efc5373-a547-4f7f-9955-845b5ede5ce2",
     name: "LOTO CHAIMA",
     slug: "loto-chaim-a",
-    color: "#b45309",
+    color: "#7c3aed",
     logo_url: "https://tuazar.com/in/loteria/logo_lotochaima.png",
     display_order: 5,
     is_active: true,
@@ -94,7 +94,7 @@ export const INITIAL_GAMES: Game[] = [
     id: "ca8a0400-0000-4000-8000-000000000006",
     name: "LA GRANJITA",
     slug: "granjita",
-    color: "#ca8a04",
+    color: "#eab308",
     logo_url: "https://tuazar.com/in/loteria/logo_lagranjita.png",
     display_order: 6,
     is_active: true,
@@ -105,7 +105,7 @@ export const INITIAL_GAMES: Game[] = [
     id: "0f766e00-0000-4000-8000-000000000007",
     name: "MONJE MILLONARIO",
     slug: "monje-millonario",
-    color: "#0f766e",
+    color: "#9333ea",
     logo_url: "https://tuazar.com/in/loteria/logo_monjemillonario.webp",
     display_order: 7,
     is_active: true,
@@ -116,7 +116,7 @@ export const INITIAL_GAMES: Game[] = [
     id: "1e40af00-0000-4000-8000-000000000008",
     name: "LOTTO ACTIVO RD INTERNACIONAL",
     slug: "lotto-activo-internacional",
-    color: "#1e40af",
+    color: "#dc2626",
     logo_url: "https://tuazar.com/in/loteria/logo_lottoactivordinternacional.webp",
     display_order: 8,
     is_active: true,
@@ -250,6 +250,63 @@ export function saveProfilesToStorage() {
   }
 }
 
+function buildInitialSettings(): AppSettings[] {
+  if (typeof window !== "undefined") {
+    try {
+      const saved = localStorage.getItem("pizarra_app_settings");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed === "object") {
+          return [{ ...DEFAULT_APP_SETTINGS, ...parsed, id: "global" }];
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return [{ ...DEFAULT_APP_SETTINGS, id: "global" }];
+}
+
+export const GAMES_STORAGE_KEY = "pizarra_persisted_games";
+
+function buildInitialGames(): Game[] {
+  let list = [...INITIAL_GAMES];
+  if (typeof window !== "undefined") {
+    try {
+      const saved = localStorage.getItem(GAMES_STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          list = list.map((initial) => {
+            const savedGame = parsed.find(
+              (p: Game) => p.id === initial.id || p.slug === initial.slug,
+            );
+            if (savedGame) {
+              const effectiveMode =
+                savedGame.loading_mode ?? savedGame.mode ?? initial.loading_mode ?? "automatic";
+              return {
+                ...initial,
+                ...savedGame,
+                loading_mode: effectiveMode,
+                mode: effectiveMode,
+              };
+            }
+            return initial;
+          });
+          for (const p of parsed) {
+            if (!list.some((g) => g.id === p.id)) {
+              list.push(p);
+            }
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return list;
+}
+
 // Global persistent in-memory store
 declare global {
   var __APPLET_MOCK_STORE__: MockStore | undefined;
@@ -257,11 +314,11 @@ declare global {
 
 if (!globalThis.__APPLET_MOCK_STORE__) {
   globalThis.__APPLET_MOCK_STORE__ = {
-    games: [...INITIAL_GAMES],
+    games: buildInitialGames(),
     animal_entries: buildInitialEntries(),
     animal_images: buildInitialImages(),
     results: [],
-    app_settings: [{ ...DEFAULT_APP_SETTINGS, id: "global" }],
+    app_settings: buildInitialSettings(),
     ads: [],
     profiles: buildInitialProfiles(),
     user_roles: buildInitialRoles(),
@@ -318,6 +375,10 @@ export async function syncTuazarDirectly(): Promise<number> {
       for (const [slug, tuazarName] of Object.entries(TUAZAR_GAME_NAMES)) {
         const game = mockStore.games.find((g) => g.slug === slug);
         if (!game) continue;
+        const effectiveMode = (game.mode ?? game.loading_mode ?? "automatic").toLowerCase();
+        // Validation: DO NOT overwrite or sync results for games configured in manual mode!
+        if (effectiveMode === "manual" || !game.is_active) continue;
+
         const catalog = mockStore.animal_entries.filter((e) => e.game_id === game.id);
         const wanted = normalizeName(tuazarName);
         const draws = page.results.filter((r) => normalizeName(r.game) === wanted);
@@ -576,9 +637,23 @@ function createMockQueryBuilder(table: string) {
         }
       }
 
+      if (table === "games" && typeof window !== "undefined") {
+        try {
+          localStorage.setItem(GAMES_STORAGE_KEY, JSON.stringify(storeList));
+        } catch {
+          // ignore
+        }
+      }
       if (table === "animal_images" && typeof window !== "undefined") {
         try {
           localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(storeList));
+        } catch {
+          // ignore
+        }
+      }
+      if (table === "app_settings" && typeof window !== "undefined" && storeList.length > 0) {
+        try {
+          localStorage.setItem("pizarra_app_settings", JSON.stringify(storeList[0]));
         } catch {
           // ignore
         }
@@ -604,6 +679,13 @@ function createMockQueryBuilder(table: string) {
       if (isDelete) {
         const remaining = storeList.filter((item) => !filters.every((f) => f(item)));
         (mockStore as unknown as Record<string, unknown[]>)[table] = remaining;
+        if (table === "games" && typeof window !== "undefined") {
+          try {
+            localStorage.setItem(GAMES_STORAGE_KEY, JSON.stringify(remaining));
+          } catch {
+            // ignore
+          }
+        }
         if (table === "animal_images" && typeof window !== "undefined") {
           try {
             localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(remaining));
@@ -619,10 +701,30 @@ function createMockQueryBuilder(table: string) {
         for (const item of storeList) {
           if (filters.every((f) => f(item))) {
             Object.assign(item, updatePayload);
+            if (updatePayload["loading_mode"] || updatePayload["mode"]) {
+              const m = (updatePayload["mode"] ?? updatePayload["loading_mode"]) as string;
+              item["loading_mode"] = m;
+              item["mode"] = m;
+            }
             updatedRows.push(item);
           }
         }
-        return Promise.resolve({ data: updatedRows, error: null }).then(onFulfilled, onRejected);
+        if (table === "games" && typeof window !== "undefined") {
+          try {
+            localStorage.setItem(GAMES_STORAGE_KEY, JSON.stringify(storeList));
+          } catch {
+            // ignore
+          }
+        }
+        if (table === "app_settings" && typeof window !== "undefined" && storeList.length > 0) {
+          try {
+            localStorage.setItem("pizarra_app_settings", JSON.stringify(storeList[0]));
+          } catch {
+            // ignore
+          }
+        }
+        const data = isSingle ? (updatedRows[0] ?? null) : updatedRows;
+        return Promise.resolve({ data, error: null }).then(onFulfilled, onRejected);
       }
 
       const filtered = storeList.filter((item) => filters.every((f) => f(item)));

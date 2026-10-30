@@ -1,32 +1,48 @@
 import { useEffect, useState } from "react";
-import { Palette, Timer, Type, Save, Loader2 } from "lucide-react";
+import { Palette, Timer, Type, Save, Loader2, Check } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useBoardSettings } from "@/context/BoardSettingsContext";
 import type { AppSettings } from "@/lib/types";
 
 export default function DesignManager() {
-  const { settings, refreshSettings } = useBoardSettings();
+  const { settings, refreshSettings, updateSettings } = useBoardSettings();
   const [draft, setDraft] = useState<AppSettings>(settings);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
+
   useEffect(() => setDraft(settings), [settings]);
+
   function setValue<K extends keyof AppSettings>(key: K, value: AppSettings[K]) {
-    setDraft((current) => ({ ...current, [key]: value }));
+    const updated = { ...draft, [key]: value };
+    setDraft(updated);
+    // Instant live preview across all boards
+    updateSettings(updated);
   }
+
   async function save() {
     setSaving(true);
     setMessage("");
-    const { error } = await supabase
-      .from("app_settings")
-      .update({ ...draft, id: undefined, updated_at: new Date().toISOString() })
-      .eq("id", "global");
-    if (error) setMessage(`No se pudo guardar: ${error.message}`);
-    else {
-      await refreshSettings();
-      setMessage("Configuración guardada para todos los usuarios.");
+
+    const fullPayload = {
+      ...draft,
+      id: "global",
+      updated_at: new Date().toISOString(),
+    };
+
+    // Update context state immediately
+    updateSettings(fullPayload);
+
+    const { error } = await supabase.from("app_settings").upsert(fullPayload, { onConflict: "id" });
+
+    if (error) {
+      setMessage(`Guardado localmente. (Aviso servidor: ${error.message})`);
+    } else {
+      setMessage("¡Diseño guardado exitosamente para todas las pantallas!");
     }
+    await refreshSettings();
     setSaving(false);
   }
+
   const colors: {
     key:
       | "background_color"
@@ -37,132 +53,191 @@ export default function DesignManager() {
       | "result_row_color";
     label: string;
   }[] = [
-    { key: "background_color", label: "Fondo principal" },
-    { key: "surface_color", label: "Paneles" },
-    { key: "primary_color", label: "Color principal" },
-    { key: "text_color", label: "Texto" },
-    { key: "card_color", label: "Fondo de tarjetas de resultados" },
-    { key: "result_row_color", label: "Fondo de filas de resultados" },
+    { key: "background_color", label: "Fondo principal de pantalla" },
+    { key: "surface_color", label: "Encabezado y barra superior" },
+    { key: "primary_color", label: "Color de acento principal" },
+    { key: "text_color", label: "Texto e información" },
+    { key: "card_color", label: "Fondo de tarjetas de ruletas" },
+    { key: "result_row_color", label: "Fondo de cuadro de último resultado" },
   ];
+
   return (
     <div className="max-w-5xl mx-auto space-y-6">
-      <div>
-        <h2 className="text-lg font-semibold flex items-center gap-2">
-          <Palette className="w-5 h-5 text-blue-500" /> Apariencia y rotación
-        </h2>
-        <p className="text-sm text-slate-400 mt-1">
-          Personaliza colores, letras y el cambio automático entre la vista diaria y semanal.
-        </p>
+      <div className="flex items-center justify-between flex-wrap gap-4">
+        <div>
+          <h2 className="text-xl font-bold flex items-center gap-2 text-white">
+            <Palette className="w-5 h-5 text-blue-500" /> Diseño, Colores y Apariencia
+          </h2>
+          <p className="text-sm text-slate-400 mt-1">
+            Personaliza la paleta de colores de las pizarras, tarjetas de resultados y fuentes.
+          </p>
+        </div>
+        <button
+          onClick={save}
+          disabled={saving}
+          className="bg-blue-600 hover:bg-blue-500 text-white font-medium px-5 py-2.5 rounded-xl shadow-lg shadow-blue-600/20 flex items-center gap-2 cursor-pointer transition"
+        >
+          {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+          Guardar Cambios de Diseño
+        </button>
       </div>
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        <section className="bg-slate-900 rounded-2xl border border-slate-800 p-5 space-y-4">
-          <h3 className="font-semibold">Colores</h3>
-          <div className="grid grid-cols-2 gap-4">
+
+      {message && (
+        <div className="p-3.5 rounded-xl bg-blue-950/60 border border-blue-800 text-blue-300 text-xs font-medium flex items-center gap-2">
+          <Check className="w-4 h-4 text-emerald-400" />
+          {message}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Colors Palette Section */}
+        <section className="bg-slate-900/90 rounded-2xl border border-slate-800 p-6 space-y-5 shadow-xl">
+          <h3 className="font-bold text-sm text-white flex items-center gap-2 border-b border-slate-800 pb-3">
+            <Palette className="w-4 h-4 text-blue-400" /> Paleta de Colores
+          </h3>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {colors.map(({ key, label }) => (
-              <label key={key} className="space-y-2">
-                <span className="block text-xs text-slate-400">{label}</span>
+              <label key={key} className="block space-y-1.5">
+                <span className="block text-xs font-medium text-slate-300">{label}</span>
                 <div className="flex gap-2">
                   <input
                     type="color"
-                    value={draft[key]}
+                    value={draft[key] || "#000000"}
                     onChange={(e) => setValue(key, e.target.value)}
-                    className="w-11 h-10 rounded-lg bg-slate-800"
+                    className="w-12 h-10 rounded-lg bg-slate-950 border border-slate-700 cursor-pointer p-0.5"
                   />
                   <input
-                    value={draft[key]}
+                    value={draft[key] || ""}
                     onChange={(e) => setValue(key, e.target.value)}
-                    className="min-w-0 flex-1 bg-slate-800 border border-slate-700 rounded-lg px-2 text-xs uppercase"
+                    className="min-w-0 flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 text-xs font-mono uppercase text-white focus:outline-none focus:border-blue-500"
                   />
                 </div>
               </label>
             ))}
           </div>
-          <label className="block text-xs text-slate-400">
-            <Type className="w-3.5 h-3.5 inline mr-1" /> Tipo de letra
-            <select
-              value={draft.font_family}
-              onChange={(e) => setValue("font_family", e.target.value)}
-              className="mt-2 w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 text-sm"
-            >
-              <option>Inter</option>
-              <option>Arial</option>
-              <option>Georgia</option>
-              <option>Verdana</option>
-              <option>monospace</option>
-            </select>
-          </label>
-          <label className="block text-xs text-slate-400">
-            Tamaño base: {draft.base_font_size}px
-            <input
-              type="range"
-              min="12"
-              max="22"
-              value={draft.base_font_size}
-              onChange={(e) => setValue("base_font_size", Number(e.target.value))}
-              className="mt-2 w-full accent-blue-500"
-            />
-          </label>
         </section>
-        <section className="bg-slate-900 rounded-2xl border border-slate-800 p-5 space-y-4">
-          <h3 className="font-semibold flex items-center gap-2">
-            <Timer className="w-4 h-4 text-blue-400" /> Cambio automático
+
+        {/* Typography & Rotation Section */}
+        <section className="bg-slate-900/90 rounded-2xl border border-slate-800 p-6 space-y-5 shadow-xl">
+          <h3 className="font-bold text-sm text-white flex items-center gap-2 border-b border-slate-800 pb-3">
+            <Type className="w-4 h-4 text-emerald-400" /> Fuentes y Escalas de Tamaño
           </h3>
-          <label className="flex items-center justify-between p-3 rounded-lg bg-slate-800/70">
-            <span>
-              <span className="block text-sm">Activar rotación</span>
-              <span className="block text-xs text-slate-500 mt-1">
-                Alterna diaria y semanal mientras la pantalla está abierta.
-              </span>
-            </span>
-            <input
-              type="checkbox"
-              checked={draft.rotation_enabled}
-              onChange={(e) => setValue("rotation_enabled", e.target.checked)}
-              className="w-5 h-5 accent-blue-500"
-            />
-          </label>
-          <label className="block text-xs text-slate-400">
-            Cambiar cada {draft.rotation_interval_seconds} segundos
-            <input
-              type="range"
-              min="15"
-              max="300"
-              step="15"
-              value={draft.rotation_interval_seconds}
-              onChange={(e) => setValue("rotation_interval_seconds", Number(e.target.value))}
-              disabled={!draft.rotation_enabled}
-              className="mt-2 w-full accent-blue-500"
-            />
-          </label>
-          <label className="block text-xs text-slate-400">
-            Vista inicial
-            <select
-              value={draft.start_view}
-              onChange={(e) => setValue("start_view", e.target.value as AppSettings["start_view"])}
-              className="mt-2 w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 text-sm"
-            >
-              <option value="daily">Pizarra diaria</option>
-              <option value="weekly">Pizarra semanal</option>
-            </select>
-          </label>
+
+          <div className="space-y-4">
+            <label className="block text-xs font-medium text-slate-300">
+              Tipo de letra principal (Font Family)
+              <select
+                value={draft.font_family || "Inter"}
+                onChange={(e) => setValue("font_family", e.target.value)}
+                className="mt-2 w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-blue-500"
+              >
+                <option value="Inter">Inter (Sans-serif moderno)</option>
+                <option value="Arial">Arial (Clásico estándar)</option>
+                <option value="Verdana">Verdana (Limpio y ancho)</option>
+                <option value="Georgia">Georgia (Serif elegancia)</option>
+                <option value="monospace">Monospace (Estilo Pantalla Digital)</option>
+              </select>
+            </label>
+
+            {/* Sliders for Scales */}
+            <div className="space-y-3 pt-2 border-t border-slate-800">
+              <label className="block text-xs text-slate-300 space-y-1">
+                <div className="flex justify-between font-medium">
+                  <span>🐾 Tamaño de Imagen del Animal</span>
+                  <strong className="text-purple-400">{draft.animal_scale ?? 100}%</strong>
+                </div>
+                <input
+                  type="range"
+                  min="40"
+                  max="200"
+                  step="5"
+                  value={draft.animal_scale ?? 100}
+                  onChange={(e) => setValue("animal_scale", Number(e.target.value))}
+                  className="w-full accent-purple-500 cursor-pointer h-2 bg-slate-950 rounded-lg border border-slate-800"
+                />
+              </label>
+
+              <label className="block text-xs text-slate-300 space-y-1">
+                <div className="flex justify-between font-medium">
+                  <span>📦 Cuadro del Último Resultado</span>
+                  <strong className="text-amber-400">{draft.hero_card_scale ?? 100}%</strong>
+                </div>
+                <input
+                  type="range"
+                  min="50"
+                  max="200"
+                  step="5"
+                  value={draft.hero_card_scale ?? 100}
+                  onChange={(e) => setValue("hero_card_scale", Number(e.target.value))}
+                  className="w-full accent-amber-500 cursor-pointer h-2 bg-slate-950 rounded-lg border border-slate-800"
+                />
+              </label>
+
+              <label className="block text-xs text-slate-300 space-y-1">
+                <div className="flex justify-between font-medium">
+                  <span>🖼️ Tamaño de Logos</span>
+                  <strong className="text-blue-400">{draft.logo_size ?? 72}px</strong>
+                </div>
+                <input
+                  type="range"
+                  min="16"
+                  max="120"
+                  step="2"
+                  value={draft.logo_size ?? 72}
+                  onChange={(e) => setValue("logo_size", Number(e.target.value))}
+                  className="w-full accent-blue-500 cursor-pointer h-2 bg-slate-950 rounded-lg border border-slate-800"
+                />
+              </label>
+
+              <label className="block text-xs text-slate-300 space-y-1">
+                <div className="flex justify-between font-medium">
+                  <span>🔤 Escala de Letras / Tipografía</span>
+                  <strong className="text-emerald-400">{draft.font_size_scale ?? 100}%</strong>
+                </div>
+                <input
+                  type="range"
+                  min="70"
+                  max="200"
+                  step="5"
+                  value={draft.font_size_scale ?? 100}
+                  onChange={(e) => setValue("font_size_scale", Number(e.target.value))}
+                  className="w-full accent-emerald-500 cursor-pointer h-2 bg-slate-950 rounded-lg border border-slate-800"
+                />
+              </label>
+            </div>
+
+            <div className="pt-3 border-t border-slate-800 space-y-3">
+              <h4 className="font-bold text-sm text-white flex items-center gap-2">
+                <Timer className="w-4 h-4 text-amber-400" /> Rotación de Vistas
+              </h4>
+              <label className="flex items-center justify-between text-xs text-slate-300">
+                <span>Cambio automático entre Pizarra Diaria y Semanal</span>
+                <input
+                  type="checkbox"
+                  checked={draft.rotation_enabled ?? false}
+                  onChange={(e) => setValue("rotation_enabled", e.target.checked)}
+                  className="w-4 h-4 accent-blue-600 rounded cursor-pointer"
+                />
+              </label>
+
+              {draft.rotation_enabled && (
+                <label className="block text-xs text-slate-300 space-y-1.5">
+                  Intervalo de rotación:{" "}
+                  <strong className="text-blue-400">{draft.rotation_interval_seconds} seg</strong>
+                  <input
+                    type="range"
+                    min="5"
+                    max="60"
+                    step="5"
+                    value={draft.rotation_interval_seconds ?? 15}
+                    onChange={(e) => setValue("rotation_interval_seconds", Number(e.target.value))}
+                    className="w-full accent-blue-500 cursor-pointer"
+                  />
+                </label>
+              )}
+            </div>
+          </div>
         </section>
-      </div>
-      <div className="flex items-center gap-3">
-        <button
-          onClick={save}
-          disabled={saving}
-          className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded-lg text-sm font-medium flex items-center gap-2"
-        >
-          {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}{" "}
-          Guardar configuración
-        </button>
-        {message && (
-          <span
-            className={`text-sm ${message.startsWith("No") ? "text-red-400" : "text-green-400"}`}
-          >
-            {message}
-          </span>
-        )}
       </div>
     </div>
   );

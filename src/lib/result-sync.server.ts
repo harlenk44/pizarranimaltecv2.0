@@ -9,17 +9,22 @@ const providers: Readonly<Record<string, ResultsProvider>> = Object.fromEntries(
 );
 
 export async function synchronizeAutomaticResults(): Promise<SyncReport[]> {
-  const { data: games, error } = await supabaseAdmin
-    .from("games")
-    .select("id, slug, loading_mode, is_active")
-    .eq("loading_mode", "automatic")
-    .eq("is_active", true);
+  const { data: games, error } = await supabaseAdmin.from("games").select("*");
   if (error) throw error;
+
+  // Filter ONLY active games configured in automatic mode
+  const automaticGames = (games ?? []).filter(
+    (g: { mode?: string | null; loading_mode?: string | null; is_active?: boolean | null }) => {
+      const effectiveMode = (g.mode ?? g.loading_mode ?? "automatic").toLowerCase();
+      return effectiveMode === "automatic" && g.is_active !== false;
+    },
+  );
+
   const reports: SyncReport[] = [];
-  for (const game of games ?? []) {
+  for (const game of automaticGames) {
     try {
       const report = await synchronizeGame(
-        { ...game, loading_mode: "automatic" },
+        { ...game, loading_mode: "automatic", mode: "automatic" },
         providers[game.slug],
         async (draw) => {
           const { data, error: writeError } = await supabaseAdmin.rpc("sync_automatic_result", {

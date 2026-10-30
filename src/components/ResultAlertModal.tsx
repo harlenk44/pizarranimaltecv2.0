@@ -3,6 +3,7 @@ import { Volume2, VolumeX, X, Clock, Trophy, ChevronRight, RotateCcw, Sliders } 
 import { speakLotteryResult, stopAllAudio } from "@/lib/lottery-audio";
 import { getEmojiForNumber } from "@/lib/animals";
 import VoiceSettingsModal from "@/components/VoiceSettingsModal";
+import AnimalMedia from "@/components/AnimalMedia";
 
 export interface ResultAlertItem {
   id: string;
@@ -289,31 +290,20 @@ export default function ResultAlertModal({
             </span>
           </div>
 
-          {/* Winning Animal Display (Image / Emoji + Big Number) */}
+          {/* Winning Animal Display (Image / Video / Emoji + Big Number) */}
           <div className="relative mb-5 flex flex-col items-center">
-            {currentAlert.animalImageUrl && !imageFailed ? (
-              <div
-                className="relative w-44 h-44 sm:w-52 sm:h-52 rounded-2xl p-3 bg-slate-950/80 border-2 flex items-center justify-center overflow-hidden shadow-2xl"
-                style={{ borderColor: `${brandColor}80` }}
-              >
-                <img
-                  src={currentAlert.animalImageUrl}
-                  alt={currentAlert.animalName}
-                  onError={() => setImageFailed(true)}
-                  className="w-full h-full object-contain filter drop-shadow-lg"
-                />
-              </div>
-            ) : (
-              <div
-                className="w-44 h-44 sm:w-52 sm:h-52 rounded-2xl bg-slate-950/80 border-2 flex items-center justify-center text-7xl sm:text-8xl shadow-2xl select-none"
-                style={{ borderColor: `${brandColor}80` }}
-              >
-                <span>
-                  {currentAlert.animalEmoji ||
-                    getEmojiForNumber(currentAlert.animalNumber, currentAlert.animalName)}
-                </span>
-              </div>
-            )}
+            <div
+              className="relative w-44 h-44 sm:w-52 sm:h-52 rounded-2xl p-3 bg-slate-950/80 border-2 flex items-center justify-center overflow-hidden shadow-2xl"
+              style={{ borderColor: `${brandColor}80` }}
+            >
+              <AnimalMedia
+                mediaUrl={currentAlert.animalImageUrl}
+                name={currentAlert.animalName}
+                number={currentAlert.animalNumber}
+                className="w-full h-full object-contain filter drop-shadow-lg"
+                emojiClassName="text-7xl sm:text-8xl select-none"
+              />
+            </div>
 
             {/* Winning Number Badge Floating Over the Animal */}
             <div

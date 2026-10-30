@@ -27,6 +27,9 @@ describe("Device-local board sizes", () => {
       expect(JSON.parse(localStorage.getItem(DISPLAY_STORAGE_KEY) ?? "{}")).toEqual({
         resultScale: 200,
         logoSize: 180,
+        fontSizeScale: 100,
+        heroCardScale: 100,
+        animalScale: 100,
       }),
     );
     first.unmount();
@@ -38,6 +41,12 @@ describe("Device-local board sizes", () => {
     await waitFor(() => expect(screen.getByTestId("sizes").textContent).toBe("200,180"));
   });
   it("recovers defaults from damaged stored preferences", () => {
-    expect(parseDisplayPreferences("{broken")).toEqual({ resultScale: 125, logoSize: 72 });
+    expect(parseDisplayPreferences("{broken")).toEqual({
+      resultScale: 125,
+      logoSize: 72,
+      fontSizeScale: 100,
+      heroCardScale: 100,
+      animalScale: 100,
+    });
   });
 });

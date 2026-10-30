@@ -7,6 +7,7 @@ export interface Game {
   display_order: number;
   is_active: boolean;
   loading_mode?: "manual" | "automatic";
+  mode?: "manual" | "automatic";
   created_at: string;
 }
 
@@ -91,6 +92,10 @@ export interface AppSettings {
   rotation_enabled: boolean;
   rotation_interval_seconds: number;
   start_view: "daily" | "weekly";
+  logo_size?: number;
+  font_size_scale?: number;
+  hero_card_scale?: number;
+  animal_scale?: number;
   updated_at: string;
 }
 
@@ -107,6 +112,10 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   rotation_enabled: false,
   rotation_interval_seconds: 60,
   start_view: "daily",
+  logo_size: 72,
+  font_size_scale: 100,
+  hero_card_scale: 100,
+  animal_scale: 100,
   updated_at: "",
 };
 

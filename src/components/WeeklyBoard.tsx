@@ -4,6 +4,7 @@ import { getEmojiForNumber } from "@/lib/animals";
 import type { Game, Result, AnimalImage, AnimalEntry } from "@/lib/types";
 import { Calendar, ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
 import AdBanner from "@/components/AdBanner";
+import AnimalMedia from "@/components/AnimalMedia";
 import { useBoardSettings } from "@/context/BoardSettingsContext";
 import { lotteryDate } from "@/lib/lottery-date";
 
@@ -312,17 +313,15 @@ function WeeklyGridCell({
             return (
               <div key={r.id} className="display-week-result rounded">
                 <span className="display-time font-mono font-bold">{formatTime(r.draw_time)}</span>
-                {imgUrl ? (
-                  <img
-                    src={imgUrl}
-                    alt={displayName}
-                    className="display-animal-image object-contain rounded"
+                <div className="display-animal-image flex items-center justify-center overflow-hidden rounded">
+                  <AnimalMedia
+                    mediaUrl={imgUrl}
+                    name={displayName}
+                    number={r.animal_number}
+                    className="w-full h-full object-contain"
+                    emojiClassName="display-animal-emoji"
                   />
-                ) : (
-                  <span className="display-animal-emoji">
-                    {getEmojiForNumber(r.animal_number, displayName)}
-                  </span>
-                )}
+                </div>
                 <span className="display-number font-black tabular-nums">{displayLabel}</span>
                 <span className="display-name font-bold">{displayName}</span>
               </div>

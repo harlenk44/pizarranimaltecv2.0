@@ -11,6 +11,7 @@ import {
   Volume2,
   VolumeX,
   Sliders,
+  Target,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { useBoardSettings } from "@/context/BoardSettingsContext";
@@ -18,17 +19,15 @@ import WeeklyBoard from "@/components/WeeklyBoard";
 import AdBanner from "@/components/AdBanner";
 import ResultAlertModal, { type ResultAlertItem } from "@/components/ResultAlertModal";
 import VoiceSettingsModal from "@/components/VoiceSettingsModal";
+import AnimalMedia from "@/components/AnimalMedia";
 import { lotteryDate, LOTTERY_TIMEZONE } from "@/lib/lottery-date";
 
 interface BoardPageProps {
   onAdminClick: () => void;
 }
 
-// image map key: `${gameId}:${animalNumber}`
 type AnimalImageMap = Record<string, string>;
-// animal name map key: `${gameId}:${animalNumber}` -> name
 type AnimalNameMap = Record<string, string>;
-// animal label map key: `${gameId}:${animalNumber}` -> display label (e.g. "00", "0")
 type AnimalLabelMap = Record<string, string>;
 
 function formatTime(timeStr: string): string {
@@ -36,11 +35,124 @@ function formatTime(timeStr: string): string {
   const hour = parseInt(h ?? "0", 10);
   const ampm = hour >= 12 ? "PM" : "AM";
   const displayHour = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
-  return `${displayHour}:${m} ${ampm}`;
+  return `${displayHour}:${m || "00"} ${ampm}`;
 }
 
 function getAnimalEmoji(num: number, name?: string): string {
   return getEmojiForNumber(num, name);
+}
+
+function formatBoardDate(d: Date): string {
+  const weekday = d.toLocaleDateString("es-VE", { timeZone: LOTTERY_TIMEZONE, weekday: "long" });
+  const day = d.toLocaleDateString("es-VE", { timeZone: LOTTERY_TIMEZONE, day: "numeric" });
+  const month = d.toLocaleDateString("es-VE", { timeZone: LOTTERY_TIMEZONE, month: "long" });
+  const capitalize = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : "");
+  return `${capitalize(weekday)}, ${day} De ${capitalize(month)}`;
+}
+
+function getGameScheduleTimes(slug: string): string[] {
+  const norm = (slug || "").toLowerCase();
+  if (norm.includes("selva")) {
+    return [
+      "08:15",
+      "09:15",
+      "10:15",
+      "11:15",
+      "12:15",
+      "13:15",
+      "14:15",
+      "15:15",
+      "16:15",
+      "17:15",
+      "18:15",
+      "19:15",
+      "20:15",
+    ];
+  }
+  if (norm.includes("guacharito")) {
+    return [
+      "08:30",
+      "09:30",
+      "10:30",
+      "11:30",
+      "12:30",
+      "13:30",
+      "14:30",
+      "15:30",
+      "16:30",
+      "17:30",
+      "18:30",
+      "19:30",
+    ];
+  }
+  return [
+    "08:00",
+    "09:00",
+    "10:00",
+    "11:00",
+    "12:00",
+    "13:00",
+    "14:00",
+    "15:00",
+    "16:00",
+    "17:00",
+    "18:00",
+    "19:00",
+  ];
+}
+
+function buildFullSchedule(gameSlug: string, results: Result[]): string[] {
+  const base = getGameScheduleTimes(gameSlug);
+  const extra = results.map((r) => r.draw_time.substring(0, 5));
+  const combined = Array.from(new Set([...base, ...extra]));
+  combined.sort((a, b) => a.localeCompare(b));
+  return combined;
+}
+
+function findResultForTimeSlot(results: Result[], timeSlot: string): Result | undefined {
+  const normSlot = timeSlot.replace(/^0/, "");
+  return results.find((r) => {
+    const rShort = r.draw_time.substring(0, 5).replace(/^0/, "");
+    return rShort === normSlot;
+  });
+}
+
+function getDynamicGridStyle(count: number): React.CSSProperties {
+  let cols = 4;
+  let rows = 2;
+  if (count <= 1) {
+    cols = 1;
+    rows = 1;
+  } else if (count <= 2) {
+    cols = 2;
+    rows = 1;
+  } else if (count <= 4) {
+    cols = 2;
+    rows = 2;
+  } else if (count <= 6) {
+    cols = 3;
+    rows = 2;
+  } else if (count <= 8) {
+    cols = 4;
+    rows = 2;
+  } else if (count <= 10) {
+    cols = 5;
+    rows = 2;
+  } else if (count <= 12) {
+    cols = 4;
+    rows = 3;
+  } else if (count <= 15) {
+    cols = 5;
+    rows = 3;
+  } else {
+    cols = 4;
+    rows = Math.ceil(count / 4);
+  }
+
+  return {
+    gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
+    gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
+  };
 }
 
 export default function BoardPage({ onAdminClick }: BoardPageProps) {
@@ -66,6 +178,12 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
   });
   const isInitialLoadRef = useRef(true);
   const prevSignaturesRef = useRef<Map<string, string>>(new Map());
+  const lastAlertAnnouncedIdRef = useRef<string | null>(() => {
+    if (typeof window !== "undefined") {
+      return localStorage.getItem("pizarra_last_announced_alert_id");
+    }
+    return null;
+  });
 
   const handleVoiceToggle = (enabled: boolean) => {
     setVoiceEnabled(enabled);
@@ -88,6 +206,58 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
   }, [settings.rotation_enabled, settings.rotation_interval_seconds]);
 
   const fetchAll = useCallback(async () => {
+    // 1. Sync from server backend to get latest results, alerts, and custom animal videos/images
+    try {
+      const syncRes = await fetch("/api/public/results/sync");
+      if (syncRes.ok) {
+        const syncData = await syncRes.json();
+        // Sync animal images into mockStore & localStorage so all TVs have them
+        if (Array.isArray(syncData?.animalImages) && syncData.animalImages.length > 0) {
+          const { mockStore } = await import("@/lib/mock-db");
+          mockStore.animal_images = syncData.animalImages;
+          try {
+            localStorage.setItem(
+              "pizarra_custom_animal_images",
+              JSON.stringify(syncData.animalImages),
+            );
+          } catch {
+            // ignore
+          }
+        }
+
+        // If server broadcasted a latestAlert, announce it if not already announced
+        if (syncData?.latestAlert && syncData.latestAlert.id) {
+          const alert = syncData.latestAlert as ResultAlertItem;
+          const lastId =
+            lastAlertAnnouncedIdRef.current ||
+            (typeof window !== "undefined"
+              ? localStorage.getItem("pizarra_last_announced_alert_id")
+              : null);
+
+          if (alert.id !== lastId) {
+            const parts = alert.id.split("-");
+            const ts = parseInt(parts[parts.length - 1] ?? "0", 10);
+            const isRecent = !ts || Date.now() - ts < 5 * 60 * 1000;
+
+            if (isRecent) {
+              lastAlertAnnouncedIdRef.current = alert.id;
+              try {
+                localStorage.setItem("pizarra_last_announced_alert_id", alert.id);
+              } catch {
+                // ignore
+              }
+              setAlertQueue((prev) => {
+                if (prev.some((a) => a.id === alert.id)) return prev;
+                return [...prev, alert];
+              });
+            }
+          }
+        }
+      }
+    } catch {
+      // server route may be temporarily busy
+    }
+
     const { data: gamesData } = await supabase
       .from("games")
       .select("*")
@@ -119,6 +289,10 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     const imgMap: AnimalImageMap = {};
     for (const img of (imagesData.data ?? []) as AnimalImage[]) {
       imgMap[`${img.game_id}:${img.animal_number}`] = img.image_url;
+      // Also provide a fallback for this animal across all games
+      if (!imgMap[`any:${img.animal_number}`]) {
+        imgMap[`any:${img.animal_number}`] = img.image_url;
+      }
     }
     setAnimalImages(imgMap);
 
@@ -148,7 +322,8 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
             const displayLabel =
               labelMap[`${res.game_id}:${res.animal_number}`] ??
               String(res.animal_number).padStart(2, "0");
-            const imgUrl = imgMap[`${res.game_id}:${res.animal_number}`];
+            const imgUrl =
+              imgMap[`${res.game_id}:${res.animal_number}`] ?? imgMap[`any:${res.animal_number}`];
 
             newAlerts.push({
               id: `${res.id}-${Date.now()}`,
@@ -181,6 +356,67 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     setLoading(false);
   }, []);
 
+  // Listen for real-time broadcasts and check pending alerts on mount
+  useEffect(() => {
+    let bc: BroadcastChannel | null = null;
+    try {
+      bc = new BroadcastChannel("pizarra_lottery_channel");
+      bc.onmessage = (event) => {
+        if (event.data?.type === "NEW_RESULT_ALERT" && event.data.alert) {
+          const incoming = event.data.alert as ResultAlertItem;
+          lastAlertAnnouncedIdRef.current = incoming.id;
+          try {
+            localStorage.setItem("pizarra_last_announced_alert_id", incoming.id);
+          } catch {
+            // ignore
+          }
+          setAlertQueue((prev) => {
+            if (prev.some((a) => a.id === incoming.id)) return prev;
+            return [...prev, incoming];
+          });
+          fetchAll();
+        } else if (event.data?.type === "ANIMAL_MEDIA_UPDATED") {
+          fetchAll();
+        }
+      };
+    } catch {
+      // ignore
+    }
+
+    const checkPendingAlerts = () => {
+      try {
+        const raw = localStorage.getItem("pizarra_pending_result_alerts");
+        if (raw) {
+          const list = JSON.parse(raw);
+          if (Array.isArray(list) && list.length > 0) {
+            setAlertQueue((prev) => {
+              const prevIds = new Set(prev.map((a) => a.id));
+              const fresh = list.filter((a) => !prevIds.has(a.id));
+              return fresh.length > 0 ? [...prev, ...fresh] : prev;
+            });
+            localStorage.removeItem("pizarra_pending_result_alerts");
+          }
+        }
+      } catch {
+        // ignore
+      }
+    };
+
+    checkPendingAlerts();
+
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === "pizarra_pending_result_alerts") {
+        checkPendingAlerts();
+      }
+    };
+    window.addEventListener("storage", onStorage);
+
+    return () => {
+      bc?.close();
+      window.removeEventListener("storage", onStorage);
+    };
+  }, [fetchAll]);
+
   const handleManualRefresh = useCallback(async () => {
     try {
       const res = await fetch("/api/public/results/sync", { method: "POST" });
@@ -199,39 +435,17 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
 
   useEffect(() => {
     fetchAll();
-    // Auto-sync today's TuAzar results on initial load
-    fetch("/api/public/results/sync", { method: "POST" })
-      .then((res) => (res.ok ? res.json() : null))
-      .then(async (data) => {
-        if (Array.isArray(data?.results)) {
-          const { mockStore } = await import("@/lib/mock-db");
-          mockStore.results = data.results;
-          fetchAll();
-        } else if (data?.reports) {
-          fetchAll();
-        }
-      })
-      .catch(() => {});
-
-    // Listen to real-time result changes
-    const channel = supabase
-      .channel("public:results")
-      .on("postgres_changes", { event: "*", schema: "public", table: "results" }, () => {
-        fetchAll();
-      })
-      .subscribe();
-
-    const refreshInterval = setInterval(fetchAll, 30000);
-    const clockInterval = setInterval(() => setClock(new Date()), 1000);
-    return () => {
-      supabase.removeChannel(channel);
-      clearInterval(refreshInterval);
-      clearInterval(clockInterval);
-    };
+    const interval = setInterval(fetchAll, 10000);
+    return () => clearInterval(interval);
   }, [fetchAll]);
 
+  useEffect(() => {
+    const timer = setInterval(() => setClock(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
   const handleTestAlert = () => {
-    const allResults: Array<{ res: Result; game: Game }> = [];
+    const allResults: { res: Result; game: Game }[] = [];
     for (const g of games) {
       const gResults = resultsMap[g.id] ?? [];
       for (const r of gResults) {
@@ -246,7 +460,8 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       const displayName = animalNames[`${g.id}:${r.animal_number}`] ?? r.animal_name;
       const displayLabel =
         animalLabels[`${g.id}:${r.animal_number}`] ?? String(r.animal_number).padStart(2, "0");
-      const imgUrl = animalImages[`${g.id}:${r.animal_number}`];
+      const imgUrl =
+        animalImages[`${g.id}:${r.animal_number}`] ?? animalImages[`any:${r.animal_number}`];
       setAlertQueue([
         {
           id: `test-${Date.now()}`,
@@ -265,6 +480,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       ]);
     } else if (games.length > 0) {
       const g = games[0]!;
+      const imgUrl = animalImages[`${g.id}:4`] ?? animalImages["any:4"] ?? null;
       setAlertQueue([
         {
           id: `test-${Date.now()}`,
@@ -277,7 +493,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           animalNumber: 4,
           animalName: "Alacrán",
           animalLabel: "04",
-          animalImageUrl: null,
+          animalImageUrl: imgUrl,
           animalEmoji: getAnimalEmoji(4, "Alacrán"),
         },
       ]);
@@ -307,126 +523,124 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
 
   return (
     <div
-      className="min-h-screen text-white flex flex-col"
-      style={{ backgroundColor: settings.background_color, color: settings.text_color }}
+      className="full-screen-board font-sans"
+      style={{
+        backgroundColor: settings.background_color || "#000000",
+        color: settings.text_color || "#ffffff",
+        fontFamily: settings.font_family || "inherit",
+      }}
     >
       {/* Header */}
       <header
-        className="flex items-center justify-between px-6 py-3 border-b border-slate-800"
-        style={{ backgroundColor: settings.surface_color }}
+        className="board-fluid-header flex items-center justify-between"
+        style={{
+          backgroundColor: settings.surface_color || "transparent",
+        }}
       >
+        {/* Left Title */}
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-600/30">
-            <span className="text-xl">🎯</span>
-          </div>
-          <div>
-            <h1 className="text-xl font-bold tracking-tight">pizarraianimaltec</h1>
-            <p className="text-xs text-slate-400">Resultados en vivo</p>
-          </div>
+          <h1
+            className="text-2xl sm:text-3xl lg:text-4xl font-black tracking-tight font-sans"
+            style={{ color: settings.text_color || "#ffffff" }}
+          >
+            Pizarra Animaltec
+          </h1>
         </div>
 
-        <div className="flex items-center gap-4">
-          <div className="text-right hidden sm:block">
-            <div className="text-2xl font-mono font-bold tabular-nums">
+        {/* Right Clock & Controls */}
+        <div className="flex items-center gap-4 sm:gap-6">
+          <div className="text-right">
+            <div className="text-2xl sm:text-3xl lg:text-4xl font-mono font-black text-emerald-400 tracking-tight tabular-nums leading-none">
               {clock.toLocaleTimeString("es-VE", {
                 timeZone: LOTTERY_TIMEZONE,
                 hour: "2-digit",
                 minute: "2-digit",
                 second: "2-digit",
+                hour12: false,
               })}
             </div>
-            <div className="text-xs text-slate-400">
-              {clock.toLocaleDateString("es-VE", {
-                timeZone: LOTTERY_TIMEZONE,
-                weekday: "long",
-                day: "numeric",
-                month: "long",
-              })}
+            <div className="text-xs sm:text-sm font-semibold opacity-90 mt-1">
+              {formatBoardDate(clock)}
             </div>
           </div>
+
           <div className="flex items-center gap-2">
-            <span className="text-xs text-slate-500 hidden lg:inline">
-              Actualizado:{" "}
-              {lastUpdate.toLocaleTimeString("es-VE", { hour: "2-digit", minute: "2-digit" })}
-            </span>
             <button
               onClick={handleTestAlert}
-              className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 transition flex items-center gap-1.5 text-xs text-slate-300"
-              title="Probar alerta visual y de voz"
+              className="p-2 rounded-lg bg-slate-900 border border-slate-800 hover:bg-slate-800 transition text-xs text-slate-300 hidden md:flex items-center gap-1.5"
+              title="Probar voz"
             >
               <Volume2 className="w-4 h-4 text-emerald-400" />
-              <span className="hidden md:inline">Probar voz</span>
+              <span>Probar voz</span>
             </button>
             <button
               onClick={() => setShowVoiceSettings(true)}
-              className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 transition flex items-center gap-1.5 text-xs text-slate-300"
-              title="Configurar voz natural (seleccionar voz humana, velocidad y tono)"
+              className="p-2 rounded-lg bg-slate-900 border border-slate-800 hover:bg-slate-800 transition text-xs text-slate-300 hidden lg:flex items-center gap-1.5"
+              title="Ajustar voz"
             >
               <Sliders className="w-4 h-4 text-amber-400" />
-              <span className="hidden lg:inline">Ajustar voz</span>
+              <span>Voz</span>
             </button>
             <button
               onClick={() => handleVoiceToggle(!voiceEnabled)}
-              className={`p-2 rounded-lg transition ${
+              className={`p-2 rounded-lg transition border border-slate-800 ${
                 voiceEnabled
-                  ? "bg-blue-600/20 text-blue-400 hover:bg-blue-600/30"
-                  : "bg-slate-800 text-slate-500 hover:bg-slate-700"
+                  ? "bg-blue-950/60 text-blue-400 hover:bg-blue-900/60"
+                  : "bg-slate-900 text-slate-500 hover:bg-slate-800"
               }`}
-              title={
-                voiceEnabled
-                  ? "Voz activada (clic para silenciar)"
-                  : "Voz silenciada (clic para activar)"
-              }
+              title={voiceEnabled ? "Voz activada" : "Voz silenciada"}
             >
               {voiceEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
             </button>
             <button
               onClick={() => setShowWeekly(true)}
-              className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 transition"
+              className="p-2 rounded-lg bg-slate-900 border border-slate-800 hover:bg-slate-800 transition text-slate-300"
               title="Pizarra semanal"
             >
-              <CalendarDays className="w-4 h-4 text-slate-300" />
+              <CalendarDays className="w-4 h-4" />
             </button>
             <button
               onClick={handleManualRefresh}
-              className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 transition"
+              className="p-2 rounded-lg bg-slate-900 border border-slate-800 hover:bg-slate-800 transition text-slate-300"
               title="Actualizar"
             >
-              <RefreshCw className="w-4 h-4 text-slate-300" />
+              <RefreshCw className="w-4 h-4" />
             </button>
             {profile?.role === "admin" && (
               <button
                 onClick={onAdminClick}
-                className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 transition"
+                className="p-2 rounded-lg bg-slate-900 border border-slate-800 hover:bg-slate-800 transition text-slate-300"
                 title="Panel de administración"
               >
-                <Settings className="w-4 h-4 text-slate-300" />
+                <Settings className="w-4 h-4" />
               </button>
             )}
             <button
               onClick={signOut}
-              className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 transition"
+              className="px-3.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700/80 hover:bg-slate-800 text-slate-300 hover:text-white text-xs font-semibold transition cursor-pointer"
               title="Salir"
             >
-              <LogOut className="w-4 h-4 text-slate-300" />
+              Salir
             </button>
           </div>
         </div>
       </header>
 
-      {/* Board grid */}
-      <main className="flex-1 p-4 lg:p-6 overflow-auto">
-        <AdBanner placement="top" className="mb-4" />
+      {/* Dynamic Screen-Filling Grid Container */}
+      <main
+        className="board-fluid-main"
+        style={{ backgroundColor: settings.background_color || "#000000" }}
+      >
         {loading ? (
           <div className="flex items-center justify-center h-full">
-            <div className="animate-pulse text-slate-400">Cargando resultados...</div>
+            <div className="animate-pulse text-slate-400 font-medium">Cargando resultados...</div>
           </div>
         ) : gameCards.length === 0 ? (
           <div className="flex items-center justify-center h-full text-slate-400">
             No hay juegos activos configurados.
           </div>
         ) : (
-          <div className="display-game-grid">
+          <div className="board-fluid-grid" style={getDynamicGridStyle(gameCards.length)}>
             {gameCards.map((game) => (
               <GameCard
                 key={game.id}
@@ -434,6 +648,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
                 animalImages={animalImages}
                 animalNames={animalNames}
                 animalLabels={animalLabels}
+                settings={settings}
               />
             ))}
           </div>
@@ -441,14 +656,14 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       </main>
 
       {/* Footer */}
-      <footer className="px-6 py-2 bg-slate-900/80 border-t border-slate-800 text-center">
-        <AdBanner placement="bottom" className="mb-2 max-w-3xl mx-auto" />
-        <p className="text-xs text-slate-500">
-          {profile?.email} · {profile?.role === "admin" ? "Administrador" : "Visualizador"}
+      <footer className="px-6 py-1 bg-black border-t border-slate-900/80 text-center flex-shrink-0">
+        <p className="text-[10px] text-slate-600 font-mono">
+          pizarraianimaltec · {profile?.email} (
+          {profile?.role === "admin" ? "Administrador" : "Visualizador"})
         </p>
       </footer>
 
-      {/* Real-time result announcement modal with speech synthesis */}
+      {/* Real-time result announcement modal */}
       {alertQueue.length > 0 && (
         <ResultAlertModal
           alerts={alertQueue}
@@ -468,23 +683,22 @@ function AnimalAvatar({
   imageUrl,
   name,
   number,
+  className,
 }: {
   imageUrl?: string;
   name: string;
   number: number;
+  className?: string;
 }) {
-  const [hasError, setHasError] = useState(false);
-  if (imageUrl && !hasError) {
-    return (
-      <img
-        src={imageUrl}
-        alt={name}
-        onError={() => setHasError(true)}
-        className="display-animal-image object-contain rounded"
-      />
-    );
-  }
-  return <span className="display-animal-emoji">{getAnimalEmoji(number, name)}</span>;
+  return (
+    <AnimalMedia
+      mediaUrl={imageUrl}
+      name={name}
+      number={number}
+      className={className || "w-full h-full object-contain rounded-md"}
+      emojiClassName="text-[clamp(1.8rem,3.2vw,3.8rem)] leading-none select-none"
+    />
+  );
 }
 
 function GameCard({
@@ -492,74 +706,159 @@ function GameCard({
   animalImages,
   animalNames,
   animalLabels,
+  settings,
 }: {
   game: GameWithResults;
   animalImages: AnimalImageMap;
   animalNames: AnimalNameMap;
   animalLabels: AnimalLabelMap;
+  settings: ReturnType<typeof useBoardSettings>["settings"];
 }) {
   const results = game.latest_results;
-  const { settings } = useBoardSettings();
+  const scheduleTimes = buildFullSchedule(game.slug, results);
+  const latestResult = results.length > 0 ? results[results.length - 1] : null;
+
+  const latestImgUrl = latestResult
+    ? (animalImages[`${game.id}:${latestResult.animal_number}`] ??
+      animalImages[`any:${latestResult.animal_number}`])
+    : undefined;
+  const latestDisplayName = latestResult
+    ? (animalNames[`${game.id}:${latestResult.animal_number}`] ?? latestResult.animal_name)
+    : "";
+  const latestLabel = latestResult
+    ? (animalLabels[`${game.id}:${latestResult.animal_number}`] ??
+      String(latestResult.animal_number).padStart(2, "0"))
+    : "";
 
   return (
     <div
-      className="display-game-card rounded-lg overflow-hidden shadow-xl border border-slate-800 flex flex-col"
+      className="fluid-game-card"
       style={{
-        borderTopColor: game.color,
-        borderTopWidth: "4px",
-        backgroundColor: settings.card_color,
+        backgroundColor: settings.card_color || "#000000",
+        borderColor: game.color,
+        boxShadow: `0 0 15px ${game.color}15`,
       }}
     >
-      {/* Game title */}
-      <div
-        className="display-game-title px-4 py-2.5 font-bold text-center uppercase flex flex-col items-center justify-center gap-2"
-        style={{ backgroundColor: `${game.color}25`, color: game.color }}
-      >
-        {game.logo_url && (
-          <img src={game.logo_url} alt={`Logo ${game.name}`} className="display-logo" />
+      {/* Top Header */}
+      <div className="fluid-card-header">
+        {game.logo_url ? (
+          <div
+            className="rounded-full border border-slate-800 bg-slate-900 flex items-center justify-center overflow-hidden flex-shrink-0 fluid-logo-wrapper"
+            style={{ width: "var(--display-logo)", height: "var(--display-logo)" }}
+          >
+            <img
+              src={game.logo_url}
+              alt={game.name}
+              className="w-full h-full object-contain p-0.5"
+            />
+          </div>
+        ) : (
+          <div
+            className="rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 fluid-logo-wrapper"
+            style={{
+              backgroundColor: `${game.color}20`,
+              color: game.color,
+              width: "var(--display-logo)",
+              height: "var(--display-logo)",
+            }}
+          >
+            🎯
+          </div>
         )}
-        <span>{game.name}</span>
+        <div className="flex-1 min-w-0">
+          <h2 className="fluid-game-title truncate" style={{ color: game.color }}>
+            {game.name}
+          </h2>
+          <p className="fluid-game-subtitle font-mono truncate">
+            {results.length >= scheduleTimes.length ? "Sorteos de hoy completos" : "En progreso"}
+          </p>
+        </div>
       </div>
 
-      {/* All results for today — list */}
-      <div className="flex-1 px-3 py-3 space-y-2">
-        {results.length === 0 ? (
-          <div className="text-slate-500 text-sm text-center py-8">Sin resultados hoy</div>
-        ) : (
-          results.map((r, idx) => {
-            const isLatest = idx === results.length - 1;
-            const imgUrl = animalImages[`${game.id}:${r.animal_number}`];
-            const displayName = animalNames[`${game.id}:${r.animal_number}`] ?? r.animal_name;
-            const displayLabel =
-              animalLabels[`${game.id}:${r.animal_number}`] ??
-              String(r.animal_number).padStart(2, "0");
-            return (
-              <div
-                key={r.id}
-                className="display-result-row rounded-lg"
-                style={{
-                  backgroundColor: settings.result_row_color,
-                  ...(isLatest ? { boxShadow: `inset 0 0 0 1px ${game.color}40` } : {}),
-                }}
-              >
-                {/* Time */}
-                <div className="flex items-center gap-1.5">
-                  <Clock className="w-3.5 h-3.5 text-slate-500" />
-                  <span className="display-time font-mono font-bold">
-                    {formatTime(r.draw_time)}
-                  </span>
-                </div>
+      {/* Hero Center Display (Customized by result_row_color, --display-hero-scale and --display-animal-scale) */}
+      <div
+        className="fluid-hero-banner"
+        style={{
+          backgroundColor: settings.result_row_color || "rgba(15, 23, 42, 0.8)",
+        }}
+      >
+        <div
+          className="rounded-xl bg-slate-950/90 border border-slate-700/80 flex items-center justify-center flex-shrink-0 overflow-hidden shadow-inner p-1"
+          style={{
+            width:
+              "calc(clamp(3.5rem, 5vw, 6.5rem) * var(--display-hero-scale, 1) * var(--display-animal-scale, 1))",
+            height:
+              "calc(clamp(3.5rem, 5vw, 6.5rem) * var(--display-hero-scale, 1) * var(--display-animal-scale, 1))",
+          }}
+        >
+          {latestResult ? (
+            <AnimalAvatar
+              imageUrl={latestImgUrl}
+              name={latestDisplayName}
+              number={latestResult.animal_number}
+              className="w-full h-full object-contain p-0.5 drop-shadow-md rounded-lg"
+            />
+          ) : (
+            <Target className="w-8 h-8 sm:w-10 sm:h-10 text-slate-500" />
+          )}
+        </div>
 
-                {/* Animal image/emoji + number + name */}
-                <div className="display-animal">
-                  <AnimalAvatar imageUrl={imgUrl} name={displayName} number={r.animal_number} />
-                  <span className="display-number font-black tabular-nums">{displayLabel}</span>
-                  <span className="display-name font-bold">{displayName}</span>
-                </div>
+        <div className="flex-1 text-right min-w-0">
+          <div
+            className="h-2 w-12 sm:w-16 rounded-full ml-auto mb-1.5 shadow-sm"
+            style={{ backgroundColor: game.color }}
+          />
+          {latestResult ? (
+            <div className="truncate">
+              <div className="fluid-hero-text font-black text-white tracking-wide truncate">
+                {latestLabel} - {latestDisplayName.toUpperCase()}
               </div>
-            );
-          })
-        )}
+              <div className="text-xs sm:text-sm text-slate-300 font-mono font-semibold mt-0.5">
+                {formatTime(latestResult.draw_time)}
+              </div>
+            </div>
+          ) : (
+            <div className="fluid-hero-text font-bold text-slate-400 tracking-wide">
+              Esperando sorteo
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Bottom Schedule Matrix Grid */}
+      <div className="fluid-schedule-matrix">
+        {scheduleTimes.map((timeSlot) => {
+          const res = findResultForTimeSlot(results, timeSlot);
+          const displayNum = res
+            ? (animalLabels[`${game.id}:${res.animal_number}`] ??
+              String(res.animal_number).padStart(2, "0"))
+            : null;
+
+          return (
+            <div
+              key={timeSlot}
+              className={`fluid-schedule-cell transition ${
+                res ? "border-slate-700/90 shadow-sm" : "border-slate-800/80 opacity-80"
+              }`}
+              style={{
+                backgroundColor: res
+                  ? settings.result_row_color || "rgba(15, 23, 42, 0.9)"
+                  : "rgba(2, 6, 23, 0.6)",
+              }}
+            >
+              <div className="fluid-cell-time">{formatTime(timeSlot)}</div>
+              <div className="fluid-cell-result truncate">
+                {res ? (
+                  <span style={{ color: game.color }} className="font-black">
+                    {displayNum}
+                  </span>
+                ) : (
+                  <span className="text-slate-600 font-normal">—</span>
+                )}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

@@ -55,7 +55,10 @@ import {
   Palette,
   Pencil,
   RefreshCw,
+  Tv,
+  Video,
 } from "lucide-react";
+import AnimalMedia, { isVideoMedia } from "@/components/AnimalMedia";
 
 interface AnimalListItem {
   number: number;
@@ -92,8 +95,30 @@ export default function AdminPage({ onBack }: AdminPageProps) {
   const [loading, setLoading] = useState(true);
 
   const fetchGames = useCallback(async () => {
+    let localGames: Game[] = [];
+    if (typeof window !== "undefined") {
+      try {
+        const raw = localStorage.getItem("pizarra_persisted_games");
+        if (raw) localGames = JSON.parse(raw);
+      } catch {
+        // ignore
+      }
+    }
+
     const { data } = await supabase.from("games").select("*").order("display_order");
-    setGames((data ?? []) as Game[]);
+    let loaded = (data ?? []) as Game[];
+    if (localGames.length > 0) {
+      loaded = loaded.map((g) => {
+        const match = localGames.find((lg) => lg.id === g.id || lg.slug === g.slug);
+        if (match) {
+          const effectiveMode =
+            match.loading_mode ?? match.mode ?? g.loading_mode ?? g.mode ?? "automatic";
+          return { ...g, ...match, loading_mode: effectiveMode, mode: effectiveMode };
+        }
+        return g;
+      });
+    }
+    setGames(loaded);
     setLoading(false);
   }, []);
 
@@ -247,23 +272,92 @@ function ResultsManager({ games }: { games: Game[] }) {
     const animal = animalList.find((a) => a.number === animalNumber);
     const animalName = animal ? animal.name : `Animal ${animalNumber}`;
 
-    const { error } = await supabase.from("results").upsert(
-      {
-        game_id: selectedGame,
-        draw_date: drawDate,
-        draw_time: drawTime + ":00",
-        animal_number: animalNumber,
-        animal_name: animalName,
-        source: manualResultSource,
-      },
-      { onConflict: "game_id,draw_date,draw_time" },
-    );
+    const resultPayload = {
+      game_id: selectedGame,
+      draw_date: drawDate,
+      draw_time: drawTime + ":00",
+      animal_number: animalNumber,
+      animal_name: animalName,
+      source: manualResultSource,
+    };
+
+    const { error } = await supabase
+      .from("results")
+      .upsert(resultPayload, { onConflict: "game_id,draw_date,draw_time" });
 
     if (error) {
       setMessage({ type: "err", text: error.message });
     } else {
       setMessage({ type: "ok", text: "Resultado guardado correctamente" });
       fetchResults();
+
+      // Broadcast and queue announcement alert for this winning animal
+      const gameObj = games.find((g) => g.id === selectedGame);
+      const displayLabel = animal?.label ?? String(animalNumber).padStart(2, "0");
+
+      // Query media (video / image) for this animal
+      let animalImageUrl: string | null = null;
+      try {
+        const { data: imgData } = await supabase
+          .from("animal_images")
+          .select("image_url")
+          .eq("game_id", selectedGame)
+          .eq("animal_number", animalNumber)
+          .maybeSingle();
+
+        if (imgData?.image_url) {
+          animalImageUrl = imgData.image_url;
+        } else {
+          const { data: anyImgData } = await supabase
+            .from("animal_images")
+            .select("image_url")
+            .eq("animal_number", animalNumber)
+            .limit(1);
+          if (anyImgData && anyImgData.length > 0 && anyImgData[0]?.image_url) {
+            animalImageUrl = anyImgData[0].image_url;
+          }
+        }
+      } catch {
+        // ignore
+      }
+
+      const alertItem = {
+        id: `alert-${selectedGame}-${drawDate}-${drawTime}-${Date.now()}`,
+        gameId: selectedGame,
+        gameName: gameObj?.name ?? "Lotería",
+        gameColor: gameObj?.color ?? "#3b82f6",
+        gameLogoUrl: gameObj?.logo_url ?? null,
+        drawDate,
+        drawTime: drawTime + ":00",
+        animalNumber,
+        animalName,
+        animalLabel: displayLabel,
+        animalImageUrl,
+        animalEmoji: getEmojiForNumber(animalNumber, animalName),
+      };
+
+      try {
+        await fetch("/api/public/results/sync", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ result: resultPayload, alert: alertItem }),
+        });
+      } catch {
+        // ignore
+      }
+
+      if (typeof window !== "undefined") {
+        try {
+          const list = JSON.parse(localStorage.getItem("pizarra_pending_result_alerts") || "[]");
+          list.push(alertItem);
+          localStorage.setItem("pizarra_pending_result_alerts", JSON.stringify(list));
+          const bc = new BroadcastChannel("pizarra_lottery_channel");
+          bc.postMessage({ type: "NEW_RESULT_ALERT", alert: alertItem });
+          setTimeout(() => bc.close(), 1000);
+        } catch {
+          // ignore
+        }
+      }
     }
     setSaving(false);
     setTimeout(() => setMessage(null), 3000);
@@ -544,13 +638,44 @@ function GamesManager({ games, onRefresh }: { games: Game[]; onRefresh: () => vo
     setSavingMode(game.id);
     setError(null);
     try {
-      const { data, error: modeError } = await supabase
+      // 1. Update in Supabase / database
+      const { error: modeError } = await supabase
         .from("games")
         .update({ loading_mode: mode })
-        .eq("id", game.id)
-        .select("id")
-        .single();
-      if (modeError || !data) throw modeError ?? new Error("No se pudo guardar el modo");
+        .eq("id", game.id);
+
+      if (modeError) throw modeError;
+
+      // 2. Persist to localStorage immediately
+      if (typeof window !== "undefined") {
+        try {
+          const raw = localStorage.getItem("pizarra_persisted_games");
+          const storedGames = raw ? JSON.parse(raw) : [];
+          const idx = storedGames.findIndex((g: Game) => g.id === game.id);
+          if (idx >= 0) {
+            storedGames[idx] = { ...storedGames[idx], loading_mode: mode, mode };
+          } else {
+            storedGames.push({ ...game, loading_mode: mode, mode });
+          }
+          localStorage.setItem("pizarra_persisted_games", JSON.stringify(storedGames));
+        } catch {
+          // ignore
+        }
+      }
+
+      // 3. Persist to server backend immediately so TuAzar synchronization skips it
+      try {
+        await fetch("/api/public/results/sync", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            gameUpdate: { id: game.id, loading_mode: mode, mode },
+          }),
+        });
+      } catch {
+        // ignore
+      }
+
       onRefresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "No se pudo guardar el modo");
@@ -838,7 +963,7 @@ function GamesManager({ games, onRefresh }: { games: Game[]; onRefresh: () => vo
 
               <div className="w-40 shrink-0 space-y-1">
                 <Select
-                  value={game.loading_mode ?? "manual"}
+                  value={(game.mode ?? game.loading_mode ?? "automatic").toLowerCase()}
                   disabled={savingMode !== null}
                   onValueChange={(value) => {
                     if (value === "manual" || value === "automatic") handleModeChange(game, value);
@@ -852,7 +977,7 @@ function GamesManager({ games, onRefresh }: { games: Game[]; onRefresh: () => vo
                     <SelectItem value="automatic">Automático</SelectItem>
                   </SelectContent>
                 </Select>
-                {game.loading_mode === "automatic" && (
+                {(game.mode ?? game.loading_mode ?? "automatic").toLowerCase() === "automatic" ? (
                   <p
                     className="text-xs text-emerald-400 font-medium truncate"
                     title={
@@ -882,6 +1007,13 @@ function GamesManager({ games, onRefresh }: { games: Game[]; onRefresh: () => vo
                         "lotto-activo-internacional": "TuAzar (LOTTO INT.)",
                       } as Record<string, string>
                     )[game.slug] ?? "Fuente pendiente"}
+                  </p>
+                ) : (
+                  <p
+                    className="text-xs text-amber-400 font-medium truncate"
+                    title="Carga manual activa: los resultados se ingresan desde el panel y TuAzar no los modificará"
+                  >
+                    Modo manual activo
                   </p>
                 )}
               </div>
@@ -1079,21 +1211,32 @@ function AnimalsManager({ games }: { games: Game[] }) {
     if (!selectedGame) return;
     if (!bulkUploading) setUploadingFor(animalNumber);
     try {
-      const ext = file.name.split(".").pop()?.toLowerCase() ?? "png";
-      const fileName = `${selectedGame}/animal-${animalNumber}.${ext}`;
+      let finalUrl = "";
+      try {
+        const formData = new FormData();
+        formData.append("file", file);
+        const res = await fetch("/api/media", {
+          method: "POST",
+          body: formData,
+        });
+        if (res.ok) {
+          const resData = await res.json();
+          if (resData.url) {
+            finalUrl = resData.url;
+          }
+        }
+      } catch (err) {
+        console.warn("Upload to /api/media error, using dataUrl fallback:", err);
+      }
 
-      // Convert file directly to DataURL for 100% reliable local preview and rendering
-      const dataUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result as string);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-
-      await supabase.storage.from("animal-images").upload(fileName, dataUrl, { upsert: true });
-
-      const imageUrl = await getMediaUrl("animal-images", fileName).catch(() => dataUrl);
-      const finalUrl = imageUrl || dataUrl;
+      if (!finalUrl) {
+        finalUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+      }
 
       await supabase.from("animal_images").upsert(
         {
@@ -1104,9 +1247,34 @@ function AnimalsManager({ games }: { games: Game[] }) {
         { onConflict: "game_id,animal_number" },
       );
 
+      // Sync to server disk storage so all TVs and devices have it
+      try {
+        await fetch("/api/public/results/sync", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            animalImage: {
+              game_id: selectedGame,
+              animal_number: animalNumber,
+              image_url: finalUrl,
+            },
+          }),
+        });
+        const bc = new BroadcastChannel("pizarra_lottery_channel");
+        bc.postMessage({
+          type: "ANIMAL_MEDIA_UPDATED",
+          gameId: selectedGame,
+          animalNumber,
+          imageUrl: finalUrl,
+        });
+        setTimeout(() => bc.close(), 1000);
+      } catch {
+        // ignore
+      }
+
       setImages((prev) => ({ ...prev, [animalNumber]: finalUrl }));
     } catch (err) {
-      console.error("Error al subir imagen:", err);
+      console.error("Error al subir archivo:", err);
     } finally {
       if (!bulkUploading) setUploadingFor(null);
     }
@@ -1123,6 +1291,31 @@ function AnimalsManager({ games }: { games: Game[] }) {
       },
       { onConflict: "game_id,animal_number" },
     );
+
+    try {
+      await fetch("/api/public/results/sync", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          animalImage: {
+            game_id: selectedGame,
+            animal_number: animalNumber,
+            image_url: finalUrl,
+          },
+        }),
+      });
+      const bc = new BroadcastChannel("pizarra_lottery_channel");
+      bc.postMessage({
+        type: "ANIMAL_MEDIA_UPDATED",
+        gameId: selectedGame,
+        animalNumber,
+        imageUrl: finalUrl,
+      });
+      setTimeout(() => bc.close(), 1000);
+    } catch {
+      // ignore
+    }
+
     setImages((prev) => ({ ...prev, [animalNumber]: finalUrl }));
   }
 
@@ -1265,7 +1458,7 @@ function AnimalsManager({ games }: { games: Game[] }) {
                 <input
                   ref={bulkInputRef}
                   type="file"
-                  accept="image/png,image/jpeg,image/webp,image/gif"
+                  accept="image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm,video/ogg,video/quicktime"
                   multiple
                   className="hidden"
                   onChange={(e) => {
@@ -1369,49 +1562,51 @@ function AnimalsManager({ games }: { games: Game[] }) {
             </div>
           )}
 
-          <div className="text-xs text-slate-500 bg-slate-900/50 rounded-lg px-4 py-2.5 border border-slate-800">
-            <strong className="text-slate-400">Subir todas:</strong> El sistema reconoce el animal
-            por el nombre del archivo, ya sea por numero (ej:{" "}
-            <span className="font-mono text-slate-300">05.png</span> o{" "}
-            <span className="font-mono text-slate-300">animal-12.jpg</span>) o por nombre (ej:{" "}
-            <span className="font-mono text-slate-300">delfin.png</span> o{" "}
-            <span className="font-mono text-slate-300">ballena.png</span>). Las imagenes sin numero
-            o nombre reconocible se ignoran.
+          <div className="text-xs text-slate-400 bg-slate-900/70 rounded-xl p-3 border border-slate-800 flex items-start gap-2.5">
+            <Video className="w-4 h-4 text-purple-400 flex-shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <p>
+                <strong className="text-white">Imágenes y Videos Animados:</strong> Ahora puedes
+                subir tanto imágenes (.png, .jpg, .webp, .gif) como{" "}
+                <strong>pequeños videos animados (.mp4, .webm, .ogg)</strong> para cada animalito.
+                Se reproducirán en bucle continuo y sin sonido en las pizarras y televisores.
+              </p>
+              <p className="text-slate-500">
+                Al subir por lote, el sistema reconoce el animal por número (ej:{" "}
+                <span className="font-mono text-slate-300">05.mp4</span> o{" "}
+                <span className="font-mono text-slate-300">animal-12.webm</span>) o por nombre (ej:{" "}
+                <span className="font-mono text-slate-300">delfin.mp4</span> o{" "}
+                <span className="font-mono text-slate-300">leon.gif</span>).
+              </p>
+            </div>
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
             {animalList.map((animal) => {
               const imgUrl = images[animal.number];
+              const isVideo = isVideoMedia(imgUrl);
               return (
                 <div
                   key={animal.number}
-                  className="bg-slate-900 rounded-xl border border-slate-800 p-4 flex flex-col items-center gap-3"
+                  className="bg-slate-900 rounded-xl border border-slate-800 p-4 flex flex-col items-center gap-3 relative"
                 >
                   <div className="text-xs text-slate-500 font-mono">
                     {animalDisplayLabel(animal)} · {animal.name}
                   </div>
 
                   <div className="w-20 h-20 rounded-lg bg-slate-800 flex items-center justify-center overflow-hidden relative">
-                    {imgUrl && (
-                      <img
-                        src={imgUrl}
-                        alt={animal.name}
-                        onError={(e) => {
-                          const target = e.currentTarget;
-                          target.style.display = "none";
-                          const fallback = target.nextElementSibling as HTMLElement;
-                          if (fallback) fallback.style.display = "flex";
-                        }}
-                        className="w-full h-full object-contain"
-                      />
+                    <AnimalMedia
+                      mediaUrl={imgUrl}
+                      name={animal.name}
+                      number={animal.number}
+                      className="w-full h-full object-contain"
+                      emojiClassName="text-3xl select-none"
+                    />
+                    {isVideo && (
+                      <span className="absolute top-1 right-1 px-1.5 py-0.5 rounded bg-purple-600/95 text-[9px] font-bold text-white flex items-center gap-0.5 shadow-sm">
+                        <Video className="w-2.5 h-2.5" /> VIDEO
+                      </span>
                     )}
-                    <span
-                      className={`text-3xl select-none items-center justify-center ${
-                        imgUrl ? "hidden" : "flex"
-                      }`}
-                    >
-                      {getEmojiForNumber(animal.number, animal.name)}
-                    </span>
                   </div>
 
                   <input
@@ -1419,7 +1614,7 @@ function AnimalsManager({ games }: { games: Game[] }) {
                       fileRefs.current[animal.number] = el;
                     }}
                     type="file"
-                    accept="image/png,image/jpeg,image/webp,image/gif"
+                    accept="image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm,video/ogg,video/quicktime"
                     className="hidden"
                     onChange={(e) => {
                       const file = e.target.files?.[0];
@@ -1432,7 +1627,7 @@ function AnimalsManager({ games }: { games: Game[] }) {
                       onClick={() => fileRefs.current[animal.number]?.click()}
                       disabled={uploadingFor === animal.number}
                       className="px-2.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-xs font-medium flex items-center gap-1 transition"
-                      title="Subir archivo desde este dispositivo"
+                      title="Subir imagen o video animado desde este dispositivo"
                     >
                       {uploadingFor === animal.number ? (
                         <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -1445,13 +1640,13 @@ function AnimalsManager({ games }: { games: Game[] }) {
                       type="button"
                       onClick={() => {
                         const url = window.prompt(
-                          `Pegar URL directa de imagen para ${animal.name}:`,
+                          `Pegar URL directa de imagen o video para ${animal.name} (.mp4, .webm, .gif, .png):`,
                           imgUrl || "",
                         );
                         if (url) handleSetImageUrl(animal.number, url);
                       }}
                       className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition"
-                      title="Pegar enlace URL directo"
+                      title="Pegar enlace URL directo de imagen o video"
                     >
                       <Link2 className="w-3.5 h-3.5" />
                     </button>
@@ -1459,7 +1654,7 @@ function AnimalsManager({ games }: { games: Game[] }) {
                       <button
                         onClick={() => handleDeleteImage(animal.number)}
                         className="p-1.5 rounded-lg text-red-400 hover:bg-red-950/40 transition"
-                        title="Eliminar imagen"
+                        title="Eliminar imagen o video"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
@@ -1487,6 +1682,14 @@ function SubscriptionsManager() {
   const [newDays, setNewDays] = useState(30);
   const [creatingClient, setCreatingClient] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+
+  // TV Pairing State
+  const [showPairModal, setShowPairModal] = useState(false);
+  const [pairCode, setPairCode] = useState("");
+  const [pairEmail, setPairEmail] = useState("m4rl0nh3rn4nd3z@gmail.com");
+  const [pairingBusy, setPairingBusy] = useState(false);
+  const [pairError, setPairError] = useState<string | null>(null);
+  const [pairSuccess, setPairSuccess] = useState<string | null>(null);
 
   const fetchUsers = useCallback(async () => {
     setLoading(true);
@@ -1612,6 +1815,44 @@ function SubscriptionsManager() {
     fetchUsers();
   }
 
+  async function handlePairTv(e: React.FormEvent) {
+    e.preventDefault();
+    const cleanCode = pairCode.replace(/[^0-9]/g, "");
+    if (!cleanCode) return;
+    setPairingBusy(true);
+    setPairError(null);
+    setPairSuccess(null);
+
+    try {
+      const res = await fetch("/api/tv/pair", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "authorize",
+          code: cleanCode,
+          email: pairEmail.trim().toLowerCase(),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        setPairError(data.error || "No se pudo vincular el televisor.");
+      } else {
+        setPairSuccess(
+          "¡Televisor vinculado exitosamente! En segundos cargará la pizarra en vivo.",
+        );
+        setPairCode("");
+        setTimeout(() => {
+          setShowPairModal(false);
+          setPairSuccess(null);
+        }, 3000);
+      }
+    } catch (err) {
+      setPairError("Error al vincular el televisor: " + String(err));
+    } finally {
+      setPairingBusy(false);
+    }
+  }
+
   const filtered = users.filter((u) => {
     if (u.role === "admin") return filter === "all";
     if (filter === "active") return subscriptionActive(u);
@@ -1631,7 +1872,18 @@ function SubscriptionsManager() {
             con alquiler activo pueden ver la pizarra.
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
+          <Button
+            onClick={() => {
+              setPairCode("");
+              setPairError(null);
+              setPairSuccess(null);
+              setShowPairModal(true);
+            }}
+            className="bg-indigo-600 hover:bg-indigo-500 text-white font-medium flex items-center gap-2 shadow-lg shadow-indigo-600/20"
+          >
+            <Tv className="w-4 h-4" /> Vincular TV con Código
+          </Button>
           <Button
             onClick={() => setShowAddModal(true)}
             className="bg-blue-600 hover:bg-blue-500 text-white font-medium flex items-center gap-2 shadow-lg shadow-blue-600/20"
@@ -1725,6 +1977,99 @@ function SubscriptionsManager() {
                   className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl"
                 >
                   Cancelar
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal para vincular TV mediante código */}
+      {showPairModal && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-5">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                <Tv className="w-5 h-5 text-indigo-400" /> Vincular Smart TV
+              </h3>
+              <button
+                onClick={() => setShowPairModal(false)}
+                className="p-1 rounded-lg text-slate-400 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Introduce el código de 6 dígitos que se muestra en la pantalla del televisor en la
+              aplicación <strong>BrowseHere</strong>.
+            </p>
+
+            <form onSubmit={handlePairTv} className="space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                  Código de la Pantalla del TV
+                </label>
+                <input
+                  type="text"
+                  required
+                  maxLength={7}
+                  value={pairCode}
+                  onChange={(e) => setPairCode(e.target.value)}
+                  placeholder="ej: 618-906"
+                  className="w-full px-3.5 py-3 bg-slate-950 border border-indigo-700/60 rounded-xl text-white text-center font-mono font-bold text-xl tracking-widest focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                  Asignar a esta cuenta:
+                </label>
+                <select
+                  value={pairEmail}
+                  onChange={(e) => setPairEmail(e.target.value)}
+                  className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm focus:outline-none focus:border-indigo-500"
+                >
+                  <option value="m4rl0nh3rn4nd3z@gmail.com">
+                    ⭐ Mi cuenta Administrador (m4rl0nh3rn4nd3z@gmail.com)
+                  </option>
+                  {users
+                    .filter((u) => u.role !== "admin")
+                    .map((client) => (
+                      <option key={client.id} value={client.email}>
+                        👤 Cliente: {client.email} (
+                        {client.subscription_status === "active" ? "Activo" : "Inactivo"})
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              {pairError && (
+                <div className="text-xs text-red-400 bg-red-950/40 border border-red-800/50 rounded-lg p-3">
+                  {pairError}
+                </div>
+              )}
+              {pairSuccess && (
+                <div className="text-xs text-emerald-400 bg-emerald-950/40 border border-emerald-800/50 rounded-lg p-3 font-medium">
+                  {pairSuccess}
+                </div>
+              )}
+
+              <div className="flex gap-3 pt-2">
+                <Button
+                  type="submit"
+                  disabled={pairingBusy}
+                  className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white font-medium"
+                >
+                  {pairingBusy && <Loader2 className="w-4 h-4 animate-spin mr-2" />}
+                  Vincular y Activar TV
+                </Button>
+                <button
+                  type="button"
+                  onClick={() => setShowPairModal(false)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl"
+                >
+                  Cerrar
                 </button>
               </div>
             </form>
