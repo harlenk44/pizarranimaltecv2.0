@@ -111,7 +111,7 @@ export default function LoginPage() {
           </button>
         </div>
 
-        <p className="text-center text-slate-500 text-xs mt-6">Pizarra Animaltec • Smart TV OS</p>
+        <p className="text-center text-slate-500 text-xs mt-6">Pizarra Animaltec Live</p>
       </div>
     </div>
   );

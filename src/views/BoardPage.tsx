@@ -12,11 +12,9 @@ import {
   VolumeX,
   Sliders,
   Target,
-  Tv,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { useBoardSettings } from "@/context/BoardSettingsContext";
-import { useTv } from "@/context/TvContext";
 import WeeklyBoard from "@/components/WeeklyBoard";
 import AdBanner from "@/components/AdBanner";
 import ResultAlertModal, { type ResultAlertItem } from "@/components/ResultAlertModal";
@@ -107,7 +105,6 @@ function getDynamicGridStyle(count: number): React.CSSProperties {
 export default function BoardPage({ onAdminClick }: BoardPageProps) {
   const { profile, signOut } = useAuth();
   const { settings } = useBoardSettings();
-  const { isTvActivated, deactivateTv } = useTv();
   const [games, setGames] = useState<Game[]>([]);
   const [resultsMap, setResultsMap] = useState<Record<string, Result[]>>({});
   const [animalImages, setAnimalImages] = useState<AnimalImageMap>({});
@@ -556,30 +553,12 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
             >
               <RefreshCw className="w-4 h-4" />
             </button>
-            {profile?.role === "admin" && (
-              <button
-                onClick={onAdminClick}
-                className="p-2 rounded-lg bg-slate-900 border border-slate-800 hover:bg-slate-800 transition text-slate-300"
-                title="Panel de administración"
-              >
-                <Settings className="w-4 h-4" />
-              </button>
-            )}
-            {isTvActivated && (
-              <button
-                onClick={deactivateTv}
-                className="p-2 rounded-lg bg-slate-900 border border-slate-800 hover:bg-amber-950/40 hover:border-amber-800/60 transition text-slate-400 hover:text-amber-400"
-                title="Resetear Activación de TV"
-              >
-                <Tv className="w-4 h-4 text-sky-400" />
-              </button>
-            )}
             <button
-              onClick={signOut}
-              className="px-3.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700/80 hover:bg-slate-800 text-slate-300 hover:text-white text-xs font-semibold transition cursor-pointer"
-              title="Salir"
+              onClick={onAdminClick}
+              className="p-2 rounded-lg bg-slate-900 border border-slate-800 hover:bg-slate-800 transition text-slate-300"
+              title="Panel de administración"
             >
-              Salir
+              <Settings className="w-4 h-4" />
             </button>
           </div>
         </div>
@@ -617,8 +596,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       {/* Footer */}
       <footer className="px-6 py-1 bg-black border-t border-slate-900/80 text-center flex-shrink-0">
         <p className="text-[10px] text-slate-600 font-mono">
-          pizarraianimaltec · {profile?.email} (
-          {profile?.role === "admin" ? "Administrador" : "Visualizador"})
+          pizarraianimaltec · Pizarra de Resultados de Lotería en Vivo
         </p>
       </footer>
 

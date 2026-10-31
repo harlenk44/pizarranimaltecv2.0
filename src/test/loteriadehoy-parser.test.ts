@@ -136,7 +136,9 @@ describe("loteriadehoy parser", () => {
 
   it("correctly matches game classes with matchGameClass", () => {
     expect(matchGameClass("lottoactivo", "lottoactivo")).toBe(true);
-    expect(matchGameClass("lottoactivo2(monjemillonario)", "lottoactivo2(monjemillonario)")).toBe(true);
+    expect(matchGameClass("lottoactivo2(monjemillonario)", "lottoactivo2(monjemillonario)")).toBe(
+      true,
+    );
     expect(matchGameClass("monjemillonario", "lottoactivo2(monjemillonario)")).toBe(true);
     expect(matchGameClass("guacharoactivo", "guacharoactivo")).toBe(true);
     expect(matchGameClass("elguacharitomillonario", "elguacharitomillonario")).toBe(true);

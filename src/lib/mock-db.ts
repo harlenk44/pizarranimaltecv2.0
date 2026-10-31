@@ -609,8 +609,8 @@ export async function syncTuazarDirectly(): Promise<number> {
           }
           ldhSuccess = added > 0 || ldhPage.results.length > 0;
         }
-      } catch (ldhErr) {
-        console.warn("[mock-db] LoteriaDeHoy fetch failed, falling back to TuAzar:", ldhErr);
+      } catch {
+        console.info("[mock-db] Using TuAzar fallback");
       }
 
       // 2. If LoteriaDeHoy was not available or produced 0 draws, fallback to TuAzar

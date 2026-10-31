@@ -50,10 +50,7 @@ export function matchGameClass(rawClass: string, targetClass: string): boolean {
   if (cleanTarget.includes("granjita") && cleanRaw.includes("granjita")) return true;
   if (cleanTarget.includes("chaima") && cleanRaw.includes("chaima")) return true;
   if (cleanTarget.includes("selva") && cleanRaw.includes("selva")) return true;
-  if (
-    cleanTarget === "lottoactivo" &&
-    (cleanRaw === "lottoactivo" || cleanRaw === "lottoactivo1")
-  )
+  if (cleanTarget === "lottoactivo" && (cleanRaw === "lottoactivo" || cleanRaw === "lottoactivo1"))
     return true;
   if (
     cleanTarget.includes("lottoactivord") &&
@@ -140,11 +137,7 @@ export function parseLoteriaDeHoyResults(html: string): LoteriaDeHoyPage {
   const cardRegex =
     /<div[^>]*class=["'][^"']*circle(?:\s+([^"']*))?["'][^>]*>[\s\S]*?<img\s+[^>]*src=["']([^"']+)["'][\s\S]*?<div[^>]*class=["'][^"']*circle-legend[^"']*["'][^>]*>[\s\S]*?<h4[^>]*>([\s\S]*?)<\/h4>\s*<h5[^>]*>([\s\S]*?)<\/h5>/gi;
 
-  function parseCardMatch(
-    cardMatch: RegExpExecArray,
-    defaultClass: string,
-    defaultTitle: string,
-  ) {
+  function parseCardMatch(cardMatch: RegExpExecArray, defaultClass: string, defaultTitle: string) {
     const rawCircleClasses = (cardMatch[1] || "").trim();
     const rawSrc = cardMatch[2].trim();
     const imageUrl = rawSrc.startsWith("http")
@@ -253,4 +246,3 @@ export function parseLoteriaDeHoyResults(html: string): LoteriaDeHoyPage {
     results,
   };
 }
-

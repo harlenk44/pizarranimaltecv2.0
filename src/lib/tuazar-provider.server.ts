@@ -212,10 +212,9 @@ export function createTuazarProvider(tuazarGameName: string, gameSlug?: string):
               return draws;
             }
           }
-        } catch (ldhErr) {
-          console.warn(
-            `[sync-primary] LoteriaDeHoy failed for ${game.slug} (${ldhErr}), switching to TuAzar fallback`,
-          );
+        } catch {
+          // LoteriaDeHoy unavailable or no matching draws; cleanly use TuAzar fallback
+          console.info(`[sync] Using TuAzar fallback for ${game.slug}`);
         }
       }
 
