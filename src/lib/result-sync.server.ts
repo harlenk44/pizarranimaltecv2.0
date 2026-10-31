@@ -5,7 +5,7 @@ import { createTuazarProvider, TUAZAR_GAME_NAMES } from "@/lib/tuazar-provider.s
 // Trusted, fixed-origin adapters by game slug. Games without an entry stay "pending_configuration".
 // No user-supplied URLs or placeholder results are used.
 const providers: Readonly<Record<string, ResultsProvider>> = Object.fromEntries(
-  Object.entries(TUAZAR_GAME_NAMES).map(([slug, name]) => [slug, createTuazarProvider(name)]),
+  Object.entries(TUAZAR_GAME_NAMES).map(([slug, name]) => [slug, createTuazarProvider(name, slug)]),
 );
 
 export async function synchronizeAutomaticResults(): Promise<SyncReport[]> {

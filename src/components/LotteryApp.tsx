@@ -1,18 +1,21 @@
 import { useState } from "react";
 import { AuthProvider, useAuth } from "@/context/AuthContext";
 import { BoardSettingsProvider, useBoardSettings } from "@/context/BoardSettingsContext";
+import { TvProvider, useTv } from "@/context/TvContext";
 import LoginPage from "@/views/LoginPage";
 import BoardPage from "@/views/BoardPage";
 import AdminPage from "@/views/AdminPage";
-import { Loader2, Lock, LogOut } from "lucide-react";
+import SmartTvActivationScreen from "@/views/SmartTvActivationScreen";
+import { Loader2 } from "lucide-react";
 import BoardDisplay from "@/components/BoardDisplay";
 
 function AppContent() {
-  const { session, profile, loading, subscriptionActive, signOut } = useAuth();
-  const { settings } = useBoardSettings();
+  const { profile, loading: authLoading } = useAuth();
+  const { isTvActivated, loading: tvLoading } = useTv();
   const [view, setView] = useState<"board" | "admin">("board");
+  const isAdmin = profile?.role === "admin";
 
-  if (loading) {
+  if (authLoading || tvLoading) {
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center">
         <Loader2 className="w-8 h-8 text-blue-500 animate-spin" />
@@ -20,51 +23,32 @@ function AppContent() {
     );
   }
 
-  if (!session || !profile) {
-    return <LoginPage />;
-  }
-
-  if (!subscriptionActive) {
+  // 1. Admin Panel View Requested
+  if (view === "admin") {
+    if (isAdmin) {
+      return <AdminPage onBack={() => setView("board")} />;
+    }
     return (
-      <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center justify-center px-6 text-center">
-        <div className="w-16 h-16 rounded-2xl bg-amber-500/20 flex items-center justify-center mb-5 border border-amber-500/30">
-          <Lock className="w-8 h-8 text-amber-400" />
+      <div className="relative">
+        <div className="absolute top-4 left-4 z-50">
+          <button
+            onClick={() => setView("board")}
+            className="px-3.5 py-2 rounded-xl bg-slate-900 border border-slate-800 hover:bg-slate-800 text-xs text-slate-300 font-semibold transition flex items-center gap-1.5 shadow-lg"
+          >
+            ← Volver a la Pizarra
+          </button>
         </div>
-        <h1 className="text-2xl font-bold mb-2">Servicio de Pizarra no Activo</h1>
-        <p className="text-slate-400 max-w-md mb-2">
-          El acceso a la pizarra en esta pantalla requiere una suscripción de alquiler activa.
-        </p>
-        <p className="text-xs text-slate-500 mb-1">
-          Cuenta: <span className="font-mono text-slate-300">{profile.email}</span>
-        </p>
-        {profile.subscription_expires_at ? (
-          <p className="text-xs text-red-400 mb-6">
-            El servicio venció el:{" "}
-            {new Date(profile.subscription_expires_at).toLocaleDateString("es-VE", {
-              day: "2-digit",
-              month: "short",
-              year: "numeric",
-            })}
-          </p>
-        ) : (
-          <p className="text-xs text-amber-400/90 mb-6">
-            Contacta a tu proveedor del servicio para activar esta pantalla.
-          </p>
-        )}
-        <button
-          onClick={signOut}
-          className="px-5 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-sm font-medium flex items-center gap-2 transition"
-        >
-          <LogOut className="w-4 h-4" /> Cambiar de Cuenta / Salir
-        </button>
+        <LoginPage />
       </div>
     );
   }
 
-  if (view === "admin" && profile.role === "admin") {
-    return <AdminPage onBack={() => setView("board")} />;
+  // 2. TV Screen Activation Guard (If TV is not activated & not Admin)
+  if (!isTvActivated && !isAdmin) {
+    return <SmartTvActivationScreen onAdminLoginClick={() => setView("admin")} />;
   }
 
+  // 3. Live Board Display (Rendered as soon as TV is activated OR logged in as Admin)
   return (
     <BoardDisplay>
       <BoardPage onAdminClick={() => setView("admin")} />
@@ -91,10 +75,12 @@ function ThemedShell() {
 
 export default function App() {
   return (
-    <AuthProvider>
-      <BoardSettingsProvider>
-        <ThemedShell />
-      </BoardSettingsProvider>
-    </AuthProvider>
+    <TvProvider>
+      <AuthProvider>
+        <BoardSettingsProvider>
+          <ThemedShell />
+        </BoardSettingsProvider>
+      </AuthProvider>
+    </TvProvider>
   );
 }

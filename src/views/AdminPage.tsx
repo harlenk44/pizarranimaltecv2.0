@@ -28,6 +28,12 @@ import {
 import { manualResultSource, type LoadingMode } from "@/lib/result-sync";
 import { lotteryDate } from "@/lib/lottery-date";
 import {
+  getGameScheduleTimes,
+  getDefaultGameScheduleTimes,
+  formatScheduleTime,
+  normalizeScheduleTime,
+} from "@/lib/game-schedules";
+import {
   ArrowLeft,
   Plus,
   Trash2,
@@ -57,8 +63,13 @@ import {
   RefreshCw,
   Tv,
   Video,
+  KeyRound,
+  ShieldCheck,
+  Unlink,
 } from "lucide-react";
 import AnimalMedia, { isVideoMedia } from "@/components/AnimalMedia";
+import { mockStore, saveProfilesToStorage } from "@/lib/mock-db";
+import type { TvDevice } from "@/lib/types";
 
 interface AnimalListItem {
   number: number;
@@ -87,7 +98,7 @@ interface AdminPageProps {
   onBack: () => void;
 }
 
-type Tab = "results" | "games" | "animals" | "subscriptions" | "ads" | "design";
+type Tab = "results" | "games" | "animals" | "tvs" | "ads" | "design";
 
 export default function AdminPage({ onBack }: AdminPageProps) {
   const [tab, setTab] = useState<Tab>("results");
@@ -140,7 +151,7 @@ export default function AdminPage({ onBack }: AdminPageProps) {
         </div>
       </header>
 
-      <div className="flex gap-2 px-6 py-3 bg-slate-900/50 border-b border-slate-800">
+      <div className="flex gap-2 px-6 py-3 bg-slate-900/50 border-b border-slate-800 flex-wrap">
         <button
           onClick={() => setTab("results")}
           className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
@@ -172,15 +183,15 @@ export default function AdminPage({ onBack }: AdminPageProps) {
           Animales
         </button>
         <button
-          onClick={() => setTab("subscriptions")}
+          onClick={() => setTab("tvs")}
           className={`px-4 py-2 rounded-lg text-sm font-medium transition flex items-center gap-2 ${
-            tab === "subscriptions"
-              ? "bg-blue-600 text-white"
+            tab === "tvs"
+              ? "bg-indigo-600 text-white shadow-lg shadow-indigo-600/30 font-bold"
               : "bg-slate-800 text-slate-400 hover:text-white"
           }`}
         >
-          <Users className="w-4 h-4" />
-          Suscripciones
+          <Tv className="w-4 h-4 text-indigo-400" />
+          Televisores & Pantallas TV
         </button>
         <button
           onClick={() => setTab("ads")}
@@ -207,8 +218,8 @@ export default function AdminPage({ onBack }: AdminPageProps) {
           <GamesManager games={games} onRefresh={fetchGames} />
         ) : tab === "animals" ? (
           <AnimalsManager games={games} />
-        ) : tab === "subscriptions" ? (
-          <SubscriptionsManager />
+        ) : tab === "tvs" ? (
+          <TvDevicesManager />
         ) : tab === "ads" ? (
           <AdsManager />
         ) : (
@@ -417,10 +428,10 @@ function ResultsManager({ games }: { games: Game[] }) {
             </div>
             <div>
               <h2 className="text-base font-semibold text-white">
-                Sincronización Automática TuAzar
+                Sincronización Automática (LoteriaDeHoy + TuAzar)
               </h2>
               <p className="text-xs text-slate-400">
-                Consulta los resultados de hoy en tuazar.com/loteria/animalitos/resultados/
+                Principal: loteriadehoy.com/animalitos/resultados/ • Respaldo: TuAzar
               </p>
             </div>
           </div>
@@ -487,7 +498,15 @@ function ResultsManager({ games }: { games: Game[] }) {
           </div>
 
           <div>
-            <label className="block text-xs text-slate-400 mb-1.5">Hora</label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs text-slate-400">Hora</label>
+              {games.find((g) => g.id === selectedGame) && (
+                <span className="text-[10px] text-blue-400 font-mono">
+                  {getGameScheduleTimes(games.find((g) => g.id === selectedGame)).length} horas
+                  configuradas
+                </span>
+              )}
+            </div>
             <div className="relative">
               <Clock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
               <input
@@ -497,6 +516,24 @@ function ResultsManager({ games }: { games: Game[] }) {
                 className="w-full pl-9 pr-3 py-2.5 bg-slate-800 border border-slate-700 rounded-lg text-sm focus:outline-none focus:border-blue-500"
               />
             </div>
+            {games.find((g) => g.id === selectedGame) && (
+              <div className="flex flex-wrap gap-1 mt-2 max-h-24 overflow-y-auto">
+                {getGameScheduleTimes(games.find((g) => g.id === selectedGame)).map((time) => (
+                  <button
+                    key={time}
+                    type="button"
+                    onClick={() => setDrawTime(time)}
+                    className={`text-[10px] font-mono px-2 py-0.5 rounded transition ${
+                      drawTime === time
+                        ? "bg-blue-600 text-white font-bold"
+                        : "bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    {time}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           <div>
@@ -633,6 +670,78 @@ function GamesManager({ games, onRefresh }: { games: Game[]; onRefresh: () => vo
   const [editingColor, setEditingColor] = useState<string | null>(null);
   const [uploadingLogo, setUploadingLogo] = useState<string | null>(null);
   const [savingMode, setSavingMode] = useState<string | null>(null);
+  const [expandedScheduleGameId, setExpandedScheduleGameId] = useState<string | null>(null);
+  const [newScheduleTimes, setNewScheduleTimes] = useState<Record<string, string>>({});
+  const [scheduleMessage, setScheduleMessage] = useState<{ id: string; text: string } | null>(null);
+
+  async function saveGameSchedules(game: Game, updatedTimes: string[]) {
+    try {
+      // 1. Update in Supabase
+      try {
+        await supabase.from("games").update({ schedule_times: updatedTimes }).eq("id", game.id);
+      } catch {
+        // ignore if column not present yet
+      }
+
+      // 2. Persist in localStorage
+      if (typeof window !== "undefined") {
+        try {
+          const raw = localStorage.getItem("pizarra_persisted_games");
+          const storedGames = raw ? JSON.parse(raw) : [];
+          const idx = storedGames.findIndex((g: Game) => g.id === game.id);
+          if (idx >= 0) {
+            storedGames[idx] = { ...storedGames[idx], schedule_times: updatedTimes };
+          } else {
+            storedGames.push({ ...game, schedule_times: updatedTimes });
+          }
+          localStorage.setItem("pizarra_persisted_games", JSON.stringify(storedGames));
+          localStorage.setItem(`pizarra_game_schedules_${game.id}`, JSON.stringify(updatedTimes));
+        } catch {
+          // ignore
+        }
+      }
+
+      // 3. Persist to server backend immediately
+      try {
+        await fetch("/api/public/results/sync", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            gameUpdate: { id: game.id, schedule_times: updatedTimes },
+          }),
+        });
+      } catch {
+        // ignore
+      }
+
+      setScheduleMessage({ id: game.id, text: "Horarios guardados correctamente" });
+      setTimeout(() => setScheduleMessage(null), 3000);
+      onRefresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Error al guardar horarios");
+    }
+  }
+
+  async function handleAddScheduleTime(game: Game, timeStr: string) {
+    const norm = normalizeScheduleTime(timeStr);
+    if (!norm) return;
+    const current = getGameScheduleTimes(game);
+    if (current.includes(norm)) return;
+    const updated = [...current, norm].sort((a, b) => a.localeCompare(b));
+    await saveGameSchedules(game, updated);
+    setNewScheduleTimes((prev) => ({ ...prev, [game.id]: "" }));
+  }
+
+  async function handleRemoveScheduleTime(game: Game, timeStr: string) {
+    const current = getGameScheduleTimes(game);
+    const updated = current.filter((t) => t !== timeStr);
+    await saveGameSchedules(game, updated);
+  }
+
+  async function handleResetGameSchedules(game: Game) {
+    const defaults = getDefaultGameScheduleTimes(game.slug);
+    await saveGameSchedules(game, defaults);
+  }
 
   async function handleModeChange(game: Game, mode: LoadingMode) {
     setSavingMode(game.id);
@@ -726,8 +835,18 @@ function GamesManager({ games, onRefresh }: { games: Game[]; onRefresh: () => vo
   }
 
   async function handleDeleteGame(id: string) {
-    if (!confirm("¿Eliminar este juego? Se borrarán todos sus resultados.")) return;
     await supabase.from("games").delete().eq("id", id);
+    if (typeof window !== "undefined") {
+      try {
+        const saved = localStorage.getItem("pizarra_persisted_games");
+        if (saved) {
+          const list = JSON.parse(saved).filter((g: Game) => g.id !== id);
+          localStorage.setItem("pizarra_persisted_games", JSON.stringify(list));
+        }
+      } catch {
+        // ignore
+      }
+    }
     onRefresh();
   }
 
@@ -983,35 +1102,36 @@ function GamesManager({ games, onRefresh }: { games: Game[]; onRefresh: () => vo
                     title={
                       (
                         {
-                          "lotto-activo": "TuAzar (LOTTO ACTIVO)",
-                          guacharo: "TuAzar (GUACHARO ACTIVO)",
-                          guacharito: "TuAzar (EL GUACHARITO MILLONARIO)",
-                          "selva-plus": "TuAzar (SELVA PLUS)",
-                          "loto-chaim-a": "TuAzar (LOTO CHAIMA)",
-                          granjita: "TuAzar (LA GRANJITA)",
-                          "monje-millonario": "TuAzar (MONJE MILLONARIO)",
-                          "lotto-activo-internacional": "TuAzar (LOTTO ACTIVO RD INTERNACIONAL)",
+                          "lotto-activo": "LoteriaDeHoy (Principal) / TuAzar (Respaldo)",
+                          guacharo: "LoteriaDeHoy (Principal) / TuAzar (Respaldo)",
+                          guacharito: "LoteriaDeHoy (Principal) / TuAzar (Respaldo)",
+                          "selva-plus": "LoteriaDeHoy (Principal) / TuAzar (Respaldo)",
+                          "loto-chaim-a": "LoteriaDeHoy (Principal) / TuAzar (Respaldo)",
+                          granjita: "LoteriaDeHoy (Principal) / TuAzar (Respaldo)",
+                          "monje-millonario": "LoteriaDeHoy (Principal) / TuAzar (Respaldo)",
+                          "lotto-activo-internacional":
+                            "LoteriaDeHoy (Principal) / TuAzar (Respaldo)",
                         } as Record<string, string>
                       )[game.slug] ?? "Sin fuente configurada"
                     }
                   >
                     {(
                       {
-                        "lotto-activo": "TuAzar (LOTTO ACTIVO)",
-                        guacharo: "TuAzar (GUACHARO)",
-                        guacharito: "TuAzar (GUACHARITO)",
-                        "selva-plus": "TuAzar (SELVA PLUS)",
-                        "loto-chaim-a": "TuAzar (LOTO CHAIMA)",
-                        granjita: "TuAzar (GRANJITA)",
-                        "monje-millonario": "TuAzar (MONJE MILL.)",
-                        "lotto-activo-internacional": "TuAzar (LOTTO INT.)",
+                        "lotto-activo": "LoteriaDeHoy (LOTTO ACTIVO)",
+                        guacharo: "LoteriaDeHoy (GUACHARO)",
+                        guacharito: "LoteriaDeHoy (GUACHARITO)",
+                        "selva-plus": "LoteriaDeHoy (SELVA PLUS)",
+                        "loto-chaim-a": "LoteriaDeHoy (LOTO CHAIMA)",
+                        granjita: "LoteriaDeHoy (GRANJITA)",
+                        "monje-millonario": "LoteriaDeHoy (MONJE MILL.)",
+                        "lotto-activo-internacional": "LoteriaDeHoy (LOTTO INT.)",
                       } as Record<string, string>
                     )[game.slug] ?? "Fuente pendiente"}
                   </p>
                 ) : (
                   <p
                     className="text-xs text-amber-400 font-medium truncate"
-                    title="Carga manual activa: los resultados se ingresan desde el panel y TuAzar no los modificará"
+                    title="Carga manual activa: los resultados se ingresan desde el panel y la sincronización automática no los modificará"
                   >
                     Modo manual activo
                   </p>
@@ -1036,11 +1156,120 @@ function GamesManager({ games, onRefresh }: { games: Game[]; onRefresh: () => vo
               </button>
 
               <button
+                type="button"
+                onClick={() =>
+                  setExpandedScheduleGameId(expandedScheduleGameId === game.id ? null : game.id)
+                }
+                className={`text-xs px-3 py-1.5 rounded-lg border flex items-center gap-1.5 transition ${
+                  expandedScheduleGameId === game.id
+                    ? "bg-blue-600 text-white border-blue-500 shadow-sm"
+                    : "bg-slate-800 hover:bg-slate-700 text-blue-400 border-slate-700"
+                }`}
+                title="Configurar y crear las horas de sorteo de este juego"
+              >
+                <Clock className="w-3.5 h-3.5" />
+                Horarios ({getGameScheduleTimes(game).length})
+                {expandedScheduleGameId === game.id ? (
+                  <ChevronUp className="w-3.5 h-3.5" />
+                ) : (
+                  <ChevronDown className="w-3.5 h-3.5" />
+                )}
+              </button>
+
+              <button
                 onClick={() => handleDeleteGame(game.id)}
                 className="p-2 rounded-lg text-red-400 hover:bg-red-950/40 transition"
               >
                 <Trash2 className="w-4 h-4" />
               </button>
+
+              {expandedScheduleGameId === game.id && (
+                <div className="w-full bg-slate-950/90 rounded-xl border border-blue-900/50 p-4 mt-2 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/80 pb-3">
+                    <div>
+                      <h4 className="text-sm font-semibold text-white flex items-center gap-2">
+                        <Clock className="w-4 h-4 text-blue-400" />
+                        Horas de sorteo de {game.name}
+                      </h4>
+                      <p className="text-xs text-slate-400 mt-0.5">
+                        Configura las horas exactas de este juego. Solo estas horas se mostrarán en
+                        la pizarra diaria.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {scheduleMessage?.id === game.id && (
+                        <span className="text-xs text-green-400 font-medium">
+                          {scheduleMessage.text}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleResetGameSchedules(game)}
+                        className="text-xs px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition"
+                        title="Volver a las horas predeterminadas de este juego"
+                      >
+                        Restablecer Horas Oficiales
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Form to add new hour */}
+                  <div className="flex flex-wrap items-center gap-2 bg-slate-900/60 p-3 rounded-lg border border-slate-800">
+                    <label className="text-xs text-slate-300 font-medium">
+                      Nueva hora de sorteo:
+                    </label>
+                    <input
+                      type="time"
+                      value={newScheduleTimes[game.id] || ""}
+                      onChange={(e) =>
+                        setNewScheduleTimes((prev) => ({ ...prev, [game.id]: e.target.value }))
+                      }
+                      className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500 font-mono"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleAddScheduleTime(game, newScheduleTimes[game.id] || "")}
+                      disabled={!newScheduleTimes[game.id]}
+                      className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 transition"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      Agregar Hora
+                    </button>
+                  </div>
+
+                  {/* Configured hours list */}
+                  <div className="space-y-2">
+                    <div className="text-xs font-semibold text-slate-400 flex items-center justify-between">
+                      <span>Horas activas ({getGameScheduleTimes(game).length} sorteos):</span>
+                      <span className="text-[10px] text-slate-500">
+                        Pulsa la X en cualquier hora que no deba estar
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {getGameScheduleTimes(game).map((time) => (
+                        <div
+                          key={time}
+                          className="flex items-center gap-2 bg-slate-900 border border-slate-700 hover:border-slate-500 rounded-lg px-2.5 py-1 text-xs text-slate-200 transition"
+                        >
+                          <span className="font-mono font-bold text-blue-300">
+                            {formatScheduleTime(time)}
+                          </span>
+                          <span className="text-[10px] text-slate-500 font-mono">({time})</span>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveScheduleTime(game, time)}
+                            className="text-slate-400 hover:text-red-400 hover:bg-red-950/30 p-0.5 rounded transition"
+                            title={`Eliminar hora ${time}`}
+                            aria-label={`Eliminar hora ${time}`}
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           ))}
       </div>
@@ -1672,7 +1901,12 @@ function AnimalsManager({ games }: { games: Game[] }) {
 
 // ---------- Subscriptions Manager ----------
 
-function SubscriptionsManager() {
+function SubscriptionsManager({
+  initialSubTab = "licenses",
+}: {
+  initialSubTab?: "licenses" | "accounts";
+}) {
+  const [subTab, setSubTab] = useState<"licenses" | "accounts">(initialSubTab);
   const [users, setUsers] = useState<Profile[]>([]);
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState<string | null>(null);
@@ -1806,13 +2040,27 @@ function SubscriptionsManager() {
     }
   }
 
-  async function handleDeleteClient(userId: string, email: string) {
-    if (!confirm(`¿Eliminar al cliente ${email}? La pantalla o dispositivo perderá acceso.`))
-      return;
+  const [clientToDelete, setClientToDelete] = useState<{ id: string; email: string } | null>(null);
+
+  async function confirmDeleteClient() {
+    if (!clientToDelete) return;
+    const { id: userId } = clientToDelete;
+    setClientToDelete(null);
     setUpdating(userId);
-    await supabase.rpc("delete_client_user", { target_user_id: userId });
+    try {
+      await supabase.from("user_roles").delete().eq("user_id", userId);
+      await supabase.from("profiles").delete().eq("id", userId);
+      await supabase.rpc("delete_client_user", { target_user_id: userId });
+    } catch {
+      // ignore
+    }
+    if (mockStore.profiles) {
+      mockStore.profiles = mockStore.profiles.filter((p) => p.id !== userId);
+      mockStore.user_roles = mockStore.user_roles.filter((r) => r.user_id !== userId);
+      saveProfilesToStorage();
+    }
+    setUsers((prev) => prev.filter((u) => u.id !== userId));
     setUpdating(null);
-    fetchUsers();
   }
 
   async function handlePairTv(e: React.FormEvent) {
@@ -1862,321 +2110,386 @@ function SubscriptionsManager() {
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
-      <div className="flex items-center justify-between flex-wrap gap-4">
-        <div>
-          <h2 className="text-xl font-bold flex items-center gap-2">
-            <Users className="w-5 h-5 text-blue-500" /> Control de Clientes y Alquiler
-          </h2>
-          <p className="text-sm text-slate-400 mt-1">
-            Administra las cuentas de las pantallas y televisores de tus clientes. Solo los usuarios
-            con alquiler activo pueden ver la pizarra.
-          </p>
-        </div>
-        <div className="flex items-center gap-3 flex-wrap">
-          <Button
-            onClick={() => {
-              setPairCode("");
-              setPairError(null);
-              setPairSuccess(null);
-              setShowPairModal(true);
-            }}
-            className="bg-indigo-600 hover:bg-indigo-500 text-white font-medium flex items-center gap-2 shadow-lg shadow-indigo-600/20"
-          >
-            <Tv className="w-4 h-4" /> Vincular TV con Código
-          </Button>
-          <Button
-            onClick={() => setShowAddModal(true)}
-            className="bg-blue-600 hover:bg-blue-500 text-white font-medium flex items-center gap-2 shadow-lg shadow-blue-600/20"
-          >
-            <Plus className="w-4 h-4" /> Nuevo Cliente / Pantalla
-          </Button>
-          <div className="flex gap-1.5 bg-slate-900 p-1 rounded-xl border border-slate-800">
-            {(["all", "active", "inactive"] as const).map((f) => (
-              <button
-                key={f}
-                onClick={() => setFilter(f)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
-                  filter === f ? "bg-blue-600 text-white shadow" : "text-slate-400 hover:text-white"
-                }`}
-              >
-                {f === "all" ? "Todos" : f === "active" ? "Alquilados" : "Inactivos"}
-              </button>
-            ))}
-          </div>
-        </div>
+      {/* Sub-tab navigation bar */}
+      <div className="flex gap-2 bg-slate-900 p-1.5 rounded-2xl border border-slate-800">
+        <button
+          onClick={() => setSubTab("licenses")}
+          className={`flex-1 py-3 px-4 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 ${
+            subTab === "licenses"
+              ? "bg-indigo-600 text-white shadow-lg"
+              : "text-slate-400 hover:text-white hover:bg-slate-800/50"
+          }`}
+        >
+          <Tv className="w-4 h-4 text-indigo-400" />
+          Televisores & Pantallas TV (Vincular por Código de 6 Dígitos)
+        </button>
+        <button
+          onClick={() => setSubTab("accounts")}
+          className={`flex-1 py-3 px-4 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 ${
+            subTab === "accounts"
+              ? "bg-indigo-600 text-white shadow-lg"
+              : "text-slate-400 hover:text-white hover:bg-slate-800/50"
+          }`}
+        >
+          <Users className="w-4 h-4 text-blue-400" />
+          Cuentas por Correo y Días (+30 Días / Código TV)
+        </button>
       </div>
 
-      {/* Modal para crear cliente */}
-      {showAddModal && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-5">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="text-lg font-bold text-white flex items-center gap-2">
-                <Users className="w-5 h-5 text-blue-500" /> Registrar Cliente para TV
-              </h3>
-              <button
-                onClick={() => setShowAddModal(false)}
-                className="p-1 rounded-lg text-slate-400 hover:text-white"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <form onSubmit={handleCreateClient} className="space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                  Correo Electrónico o Usuario del Cliente
-                </label>
-                <input
-                  type="email"
-                  required
-                  value={newEmail}
-                  onChange={(e) => setNewEmail(e.target.value)}
-                  placeholder="ejemplo: agencia-centro@gmail.com"
-                  className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm focus:outline-none focus:border-blue-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                  Tiempo de Alquiler Inicial
-                </label>
-                <select
-                  value={newDays}
-                  onChange={(e) => setNewDays(Number(e.target.value))}
-                  className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm focus:outline-none focus:border-blue-500"
-                >
-                  <option value={7}>Prueba (7 días)</option>
-                  <option value={15}>Medio mes (15 días)</option>
-                  <option value={30}>1 Mes (30 días)</option>
-                  <option value={60}>2 Meses (60 días)</option>
-                  <option value={90}>3 Meses (90 días)</option>
-                  <option value={180}>6 Meses (180 días)</option>
-                  <option value={365}>1 Año (365 días)</option>
-                </select>
-              </div>
-
-              {createError && (
-                <div className="text-xs text-red-400 bg-red-950/40 border border-red-800/50 rounded-lg p-3">
-                  {createError}
-                </div>
-              )}
-
-              <div className="flex gap-3 pt-2">
-                <Button
-                  type="submit"
-                  disabled={creatingClient}
-                  className="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-medium"
-                >
-                  {creatingClient && <Loader2 className="w-4 h-4 animate-spin mr-2" />}
-                  Crear y Activar Alquiler
-                </Button>
-                <button
-                  type="button"
-                  onClick={() => setShowAddModal(false)}
-                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl"
-                >
-                  Cancelar
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Modal para vincular TV mediante código */}
-      {showPairModal && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-5">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="text-lg font-bold text-white flex items-center gap-2">
-                <Tv className="w-5 h-5 text-indigo-400" /> Vincular Smart TV
-              </h3>
-              <button
-                onClick={() => setShowPairModal(false)}
-                className="p-1 rounded-lg text-slate-400 hover:text-white"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <p className="text-xs text-slate-400 leading-relaxed">
-              Introduce el código de 6 dígitos que se muestra en la pantalla del televisor en la
-              aplicación <strong>BrowseHere</strong>.
-            </p>
-
-            <form onSubmit={handlePairTv} className="space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                  Código de la Pantalla del TV
-                </label>
-                <input
-                  type="text"
-                  required
-                  maxLength={7}
-                  value={pairCode}
-                  onChange={(e) => setPairCode(e.target.value)}
-                  placeholder="ej: 618-906"
-                  className="w-full px-3.5 py-3 bg-slate-950 border border-indigo-700/60 rounded-xl text-white text-center font-mono font-bold text-xl tracking-widest focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                  Asignar a esta cuenta:
-                </label>
-                <select
-                  value={pairEmail}
-                  onChange={(e) => setPairEmail(e.target.value)}
-                  className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm focus:outline-none focus:border-indigo-500"
-                >
-                  <option value="m4rl0nh3rn4nd3z@gmail.com">
-                    ⭐ Mi cuenta Administrador (m4rl0nh3rn4nd3z@gmail.com)
-                  </option>
-                  {users
-                    .filter((u) => u.role !== "admin")
-                    .map((client) => (
-                      <option key={client.id} value={client.email}>
-                        👤 Cliente: {client.email} (
-                        {client.subscription_status === "active" ? "Activo" : "Inactivo"})
-                      </option>
-                    ))}
-                </select>
-              </div>
-
-              {pairError && (
-                <div className="text-xs text-red-400 bg-red-950/40 border border-red-800/50 rounded-lg p-3">
-                  {pairError}
-                </div>
-              )}
-              {pairSuccess && (
-                <div className="text-xs text-emerald-400 bg-emerald-950/40 border border-emerald-800/50 rounded-lg p-3 font-medium">
-                  {pairSuccess}
-                </div>
-              )}
-
-              <div className="flex gap-3 pt-2">
-                <Button
-                  type="submit"
-                  disabled={pairingBusy}
-                  className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white font-medium"
-                >
-                  {pairingBusy && <Loader2 className="w-4 h-4 animate-spin mr-2" />}
-                  Vincular y Activar TV
-                </Button>
-                <button
-                  type="button"
-                  onClick={() => setShowPairModal(false)}
-                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl"
-                >
-                  Cerrar
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {loading ? (
-        <div className="flex items-center justify-center py-12 text-slate-400">
-          <Loader2 className="w-6 h-6 animate-spin" /> <span className="ml-2">Cargando...</span>
-        </div>
-      ) : filtered.length === 0 ? (
-        <div className="text-slate-500 text-sm py-12 text-center bg-slate-900/50 rounded-2xl border border-slate-800/50">
-          No hay usuarios que coincidan con el filtro.
-        </div>
+      {subTab === "licenses" ? (
+        <TvDevicesManager />
       ) : (
-        <div className="space-y-3">
-          {filtered.map((u) => {
-            const active = subscriptionActive(u);
-            return (
-              <div
-                key={u.id}
-                className="flex items-center gap-4 bg-slate-900 rounded-xl border border-slate-800 p-4 flex-wrap"
+        <>
+          <div className="flex items-center justify-between flex-wrap gap-4">
+            <div>
+              <h2 className="text-xl font-bold flex items-center gap-2">
+                <Users className="w-5 h-5 text-blue-500" /> Control de Clientes y Alquiler
+              </h2>
+              <p className="text-sm text-slate-400 mt-1">
+                Administra las cuentas de las pantallas y televisores de tus clientes. Solo los
+                usuarios con alquiler activo pueden ver la pizarra.
+              </p>
+            </div>
+            <div className="flex items-center gap-3 flex-wrap">
+              <Button
+                onClick={() => {
+                  setPairCode("");
+                  setPairError(null);
+                  setPairSuccess(null);
+                  setShowPairModal(true);
+                }}
+                className="bg-indigo-600 hover:bg-indigo-500 text-white font-medium flex items-center gap-2 shadow-lg shadow-indigo-600/20"
               >
-                <div className="w-10 h-10 rounded-full bg-slate-800 flex items-center justify-center text-sm font-bold text-slate-300 flex-shrink-0">
-                  {u.email[0]?.toUpperCase()}
-                </div>
-                <div className="flex-1 min-w-[180px]">
-                  <div className="font-medium text-sm flex items-center gap-2">
-                    <span>{u.email}</span>
-                    {u.role === "admin" && (
-                      <span className="text-[10px] text-amber-400 uppercase tracking-wider font-semibold">
-                        (Super Admin)
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-3 mt-1.5">
-                    {statusBadge(u)}
-                    {u.subscription_expires_at && u.role !== "admin" && (
-                      <span className="text-xs text-slate-400">
-                        Vence:{" "}
-                        <strong className="text-white">
-                          {new Date(u.subscription_expires_at).toLocaleDateString("es-VE", {
-                            day: "2-digit",
-                            month: "short",
-                            year: "numeric",
-                          })}
-                        </strong>
-                      </span>
-                    )}
-                  </div>
+                <Tv className="w-4 h-4" /> Vincular TV con Código
+              </Button>
+              <Button
+                onClick={() => setShowAddModal(true)}
+                className="bg-blue-600 hover:bg-blue-500 text-white font-medium flex items-center gap-2 shadow-lg shadow-blue-600/20"
+              >
+                <Plus className="w-4 h-4" /> Nuevo Cliente / Pantalla
+              </Button>
+              <div className="flex gap-1.5 bg-slate-900 p-1 rounded-xl border border-slate-800">
+                {(["all", "active", "inactive"] as const).map((f) => (
+                  <button
+                    key={f}
+                    onClick={() => setFilter(f)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+                      filter === f
+                        ? "bg-blue-600 text-white shadow"
+                        : "text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    {f === "all" ? "Todos" : f === "active" ? "Alquilados" : "Inactivos"}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Modal para crear cliente */}
+          {showAddModal && (
+            <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+              <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-5">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                  <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                    <Users className="w-5 h-5 text-blue-500" /> Registrar Cliente para TV
+                  </h3>
+                  <button
+                    onClick={() => setShowAddModal(false)}
+                    className="p-1 rounded-lg text-slate-400 hover:text-white"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
                 </div>
 
-                {u.role !== "admin" && (
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <button
-                      onClick={() => setStatus(u, "active", 30)}
-                      disabled={updating === u.id}
-                      className="px-3 py-1.5 rounded-lg bg-green-700 hover:bg-green-600 disabled:opacity-50 text-xs font-medium flex items-center gap-1.5 transition text-white shadow-sm"
-                      title="Sumar 30 días de servicio de alquiler"
+                <form onSubmit={handleCreateClient} className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                      Correo Electrónico o Usuario del Cliente
+                    </label>
+                    <input
+                      type="email"
+                      required
+                      value={newEmail}
+                      onChange={(e) => setNewEmail(e.target.value)}
+                      placeholder="ejemplo: agencia-centro@gmail.com"
+                      className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                      Tiempo de Alquiler Inicial
+                    </label>
+                    <select
+                      value={newDays}
+                      onChange={(e) => setNewDays(Number(e.target.value))}
+                      className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm focus:outline-none focus:border-blue-500"
                     >
-                      {updating === u.id ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <Check className="w-3.5 h-3.5" />
-                      )}
-                      +30 días
-                    </button>
-                    <button
-                      onClick={() => setStatus(u, "trial", 7)}
-                      disabled={updating === u.id}
-                      className="px-3 py-1.5 rounded-lg bg-blue-700 hover:bg-blue-600 disabled:opacity-50 text-xs font-medium flex items-center gap-1.5 transition text-white"
-                      title="Asignar 7 días de prueba gratuita"
+                      <option value={7}>Prueba (7 días)</option>
+                      <option value={15}>Medio mes (15 días)</option>
+                      <option value={30}>1 Mes (30 días)</option>
+                      <option value={60}>2 Meses (60 días)</option>
+                      <option value={90}>3 Meses (90 días)</option>
+                      <option value={180}>6 Meses (180 días)</option>
+                      <option value={365}>1 Año (365 días)</option>
+                    </select>
+                  </div>
+
+                  {createError && (
+                    <div className="text-xs text-red-400 bg-red-950/40 border border-red-800/50 rounded-lg p-3">
+                      {createError}
+                    </div>
+                  )}
+
+                  <div className="flex gap-3 pt-2">
+                    <Button
+                      type="submit"
+                      disabled={creatingClient}
+                      className="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-medium"
                     >
-                      <Gift className="w-3.5 h-3.5" /> Prueba 7d
-                    </button>
-                    {active ? (
-                      <button
-                        onClick={() => setStatus(u, "inactive", null)}
-                        disabled={updating === u.id}
-                        className="px-3 py-1.5 rounded-lg bg-amber-950/60 hover:bg-amber-900/60 text-amber-300 disabled:opacity-50 text-xs font-medium flex items-center gap-1.5 transition border border-amber-800/50"
-                        title="Suspender temporalmente el acceso"
-                      >
-                        <Ban className="w-3.5 h-3.5" /> Pausar
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => setStatus(u, "active", 30)}
-                        disabled={updating === u.id}
-                        className="px-3 py-1.5 rounded-lg bg-emerald-800 hover:bg-emerald-700 text-white disabled:opacity-50 text-xs font-medium flex items-center gap-1.5 transition"
-                      >
-                        Reactivar
-                      </button>
-                    )}
+                      {creatingClient && <Loader2 className="w-4 h-4 animate-spin mr-2" />}
+                      Crear y Activar Alquiler
+                    </Button>
                     <button
-                      onClick={() => handleDeleteClient(u.id, u.email)}
-                      disabled={updating === u.id}
-                      className="p-1.5 rounded-lg bg-slate-800 hover:bg-red-950/60 text-slate-400 hover:text-red-400 transition border border-transparent hover:border-red-800/50"
-                      title="Eliminar cliente"
+                      type="button"
+                      onClick={() => setShowAddModal(false)}
+                      className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl"
                     >
-                      <Trash2 className="w-4 h-4" />
+                      Cancelar
                     </button>
                   </div>
-                )}
+                </form>
               </div>
-            );
-          })}
+            </div>
+          )}
+
+          {/* Modal para vincular TV mediante código */}
+          {showPairModal && (
+            <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+              <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-5">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                  <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                    <Tv className="w-5 h-5 text-indigo-400" /> Vincular Smart TV
+                  </h3>
+                  <button
+                    onClick={() => setShowPairModal(false)}
+                    className="p-1 rounded-lg text-slate-400 hover:text-white"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  Introduce el código de 6 dígitos que se muestra en la pantalla del televisor en la
+                  aplicación <strong>BrowseHere</strong>.
+                </p>
+
+                <form onSubmit={handlePairTv} className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                      Código de la Pantalla del TV
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      maxLength={7}
+                      value={pairCode}
+                      onChange={(e) => setPairCode(e.target.value)}
+                      placeholder="ej: 618-906"
+                      className="w-full px-3.5 py-3 bg-slate-950 border border-indigo-700/60 rounded-xl text-white text-center font-mono font-bold text-xl tracking-widest focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                      Asignar a esta cuenta:
+                    </label>
+                    <select
+                      value={pairEmail}
+                      onChange={(e) => setPairEmail(e.target.value)}
+                      className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm focus:outline-none focus:border-indigo-500"
+                    >
+                      <option value="m4rl0nh3rn4nd3z@gmail.com">
+                        ⭐ Mi cuenta Administrador (m4rl0nh3rn4nd3z@gmail.com)
+                      </option>
+                      {users
+                        .filter((u) => u.role !== "admin")
+                        .map((client) => (
+                          <option key={client.id} value={client.email}>
+                            👤 Cliente: {client.email} (
+                            {client.subscription_status === "active" ? "Activo" : "Inactivo"})
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+
+                  {pairError && (
+                    <div className="text-xs text-red-400 bg-red-950/40 border border-red-800/50 rounded-lg p-3">
+                      {pairError}
+                    </div>
+                  )}
+                  {pairSuccess && (
+                    <div className="text-xs text-emerald-400 bg-emerald-950/40 border border-emerald-800/50 rounded-lg p-3 font-medium">
+                      {pairSuccess}
+                    </div>
+                  )}
+
+                  <div className="flex gap-3 pt-2">
+                    <Button
+                      type="submit"
+                      disabled={pairingBusy}
+                      className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white font-medium"
+                    >
+                      {pairingBusy && <Loader2 className="w-4 h-4 animate-spin mr-2" />}
+                      Vincular y Activar TV
+                    </Button>
+                    <button
+                      type="button"
+                      onClick={() => setShowPairModal(false)}
+                      className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl"
+                    >
+                      Cerrar
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {loading ? (
+            <div className="flex items-center justify-center py-12 text-slate-400">
+              <Loader2 className="w-6 h-6 animate-spin" /> <span className="ml-2">Cargando...</span>
+            </div>
+          ) : filtered.length === 0 ? (
+            <div className="text-slate-500 text-sm py-12 text-center bg-slate-900/50 rounded-2xl border border-slate-800/50">
+              No hay usuarios que coincidan con el filtro.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {filtered.map((u) => {
+                const active = subscriptionActive(u);
+                return (
+                  <div
+                    key={u.id}
+                    className="flex items-center gap-4 bg-slate-900 rounded-xl border border-slate-800 p-4 flex-wrap"
+                  >
+                    <div className="w-10 h-10 rounded-full bg-slate-800 flex items-center justify-center text-sm font-bold text-slate-300 flex-shrink-0">
+                      {u.email[0]?.toUpperCase()}
+                    </div>
+                    <div className="flex-1 min-w-[180px]">
+                      <div className="font-medium text-sm flex items-center gap-2">
+                        <span>{u.email}</span>
+                        {u.role === "admin" && (
+                          <span className="text-[10px] text-amber-400 uppercase tracking-wider font-semibold">
+                            (Super Admin)
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-3 mt-1.5">
+                        {statusBadge(u)}
+                        {u.subscription_expires_at && u.role !== "admin" && (
+                          <span className="text-xs text-slate-400">
+                            Vence:{" "}
+                            <strong className="text-white">
+                              {new Date(u.subscription_expires_at).toLocaleDateString("es-VE", {
+                                day: "2-digit",
+                                month: "short",
+                                year: "numeric",
+                              })}
+                            </strong>
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {u.role !== "admin" && (
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <button
+                          onClick={() => setStatus(u, "active", 30)}
+                          disabled={updating === u.id}
+                          className="px-3 py-1.5 rounded-lg bg-green-700 hover:bg-green-600 disabled:opacity-50 text-xs font-medium flex items-center gap-1.5 transition text-white shadow-sm"
+                          title="Sumar 30 días de servicio de alquiler"
+                        >
+                          {updating === u.id ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Check className="w-3.5 h-3.5" />
+                          )}
+                          +30 días
+                        </button>
+                        <button
+                          onClick={() => setStatus(u, "trial", 7)}
+                          disabled={updating === u.id}
+                          className="px-3 py-1.5 rounded-lg bg-blue-700 hover:bg-blue-600 disabled:opacity-50 text-xs font-medium flex items-center gap-1.5 transition text-white"
+                          title="Asignar 7 días de prueba gratuita"
+                        >
+                          <Gift className="w-3.5 h-3.5" /> Prueba 7d
+                        </button>
+                        {active ? (
+                          <button
+                            onClick={() => setStatus(u, "inactive", null)}
+                            disabled={updating === u.id}
+                            className="px-3 py-1.5 rounded-lg bg-amber-950/60 hover:bg-amber-900/60 text-amber-300 disabled:opacity-50 text-xs font-medium flex items-center gap-1.5 transition border border-amber-800/50"
+                            title="Suspender temporalmente el acceso"
+                          >
+                            <Ban className="w-3.5 h-3.5" /> Pausar
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => setStatus(u, "active", 30)}
+                            disabled={updating === u.id}
+                            className="px-3 py-1.5 rounded-lg bg-emerald-800 hover:bg-emerald-700 text-white disabled:opacity-50 text-xs font-medium flex items-center gap-1.5 transition"
+                          >
+                            Reactivar
+                          </button>
+                        )}
+                        <button
+                          onClick={() => setClientToDelete({ id: u.id, email: u.email })}
+                          disabled={updating === u.id}
+                          className="p-1.5 rounded-lg bg-slate-800 hover:bg-red-950/60 text-slate-400 hover:text-red-400 transition border border-transparent hover:border-red-800/50"
+                          title="Eliminar cliente"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Modal de confirmación para eliminar cliente */}
+      {clientToDelete && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 max-w-sm w-full shadow-2xl space-y-4 text-center">
+            <div className="w-12 h-12 rounded-full bg-red-950/60 border border-red-800/50 flex items-center justify-center mx-auto text-red-400">
+              <Trash2 className="w-6 h-6" />
+            </div>
+            <h3 className="text-base font-bold text-white">¿Eliminar Cliente?</h3>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              ¿Estás seguro de que deseas eliminar la cuenta{" "}
+              <strong className="text-white">{clientToDelete.email}</strong>? El televisor o
+              pantalla perderá el acceso a la pizarra.
+            </p>
+            <div className="flex gap-3 pt-2">
+              <button
+                onClick={() => setClientToDelete(null)}
+                className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-semibold transition"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={confirmDeleteClient}
+                className="flex-1 py-2.5 bg-red-600 hover:bg-red-500 text-white rounded-xl text-xs font-bold transition shadow-lg shadow-red-600/30"
+              >
+                Sí, Eliminar
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -2310,7 +2623,6 @@ function AdsManager() {
   }
 
   async function handleDelete(ad: Ad) {
-    if (!confirm("¿Eliminar este anuncio?")) return;
     await supabase.from("ads").delete().eq("id", ad.id);
     fetchAds();
   }
@@ -2583,6 +2895,370 @@ function AdsManager() {
                 </div>
               </div>
             ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- Smart TV Devices Manager ----------
+
+function TvDevicesManager() {
+  const [devices, setDevices] = useState<TvDevice[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [codeToPair, setCodeToPair] = useState("");
+  const [deviceName, setDeviceName] = useState("");
+  const [days, setDays] = useState<number>(30);
+  const [pairing, setPairing] = useState(false);
+  const [msg, setMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
+  const [deviceToDelete, setDeviceToDelete] = useState<TvDevice | null>(null);
+
+  const fetchDevices = useCallback(async () => {
+    setLoading(true);
+    const { data } = await supabase
+      .from("tv_devices")
+      .select("*")
+      .order("created_at", { ascending: false });
+    if (data && data.length > 0) {
+      setDevices(data as TvDevice[]);
+    } else if (mockStore.tv_devices) {
+      setDevices([...mockStore.tv_devices]);
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    fetchDevices();
+  }, [fetchDevices]);
+
+  async function handlePairTv(e: React.FormEvent) {
+    e.preventDefault();
+    if (!codeToPair.trim()) return;
+    setPairing(true);
+    setMsg(null);
+
+    const cleanCode = codeToPair.trim().replace(/[^0-9]/g, "");
+    const formatted =
+      cleanCode.length === 6 ? `${cleanCode.slice(0, 3)}-${cleanCode.slice(3)}` : codeToPair.trim();
+
+    try {
+      const { data, error } = await supabase.rpc("authorize_tv_device", {
+        p_code: formatted,
+        p_device_name: deviceName.trim() || "Smart TV",
+        p_days: Number(days) || 30,
+      });
+
+      if (!error && data?.success) {
+        setMsg({
+          type: "ok",
+          text: `¡Televisor "${deviceName || "Smart TV"}" activado exitosamente!`,
+        });
+        setCodeToPair("");
+        setDeviceName("");
+        fetchDevices();
+        setPairing(false);
+        return;
+      }
+    } catch {
+      // ignore
+    }
+
+    // Mock store pairing fallback
+    if (!mockStore.tv_devices) mockStore.tv_devices = [];
+    const expiresAt = new Date(Date.now() + days * 86400000).toISOString();
+    const newDev: TvDevice = {
+      id: `tv-${Date.now()}`,
+      device_id: `TV-${cleanCode || "MOCK"}`,
+      device_name: deviceName.trim() || "Smart TV",
+      pairing_code: formatted,
+      is_active: true,
+      expires_at: expiresAt,
+      activated_at: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+    };
+    mockStore.tv_devices.push(newDev);
+    setDevices((prev) => [newDev, ...prev]);
+    setMsg({
+      type: "ok",
+      text: `¡Televisor "${newDev.device_name}" activado y vinculado con éxito!`,
+    });
+    setCodeToPair("");
+    setDeviceName("");
+    setPairing(false);
+  }
+
+  async function toggleStatus(dev: TvDevice) {
+    const nextStatus = !dev.is_active;
+    await supabase.from("tv_devices").update({ is_active: nextStatus }).eq("id", dev.id);
+    if (mockStore.tv_devices) {
+      const match = mockStore.tv_devices.find((d) => d.id === dev.id);
+      if (match) match.is_active = nextStatus;
+    }
+    setDevices((prev) => prev.map((d) => (d.id === dev.id ? { ...d, is_active: nextStatus } : d)));
+  }
+
+  async function add30Days(dev: TvDevice) {
+    const currentExp =
+      dev.expires_at && new Date(dev.expires_at) > new Date()
+        ? new Date(dev.expires_at)
+        : new Date();
+    currentExp.setDate(currentExp.getDate() + 30);
+    const newExpStr = currentExp.toISOString();
+
+    await supabase
+      .from("tv_devices")
+      .update({ expires_at: newExpStr, is_active: true })
+      .eq("id", dev.id);
+    if (mockStore.tv_devices) {
+      const match = mockStore.tv_devices.find((d) => d.id === dev.id);
+      if (match) {
+        match.expires_at = newExpStr;
+        match.is_active = true;
+      }
+    }
+    setDevices((prev) =>
+      prev.map((d) => (d.id === dev.id ? { ...d, expires_at: newExpStr, is_active: true } : d)),
+    );
+  }
+
+  async function confirmDeleteDevice() {
+    if (!deviceToDelete) return;
+    const dev = deviceToDelete;
+    setDeviceToDelete(null);
+    await supabase.from("tv_devices").delete().eq("id", dev.id);
+    if (mockStore.tv_devices) {
+      mockStore.tv_devices = mockStore.tv_devices.filter((d) => d.id !== dev.id);
+    }
+    setDevices((prev) => prev.filter((d) => d.id !== dev.id));
+  }
+
+  return (
+    <div className="max-w-5xl mx-auto space-y-6">
+      <div>
+        <h2 className="text-xl font-bold flex items-center gap-2 text-white">
+          <Tv className="w-5 h-5 text-indigo-400" /> Control de Pantallas & Televisores TV
+        </h2>
+        <p className="text-sm text-slate-400 mt-1">
+          Ingresa el código numérico de 6 dígitos que aparece en la pantalla del televisor para
+          activarlo en vivo.
+        </p>
+      </div>
+
+      {/* Formulario de Activación Directa por Código */}
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
+        <h3 className="text-sm font-bold text-white flex items-center gap-2">
+          <KeyRound className="w-4 h-4 text-amber-400" /> Vincular Nuevo Televisor
+        </h3>
+
+        <form onSubmit={handlePairTv} className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-end">
+          <div>
+            <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+              Código de la Pantalla del TV
+            </label>
+            <input
+              type="text"
+              required
+              placeholder="ej: 482-901"
+              value={codeToPair}
+              onChange={(e) => setCodeToPair(e.target.value)}
+              className="w-full bg-slate-950 border border-amber-500/50 rounded-xl px-4 py-3 font-mono font-bold text-amber-400 text-lg tracking-widest focus:outline-none focus:border-amber-400"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+              Nombre / Ubicación del TV
+            </label>
+            <input
+              type="text"
+              placeholder="ej: TV Bodega Central"
+              value={deviceName}
+              onChange={(e) => setDeviceName(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:border-blue-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+              Tiempo de Alquiler Inicial
+            </label>
+            <div className="flex gap-2">
+              <select
+                value={days}
+                onChange={(e) => setDays(Number(e.target.value))}
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-3 text-white text-sm focus:outline-none focus:border-blue-500"
+              >
+                <option value={7}>Prueba (7 días)</option>
+                <option value={15}>15 Días</option>
+                <option value={30}>1 Mes (30 días)</option>
+                <option value={60}>2 Meses (60 días)</option>
+                <option value={90}>3 Meses (90 días)</option>
+                <option value={365}>1 Año (365 días)</option>
+              </select>
+              <Button
+                type="submit"
+                disabled={pairing || !codeToPair.trim()}
+                className="bg-indigo-600 hover:bg-indigo-500 font-bold text-xs h-11 px-5 rounded-xl flex-shrink-0"
+              >
+                {pairing ? <Loader2 className="w-4 h-4 animate-spin" /> : "Vincular TV"}
+              </Button>
+            </div>
+          </div>
+        </form>
+
+        {msg && (
+          <div
+            className={`p-3 rounded-xl text-xs flex items-center justify-between ${
+              msg.type === "ok"
+                ? "bg-emerald-950/80 border border-emerald-800 text-emerald-200"
+                : "bg-red-950/80 border border-red-800 text-red-200"
+            }`}
+          >
+            <span>{msg.text}</span>
+            <button onClick={() => setMsg(null)}>
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Lista de Televisores Registrados */}
+      {loading ? (
+        <div className="flex items-center justify-center p-12 text-slate-400">
+          <Loader2 className="w-6 h-6 animate-spin mr-2" /> Cargando televisores...
+        </div>
+      ) : devices.length === 0 ? (
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 text-center text-slate-400">
+          <Tv className="w-10 h-10 text-slate-600 mx-auto mb-2" />
+          <p className="font-semibold text-slate-300">No hay televisores vinculados aún</p>
+          <p className="text-xs text-slate-500 mt-1">
+            Enciende la pantalla del televisor, lee el código de 6 dígitos e ingrésalo en el
+            formulario de arriba.
+          </p>
+        </div>
+      ) : (
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-slate-950 border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider">
+                <tr>
+                  <th className="p-3.5">Televisor / Ubicación</th>
+                  <th className="p-3.5">Código de Pantalla</th>
+                  <th className="p-3.5">Vencimiento del Alquiler</th>
+                  <th className="p-3.5 text-center">Estado</th>
+                  <th className="p-3.5 text-right">Acciones</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/80 text-slate-200 font-sans">
+                {devices.map((dev) => {
+                  const expired = dev.expires_at && new Date(dev.expires_at) < new Date();
+                  return (
+                    <tr key={dev.id} className="hover:bg-slate-800/40 transition">
+                      <td className="p-3.5 font-bold text-white flex items-center gap-2">
+                        <Tv className="w-4 h-4 text-indigo-400 flex-shrink-0" />
+                        <div>
+                          <div>{dev.device_name}</div>
+                          <div className="text-[10px] font-mono text-slate-500 font-normal">
+                            {dev.device_id}
+                          </div>
+                        </div>
+                      </td>
+                      <td className="p-3.5 font-mono font-bold text-amber-400 tracking-wider">
+                        {dev.pairing_code || "--- ---"}
+                      </td>
+                      <td className="p-3.5 text-slate-300">
+                        {dev.expires_at ? (
+                          <span
+                            className={
+                              expired
+                                ? "text-red-400 font-semibold"
+                                : "text-emerald-400 font-semibold"
+                            }
+                          >
+                            {new Date(dev.expires_at).toLocaleDateString("es-VE", {
+                              day: "2-digit",
+                              month: "short",
+                              year: "numeric",
+                            })}
+                          </span>
+                        ) : (
+                          <span className="text-blue-400 font-semibold">Indefinido</span>
+                        )}
+                      </td>
+                      <td className="p-3.5 text-center">
+                        <span
+                          className={`inline-block px-2.5 py-1 rounded-full text-[10px] font-extrabold uppercase ${
+                            dev.is_active && !expired
+                              ? "bg-emerald-950 text-emerald-400 border border-emerald-800/60"
+                              : "bg-red-950 text-red-400 border border-red-800/60"
+                          }`}
+                        >
+                          {dev.is_active && !expired ? "Activo" : expired ? "Vencido" : "Pausado"}
+                        </span>
+                      </td>
+                      <td className="p-3.5 text-right space-x-1.5">
+                        <button
+                          onClick={() => add30Days(dev)}
+                          className="px-2.5 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white transition text-[11px] font-bold"
+                          title="Sumar 30 días de servicio"
+                        >
+                          +30 Días
+                        </button>
+                        <button
+                          onClick={() => toggleStatus(dev)}
+                          className={`px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition ${
+                            dev.is_active
+                              ? "bg-amber-950/60 hover:bg-amber-900/80 text-amber-300"
+                              : "bg-emerald-950/60 hover:bg-emerald-900/80 text-emerald-300"
+                          }`}
+                        >
+                          {dev.is_active ? "Pausar" : "Reactivar"}
+                        </button>
+                        <button
+                          onClick={() => setDeviceToDelete(dev)}
+                          className="p-1.5 rounded-lg hover:bg-red-950/60 text-red-400 transition"
+                          title="Eliminar Televisor"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Confirmación de Eliminación de TV */}
+      {deviceToDelete && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 max-w-sm w-full shadow-2xl space-y-4 text-center">
+            <div className="w-12 h-12 rounded-full bg-red-950/60 border border-red-800/50 flex items-center justify-center mx-auto text-red-400">
+              <Trash2 className="w-6 h-6" />
+            </div>
+            <h3 className="text-base font-bold text-white">¿Eliminar Televisor?</h3>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              ¿Estás seguro de que deseas eliminar{" "}
+              <strong className="text-white">{deviceToDelete.device_name}</strong>? La pantalla
+              perderá la activación en vivo.
+            </p>
+            <div className="flex gap-3 pt-2">
+              <button
+                onClick={() => setDeviceToDelete(null)}
+                className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-semibold transition"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={confirmDeleteDevice}
+                className="flex-1 py-2.5 bg-red-600 hover:bg-red-500 text-white rounded-xl text-xs font-bold transition shadow-lg shadow-red-600/30"
+              >
+                Sí, Eliminar
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

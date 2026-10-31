@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { mockStore } from "@/lib/mock-db";
+import { getDefaultGameScheduleTimes } from "@/lib/game-schedules";
 import fs from "fs";
 
 const RESULTS_FILE = "/tmp/lottery_results.json";
@@ -59,9 +60,27 @@ function loadServerGames() {
             (g) => g.id === savedGame.id || g.slug === savedGame.slug,
           );
           if (idx >= 0) {
-            mockStore.games[idx] = { ...mockStore.games[idx], ...savedGame };
+            const existing = mockStore.games[idx];
+            const defaultSchedule = getDefaultGameScheduleTimes(
+              existing?.slug ?? savedGame?.slug ?? "",
+            );
+            mockStore.games[idx] = {
+              ...existing,
+              ...savedGame,
+              schedule_times:
+                Array.isArray(savedGame.schedule_times) && savedGame.schedule_times.length > 0
+                  ? savedGame.schedule_times
+                  : (existing?.schedule_times ?? defaultSchedule),
+            };
           } else {
-            mockStore.games.push(savedGame);
+            const defaultSchedule = getDefaultGameScheduleTimes(savedGame?.slug ?? "");
+            mockStore.games.push({
+              ...savedGame,
+              schedule_times:
+                Array.isArray(savedGame.schedule_times) && savedGame.schedule_times.length > 0
+                  ? savedGame.schedule_times
+                  : defaultSchedule,
+            });
           }
         }
       }
@@ -90,7 +109,12 @@ export const Route = createFileRoute("/api/public/results/sync")({
         loadServerResults();
         loadServerAnimalImages();
         loadServerGames();
-        if (mockStore.results.length === 0) {
+        const monjeGame = mockStore.games.find((g) => g.slug === "monje-millonario");
+        const monjeCount = monjeGame
+          ? mockStore.results.filter((r) => r.game_id === monjeGame.id).length
+          : 0;
+
+        if (mockStore.results.length === 0 || (monjeGame && monjeCount < 6)) {
           try {
             const { synchronizeAutomaticResults } = await import("@/lib/result-sync.server");
             await synchronizeAutomaticResults();
@@ -166,12 +190,23 @@ export const Route = createFileRoute("/api/public/results/sync")({
           }
 
           if (gameUpdate) {
-            const { id, loading_mode, mode } = gameUpdate;
+            const { id, loading_mode, mode, schedule_times, color, name, is_active, logo_url } =
+              gameUpdate;
             const targetGame = mockStore.games.find((g) => g.id === id);
             if (targetGame) {
-              const effectiveMode = (mode ?? loading_mode ?? "automatic") as "manual" | "automatic";
-              targetGame.loading_mode = effectiveMode;
-              targetGame.mode = effectiveMode;
+              if (mode !== undefined || loading_mode !== undefined) {
+                const effectiveMode = (mode ?? loading_mode ?? "automatic") as
+                  "manual" | "automatic";
+                targetGame.loading_mode = effectiveMode;
+                targetGame.mode = effectiveMode;
+              }
+              if (Array.isArray(schedule_times)) {
+                targetGame.schedule_times = schedule_times;
+              }
+              if (color !== undefined) targetGame.color = color;
+              if (name !== undefined) targetGame.name = name;
+              if (is_active !== undefined) targetGame.is_active = is_active;
+              if (logo_url !== undefined) targetGame.logo_url = logo_url;
               saveServerGames();
             }
           }

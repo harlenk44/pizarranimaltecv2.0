@@ -12,9 +12,11 @@ import {
   VolumeX,
   Sliders,
   Target,
+  Tv,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { useBoardSettings } from "@/context/BoardSettingsContext";
+import { useTv } from "@/context/TvContext";
 import WeeklyBoard from "@/components/WeeklyBoard";
 import AdBanner from "@/components/AdBanner";
 import ResultAlertModal, { type ResultAlertItem } from "@/components/ResultAlertModal";
@@ -50,63 +52,10 @@ function formatBoardDate(d: Date): string {
   return `${capitalize(weekday)}, ${day} De ${capitalize(month)}`;
 }
 
-function getGameScheduleTimes(slug: string): string[] {
-  const norm = (slug || "").toLowerCase();
-  if (norm.includes("selva")) {
-    return [
-      "08:15",
-      "09:15",
-      "10:15",
-      "11:15",
-      "12:15",
-      "13:15",
-      "14:15",
-      "15:15",
-      "16:15",
-      "17:15",
-      "18:15",
-      "19:15",
-      "20:15",
-    ];
-  }
-  if (norm.includes("guacharito")) {
-    return [
-      "08:30",
-      "09:30",
-      "10:30",
-      "11:30",
-      "12:30",
-      "13:30",
-      "14:30",
-      "15:30",
-      "16:30",
-      "17:30",
-      "18:30",
-      "19:30",
-    ];
-  }
-  return [
-    "08:00",
-    "09:00",
-    "10:00",
-    "11:00",
-    "12:00",
-    "13:00",
-    "14:00",
-    "15:00",
-    "16:00",
-    "17:00",
-    "18:00",
-    "19:00",
-  ];
-}
+import { getGameScheduleTimes, formatScheduleTime } from "@/lib/game-schedules";
 
-function buildFullSchedule(gameSlug: string, results: Result[]): string[] {
-  const base = getGameScheduleTimes(gameSlug);
-  const extra = results.map((r) => r.draw_time.substring(0, 5));
-  const combined = Array.from(new Set([...base, ...extra]));
-  combined.sort((a, b) => a.localeCompare(b));
-  return combined;
+function buildFullSchedule(gameOrSlug: Game | string, _results: Result[]): string[] {
+  return getGameScheduleTimes(gameOrSlug);
 }
 
 function findResultForTimeSlot(results: Result[], timeSlot: string): Result | undefined {
@@ -158,6 +107,7 @@ function getDynamicGridStyle(count: number): React.CSSProperties {
 export default function BoardPage({ onAdminClick }: BoardPageProps) {
   const { profile, signOut } = useAuth();
   const { settings } = useBoardSettings();
+  const { isTvActivated, deactivateTv } = useTv();
   const [games, setGames] = useState<Game[]>([]);
   const [resultsMap, setResultsMap] = useState<Record<string, Result[]>>({});
   const [animalImages, setAnimalImages] = useState<AnimalImageMap>({});
@@ -615,6 +565,15 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
                 <Settings className="w-4 h-4" />
               </button>
             )}
+            {isTvActivated && (
+              <button
+                onClick={deactivateTv}
+                className="p-2 rounded-lg bg-slate-900 border border-slate-800 hover:bg-amber-950/40 hover:border-amber-800/60 transition text-slate-400 hover:text-amber-400"
+                title="Resetear Activación de TV"
+              >
+                <Tv className="w-4 h-4 text-sky-400" />
+              </button>
+            )}
             <button
               onClick={signOut}
               className="px-3.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700/80 hover:bg-slate-800 text-slate-300 hover:text-white text-xs font-semibold transition cursor-pointer"
@@ -715,7 +674,7 @@ function GameCard({
   settings: ReturnType<typeof useBoardSettings>["settings"];
 }) {
   const results = game.latest_results;
-  const scheduleTimes = buildFullSchedule(game.slug, results);
+  const scheduleTimes = buildFullSchedule(game, results);
   const latestResult = results.length > 0 ? results[results.length - 1] : null;
 
   const latestImgUrl = latestResult
@@ -783,12 +742,10 @@ function GameCard({
         }}
       >
         <div
-          className="rounded-xl bg-slate-950/90 border border-slate-700/80 flex items-center justify-center flex-shrink-0 overflow-hidden shadow-inner p-1"
+          className="fluid-hero-avatar rounded-xl bg-slate-950/90 border border-slate-700/80 flex items-center justify-center flex-shrink-0 overflow-hidden shadow-inner p-1"
           style={{
-            width:
-              "calc(clamp(3.5rem, 5vw, 6.5rem) * var(--display-hero-scale, 1) * var(--display-animal-scale, 1))",
-            height:
-              "calc(clamp(3.5rem, 5vw, 6.5rem) * var(--display-hero-scale, 1) * var(--display-animal-scale, 1))",
+            width: "calc(clamp(3.2rem, 4.8vw, 6rem) * var(--display-animal-scale, 1))",
+            height: "calc(clamp(3.2rem, 4.8vw, 6rem) * var(--display-animal-scale, 1))",
           }}
         >
           {latestResult ? (
@@ -813,7 +770,7 @@ function GameCard({
               <div className="fluid-hero-text font-black text-white tracking-wide truncate">
                 {latestLabel} - {latestDisplayName.toUpperCase()}
               </div>
-              <div className="text-xs sm:text-sm text-slate-300 font-mono font-semibold mt-0.5">
+              <div className="fluid-hero-time font-mono font-semibold text-slate-300 mt-0.5">
                 {formatTime(latestResult.draw_time)}
               </div>
             </div>

@@ -349,11 +349,11 @@
 
 .fluid-hero-banner {
   flex: 1;
-  min-height: 0;
+  min-height: calc(clamp(4.2rem, 7vh, 8.5rem) * var(--display-hero-scale, 1));
   background-color: rgba(15, 23, 42, 0.8);
   border: 1px solid rgba(51, 65, 85, 0.8);
   border-radius: clamp(10px, 1.2vw, 18px);
-  padding: calc(clamp(8px, 1.2vw, 16px) * var(--display-hero-scale, 1));
+  padding: calc(clamp(6px, 1vw, 14px) * var(--display-hero-scale, 1));
   margin: clamp(4px, 0.8vh, 12px) 0;
   display: flex;
   align-items: center;
@@ -362,8 +362,17 @@
 }
 
 .fluid-hero-text {
-  font-size: calc(clamp(1.1rem, 1.8vw, 2.2rem) * var(--display-font-scale, 1));
+  font-size: calc(
+    clamp(1rem, 1.6vw, 2.2rem) * var(--display-font-scale, 1) * var(--display-hero-scale, 1)
+  );
   line-height: 1.15;
+}
+
+.fluid-hero-time {
+  font-size: calc(
+    clamp(0.7rem, 1vw, 1.2rem) * var(--display-font-scale, 1) * var(--display-hero-scale, 1)
+  );
+  line-height: 1.2;
 }
 
 .fluid-schedule-matrix {

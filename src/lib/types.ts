@@ -8,6 +8,7 @@ export interface Game {
   is_active: boolean;
   loading_mode?: "manual" | "automatic";
   mode?: "manual" | "automatic";
+  schedule_times?: string[];
   created_at: string;
 }
 
@@ -121,4 +122,21 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
 
 export interface GameWithResults extends Game {
   latest_results: Result[];
+}
+
+export interface TvDevice {
+  id: string;
+  device_id: string;
+  device_name: string;
+  pairing_code: string | null;
+  is_active: boolean;
+  expires_at: string | null;
+  activated_at: string | null;
+  created_at: string;
+}
+
+export interface TvPairingCode {
+  code: string;
+  device_id: string;
+  created_at: string;
 }

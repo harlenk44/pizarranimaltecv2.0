@@ -166,6 +166,13 @@ export const LOTTO_ACTIVO_ANIMALS: OfficialAnimal[] = [
   { number: 37, name: "Ballena" },
 ];
 
+// Monje Millonario (Lotto Activo 2): 77 animals (0 Delfín, 01-74, 75 Patronus, 76 Ballena) — 12 draws (08:05 to 19:05)
+export const MONJE_MILLONARIO_ANIMALS: OfficialAnimal[] = [
+  ...BASE_ANIMALS.slice(0, 75), // 0-74 (Delfín through Turpial)
+  { number: 75, name: "Patronus" },
+  { number: 76, name: "Ballena" },
+];
+
 // Map game slug -> official animal list
 export const OFFICIAL_ANIMALS: Record<string, OfficialAnimal[]> = {
   guacharo: GUACHARO_ANIMALS,
@@ -173,4 +180,7 @@ export const OFFICIAL_ANIMALS: Record<string, OfficialAnimal[]> = {
   "selva-plus": SELVA_PLUS_ANIMALS,
   "loto-chaim-a": LOTO_CHAIMA_ANIMALS,
   "lotto-activo": LOTTO_ACTIVO_ANIMALS,
+  granjita: LOTTO_ACTIVO_ANIMALS,
+  "monje-millonario": MONJE_MILLONARIO_ANIMALS,
+  "lotto-activo-internacional": LOTTO_ACTIVO_ANIMALS,
 };

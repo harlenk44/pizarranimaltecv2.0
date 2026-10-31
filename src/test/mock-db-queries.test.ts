@@ -90,4 +90,44 @@ describe("Mock Supabase query builder", () => {
 
     expect(data).toHaveLength(2);
   });
+
+  it("includes Monje Millonario 77-animal catalog and supports sync_automatic_result for high animal numbers", async () => {
+    const monjeGame = mockStore.games.find((g) => g.slug === "monje-millonario");
+    expect(monjeGame).toBeDefined();
+
+    const { data: entries } = await supabase
+      .from("animal_entries")
+      .select("*")
+      .eq("game_id", monjeGame!.id);
+
+    const entriesArr = (entries ?? []) as Array<{ number: number; name: string }>;
+    expect(entriesArr.length).toBeGreaterThanOrEqual(76);
+    expect(entriesArr.some((e) => e.number === 54 && e.name.toLowerCase() === "grillo")).toBe(true);
+    expect(
+      entriesArr.some(
+        (e) =>
+          e.number === 73 &&
+          e.name.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().includes("hipopotam"),
+      ),
+    ).toBe(true);
+
+    const { data: rpcRes } = await supabase.rpc("sync_automatic_result", {
+      p_game_id: monjeGame!.id,
+      p_draw_date: "2026-10-30",
+      p_draw_time: "08:05:00",
+      p_animal_number: 54,
+      p_animal_name: "Grillo",
+    });
+    expect(rpcRes).toBe(true);
+
+    const { data: resultData } = await supabase
+      .from("results")
+      .select("*")
+      .eq("game_id", monjeGame!.id)
+      .eq("draw_date", "2026-10-30")
+      .eq("draw_time", "08:05:00");
+
+    expect(resultData).toHaveLength(1);
+    expect((resultData as Array<{ animal_number: number }>)[0]?.animal_number).toBe(54);
+  });
 });

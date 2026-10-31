@@ -67,6 +67,12 @@ export function normalizeName(input: string): string {
   const norm = input.normalize("NFD").replace(/[̀-ͯ]/g, "").toUpperCase().replace(/\s+/g, " ").trim();
   if (norm === "CHUGUIRE") return "CHIGUIRE";
   if (norm === "CIENPIES") return "CIEMPIES";
+  if (norm === "EL PATRONUS") return "PATRONUS";
+  if (norm === "EL GUACHARO") return "GUACHARO";
+  if (norm === "EL GUACHARITO") return "GUACHARITO";
+  if (norm === "HORMIGUERO") return "OSO HORMIGUERO";
+  if (norm === "PAVOREAL") return "PAVO REAL";
+  if (norm === "PUERCO ESPIN") return "PUERCOESPIN";
   return norm;
 }
 

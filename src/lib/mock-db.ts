@@ -6,9 +6,16 @@ import {
   type Game,
   type Result,
   type Profile,
+  type LicenseInfo,
 } from "@/lib/types";
 import { parseTuazarResults, normalizeName, hourTo24h } from "@/lib/tuazar-parser";
 import { TUAZAR_GAME_NAMES } from "@/lib/tuazar-provider.server";
+import {
+  parseLoteriaDeHoyResults,
+  matchGameClass,
+  LOTERIADEHOY_GAME_MAPPINGS,
+} from "@/lib/loteriadehoy-parser";
+import { DEFAULT_GAME_SCHEDULES } from "@/lib/game-schedules";
 
 export interface MockStore {
   games: Game[];
@@ -30,6 +37,7 @@ export interface MockStore {
   ads: unknown[];
   profiles: Profile[];
   user_roles: Array<{ user_id: string; role: string }>;
+  licenses: LicenseInfo[];
 }
 
 const ADMIN_ID = "00000000-0000-0000-0000-000000000001";
@@ -44,6 +52,7 @@ export const INITIAL_GAMES: Game[] = [
     display_order: 1,
     is_active: true,
     loading_mode: "automatic",
+    schedule_times: [...DEFAULT_GAME_SCHEDULES["lotto-activo"]],
     created_at: new Date().toISOString(),
   },
   {
@@ -55,6 +64,7 @@ export const INITIAL_GAMES: Game[] = [
     display_order: 2,
     is_active: true,
     loading_mode: "automatic",
+    schedule_times: [...DEFAULT_GAME_SCHEDULES["guacharo"]],
     created_at: new Date().toISOString(),
   },
   {
@@ -66,6 +76,7 @@ export const INITIAL_GAMES: Game[] = [
     display_order: 3,
     is_active: true,
     loading_mode: "automatic",
+    schedule_times: [...DEFAULT_GAME_SCHEDULES["guacharito"]],
     created_at: new Date().toISOString(),
   },
   {
@@ -77,6 +88,7 @@ export const INITIAL_GAMES: Game[] = [
     display_order: 4,
     is_active: true,
     loading_mode: "automatic",
+    schedule_times: [...DEFAULT_GAME_SCHEDULES["selva-plus"]],
     created_at: new Date().toISOString(),
   },
   {
@@ -88,6 +100,7 @@ export const INITIAL_GAMES: Game[] = [
     display_order: 5,
     is_active: true,
     loading_mode: "automatic",
+    schedule_times: [...DEFAULT_GAME_SCHEDULES["loto-chaim-a"]],
     created_at: new Date().toISOString(),
   },
   {
@@ -99,6 +112,7 @@ export const INITIAL_GAMES: Game[] = [
     display_order: 6,
     is_active: true,
     loading_mode: "automatic",
+    schedule_times: [...DEFAULT_GAME_SCHEDULES["granjita"]],
     created_at: new Date().toISOString(),
   },
   {
@@ -110,6 +124,7 @@ export const INITIAL_GAMES: Game[] = [
     display_order: 7,
     is_active: true,
     loading_mode: "automatic",
+    schedule_times: [...DEFAULT_GAME_SCHEDULES["monje-millonario"]],
     created_at: new Date().toISOString(),
   },
   {
@@ -121,6 +136,7 @@ export const INITIAL_GAMES: Game[] = [
     display_order: 8,
     is_active: true,
     loading_mode: "automatic",
+    schedule_times: [...DEFAULT_GAME_SCHEDULES["lotto-activo-internacional"]],
     created_at: new Date().toISOString(),
   },
 ];
@@ -181,6 +197,17 @@ function buildInitialImages(): MockStore["animal_images"] {
         game_id: granjitaGame.id,
         animal_number: i,
         image_url: `https://tuazar.com/in/animalitos/la_granjita/${i}.png`,
+      });
+    }
+  }
+  const monjeGame = INITIAL_GAMES.find((g) => g.slug === "monje-millonario");
+  if (monjeGame) {
+    for (let i = 0; i <= 76; i++) {
+      images.push({
+        id: `img-monje-${i}`,
+        game_id: monjeGame.id,
+        animal_number: i,
+        image_url: `https://tuazar.com/in/animalitos/monje_millonario/${i}.webp`,
       });
     }
   }
@@ -307,6 +334,33 @@ function buildInitialGames(): Game[] {
   return list;
 }
 
+function buildInitialLicenses(): LicenseInfo[] {
+  if (typeof window !== "undefined") {
+    try {
+      const saved = localStorage.getItem("pizarra_persisted_licenses");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed as LicenseInfo[];
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return [
+    {
+      id: "lic-demo-1",
+      username: "televisor1",
+      password_hash: "123456",
+      serial_number: "SERIAL-1234-5678",
+      is_active: true,
+      device_id: null,
+      activated_at: null,
+      expires_at: null,
+      created_at: new Date().toISOString(),
+    },
+  ];
+}
+
 // Global persistent in-memory store
 declare global {
   var __APPLET_MOCK_STORE__: MockStore | undefined;
@@ -322,10 +376,56 @@ if (!globalThis.__APPLET_MOCK_STORE__) {
     ads: [],
     profiles: buildInitialProfiles(),
     user_roles: buildInitialRoles(),
+    licenses: buildInitialLicenses(),
   };
 }
 
+export function ensureAllGameEntries(store: MockStore) {
+  for (const game of store.games) {
+    const catalog = OFFICIAL_ANIMALS[game.slug] ?? OFFICIAL_ANIMALS["lotto-activo"] ?? [];
+    for (const item of catalog) {
+      const exists = store.animal_entries.some(
+        (e) =>
+          e.game_id === game.id &&
+          (e.number === item.number ||
+            ((item.number === 76 || item.number === 37 || item.number === 100) &&
+              e.label === "00")),
+      );
+      if (!exists) {
+        let label: string | null = null;
+        if (item.name.toLowerCase() === "ballena") label = "00";
+        else if (item.name.toLowerCase() === "delfín" || item.name.toLowerCase() === "delfin")
+          label = "0";
+        store.animal_entries.push({
+          id: `${game.id}-${item.number}`,
+          game_id: game.id,
+          number: item.number,
+          name: item.name,
+          label,
+        });
+      }
+    }
+
+    if (game.slug === "monje-millonario") {
+      for (let i = 0; i <= 76; i++) {
+        const hasImg = store.animal_images.some(
+          (img) => img.game_id === game.id && img.animal_number === i,
+        );
+        if (!hasImg) {
+          store.animal_images.push({
+            id: `img-monje-${i}`,
+            game_id: game.id,
+            animal_number: i,
+            image_url: `https://tuazar.com/in/animalitos/monje_millonario/${i}.webp`,
+          });
+        }
+      }
+    }
+  }
+}
+
 export const mockStore: MockStore = globalThis.__APPLET_MOCK_STORE__;
+ensureAllGameEntries(mockStore);
 
 let syncPromise: Promise<number> | null = null;
 
@@ -353,105 +453,250 @@ export async function syncTuazarDirectly(): Promise<number> {
         return 0;
       }
 
-      const response = await fetch("https://tuazar.com/loteria/animalitos/resultados/", {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
-        },
-      });
-      if (!response.ok) return 0;
-      const html = await response.text();
-      const page = parseTuazarResults(html);
-      const drawDate =
-        page.date ??
-        new Intl.DateTimeFormat("en-CA", {
-          timeZone: "America/Caracas",
-          year: "numeric",
-          month: "2-digit",
-          day: "2-digit",
-        }).format(new Date());
-
       let added = 0;
-      for (const [slug, tuazarName] of Object.entries(TUAZAR_GAME_NAMES)) {
-        const game = mockStore.games.find((g) => g.slug === slug);
-        if (!game) continue;
-        const effectiveMode = (game.mode ?? game.loading_mode ?? "automatic").toLowerCase();
-        // Validation: DO NOT overwrite or sync results for games configured in manual mode!
-        if (effectiveMode === "manual" || !game.is_active) continue;
+      const todayCaracas = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "America/Caracas",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(new Date());
 
-        const catalog = mockStore.animal_entries.filter((e) => e.game_id === game.id);
-        const wanted = normalizeName(tuazarName);
-        const draws = page.results.filter((r) => normalizeName(r.game) === wanted);
+      // Helper to match draw with catalog with fallback
+      const matchDrawWithCatalog = (
+        drawNumber: string,
+        drawAnimal: string,
+        catalog: typeof mockStore.animal_entries,
+        gameSlug?: string,
+      ) => {
+        const numVal = Number(drawNumber);
+        const normAnimal = normalizeName(drawAnimal);
 
-        for (const draw of draws) {
-          const drawTime = hourTo24h(draw.hour);
-          if (!drawTime) continue;
-          const numVal = Number(draw.number);
-          const normAnimal = normalizeName(draw.animal);
+        // 1. Direct name + number match
+        let matched = catalog.find((entry) => {
+          const nameMatches = normalizeName(entry.name) === normAnimal;
+          if (!nameMatches) return false;
+          const directNum = entry.number === numVal;
+          const labelMatch = entry.label === drawNumber;
+          const ballenaMatch =
+            (drawNumber === "00" || drawNumber === "0") && normalizeName(entry.name) === "BALLENA";
+          const delfinMatch =
+            (drawNumber === "0" || drawNumber === "00") && normalizeName(entry.name) === "DELFIN";
+          return directNum || labelMatch || ballenaMatch || delfinMatch;
+        });
+        if (matched) return matched;
 
-          const matched = catalog.find((entry) => {
-            const nameMatches = normalizeName(entry.name) === normAnimal;
-            if (!nameMatches) return false;
-            const directNum = entry.number === numVal;
-            const labelMatch = entry.label === draw.number;
-            const ballenaMatch =
-              (draw.number === "00" || draw.number === "0") &&
-              normalizeName(entry.name) === "BALLENA";
-            const delfinMatch =
-              (draw.number === "0" || draw.number === "00") &&
-              normalizeName(entry.name) === "DELFIN";
-            return directNum || labelMatch || ballenaMatch || delfinMatch;
-          });
+        // 2. Special match for 00 Ballena or 0 Delfín
+        if (drawNumber === "00" || normAnimal === "BALLENA") {
+          matched = catalog.find((e) => e.label === "00" || normalizeName(e.name) === "BALLENA");
+          if (matched) return matched;
+        }
+        if (drawNumber === "0" || normAnimal === "DELFIN") {
+          matched = catalog.find((e) => e.number === 0 || normalizeName(e.name) === "DELFIN");
+          if (matched) return matched;
+        }
 
-          if (!matched) continue;
+        // 3. Match by number if > 0
+        if (numVal > 0) {
+          matched = catalog.find((e) => e.number === numVal);
+          if (matched) return matched;
+        }
 
-          // Check if existing result was manually entered
-          const existing = mockStore.results.find(
-            (r) => r.game_id === game.id && r.draw_date === drawDate && r.draw_time === drawTime,
+        // 4. Match by animal name
+        matched = catalog.find((e) => normalizeName(e.name) === normAnimal);
+        if (matched) return matched;
+
+        // 5. Official animal fallback
+        const officialCatalog = gameSlug ? OFFICIAL_ANIMALS[gameSlug] : undefined;
+        if (officialCatalog) {
+          const off = officialCatalog.find(
+            (a) => a.number === numVal || normalizeName(a.name) === normAnimal,
           );
-          if (existing) {
-            if (existing.source !== "manual") {
-              existing.animal_number = matched.number;
-              existing.animal_name = matched.name;
-              existing.source = "automatic";
-            }
-          } else {
-            mockStore.results.push({
-              id: `res-${game.id}-${drawDate}-${drawTime}`,
-              game_id: game.id,
-              draw_date: drawDate,
-              draw_time: drawTime,
-              animal_number: matched.number,
-              animal_name: matched.name,
-              source: "automatic",
-              created_at: new Date().toISOString(),
-            });
-            added++;
-          }
-
-          if (draw.imageUrl) {
-            const existingImg = mockStore.animal_images.find(
-              (img) => img.game_id === game.id && img.animal_number === matched.number,
-            );
-            if (existingImg) {
-              existingImg.image_url = draw.imageUrl;
-            } else {
-              mockStore.animal_images.push({
-                id: `img-${game.id}-${matched.number}`,
-                game_id: game.id,
-                animal_number: matched.number,
-                image_url: draw.imageUrl,
-              });
-            }
-          }
-          if (draw.gameLogoUrl && !game.logo_url) {
-            game.logo_url = draw.gameLogoUrl;
+          if (off) {
+            return {
+              id: `fallback-${numVal}`,
+              game_id: "",
+              number: off.number,
+              name: off.name,
+              label: drawNumber,
+            };
           }
         }
+
+        // 6. Non-dropping fallback
+        return {
+          id: `raw-${numVal}`,
+          game_id: "",
+          number: Number.isNaN(numVal) ? 0 : numVal,
+          name: drawAnimal,
+          label: drawNumber,
+        };
+      };
+
+      // 1. Try PRIMARY source: LoteriaDeHoy
+      let ldhSuccess = false;
+      try {
+        const ldhRes = await fetch("https://loteriadehoy.com/animalitos/resultados/", {
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+          },
+        });
+        if (ldhRes.ok) {
+          const ldhHtml = await ldhRes.text();
+          const ldhPage = parseLoteriaDeHoyResults(ldhHtml);
+          const drawDate = ldhPage.date ?? todayCaracas;
+
+          for (const [slug, meta] of Object.entries(LOTERIADEHOY_GAME_MAPPINGS)) {
+            const game = mockStore.games.find((g) => g.slug === slug);
+            if (!game) continue;
+            const effectiveMode = (game.mode ?? game.loading_mode ?? "automatic").toLowerCase();
+            if (effectiveMode === "manual" || !game.is_active) continue;
+
+            const catalog = mockStore.animal_entries.filter((e) => e.game_id === game.id);
+            const draws = ldhPage.results.filter(
+              (r) =>
+                matchGameClass(r.gameClass, meta.className) ||
+                r.gameClass === meta.className.toLowerCase(),
+            );
+
+            for (const draw of draws) {
+              const drawTime = draw.drawTime;
+              if (!drawTime) continue;
+
+              const matched = matchDrawWithCatalog(draw.number, draw.animal, catalog, game.slug);
+              if (!matched) continue;
+
+              const existing = mockStore.results.find(
+                (r) =>
+                  r.game_id === game.id && r.draw_date === drawDate && r.draw_time === drawTime,
+              );
+              if (existing) {
+                if (existing.source !== "manual") {
+                  existing.animal_number = matched.number;
+                  existing.animal_name = matched.name;
+                  existing.source = "automatic";
+                }
+              } else {
+                mockStore.results.push({
+                  id: `res-${game.id}-${drawDate}-${drawTime}`,
+                  game_id: game.id,
+                  draw_date: drawDate,
+                  draw_time: drawTime,
+                  animal_number: matched.number,
+                  animal_name: matched.name,
+                  source: "automatic",
+                  created_at: new Date().toISOString(),
+                });
+                added++;
+              }
+
+              if (draw.imageUrl) {
+                const existingImg = mockStore.animal_images.find(
+                  (img) => img.game_id === game.id && img.animal_number === matched.number,
+                );
+                if (existingImg) {
+                  existingImg.image_url = draw.imageUrl;
+                } else {
+                  mockStore.animal_images.push({
+                    id: `img-${game.id}-${matched.number}`,
+                    game_id: game.id,
+                    animal_number: matched.number,
+                    image_url: draw.imageUrl,
+                  });
+                }
+              }
+            }
+          }
+          ldhSuccess = added > 0 || ldhPage.results.length > 0;
+        }
+      } catch (ldhErr) {
+        console.warn("[mock-db] LoteriaDeHoy fetch failed, falling back to TuAzar:", ldhErr);
       }
+
+      // 2. If LoteriaDeHoy was not available or produced 0 draws, fallback to TuAzar
+      if (!ldhSuccess) {
+        try {
+          const response = await fetch("https://tuazar.com/loteria/animalitos/resultados/", {
+            headers: {
+              "User-Agent":
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+            },
+          });
+          if (response.ok) {
+            const html = await response.text();
+            const page = parseTuazarResults(html);
+            const drawDate = page.date ?? todayCaracas;
+
+            for (const [slug, tuazarName] of Object.entries(TUAZAR_GAME_NAMES)) {
+              const game = mockStore.games.find((g) => g.slug === slug);
+              if (!game) continue;
+              const effectiveMode = (game.mode ?? game.loading_mode ?? "automatic").toLowerCase();
+              if (effectiveMode === "manual" || !game.is_active) continue;
+
+              const catalog = mockStore.animal_entries.filter((e) => e.game_id === game.id);
+              const wanted = normalizeName(tuazarName);
+              const draws = page.results.filter((r) => normalizeName(r.game) === wanted);
+
+              for (const draw of draws) {
+                const drawTime = hourTo24h(draw.hour);
+                if (!drawTime) continue;
+
+                const matched = matchDrawWithCatalog(draw.number, draw.animal, catalog, game.slug);
+                if (!matched) continue;
+
+                const existing = mockStore.results.find(
+                  (r) =>
+                    r.game_id === game.id && r.draw_date === drawDate && r.draw_time === drawTime,
+                );
+                if (existing) {
+                  if (existing.source !== "manual") {
+                    existing.animal_number = matched.number;
+                    existing.animal_name = matched.name;
+                    existing.source = "automatic";
+                  }
+                } else {
+                  mockStore.results.push({
+                    id: `res-${game.id}-${drawDate}-${drawTime}`,
+                    game_id: game.id,
+                    draw_date: drawDate,
+                    draw_time: drawTime,
+                    animal_number: matched.number,
+                    animal_name: matched.name,
+                    source: "automatic",
+                    created_at: new Date().toISOString(),
+                  });
+                  added++;
+                }
+
+                if (draw.imageUrl) {
+                  const existingImg = mockStore.animal_images.find(
+                    (img) => img.game_id === game.id && img.animal_number === matched.number,
+                  );
+                  if (existingImg) {
+                    existingImg.image_url = draw.imageUrl;
+                  } else {
+                    mockStore.animal_images.push({
+                      id: `img-${game.id}-${matched.number}`,
+                      game_id: game.id,
+                      animal_number: matched.number,
+                      image_url: draw.imageUrl,
+                    });
+                  }
+                }
+                if (draw.gameLogoUrl && !game.logo_url) {
+                  game.logo_url = draw.gameLogoUrl;
+                }
+              }
+            }
+          }
+        } catch (tuazarErr) {
+          console.warn("[mock-db] Fallback TuAzar fetch also failed:", tuazarErr);
+        }
+      }
+
       return added;
     } catch (err) {
-      console.warn("[mock-db] Error syncing TuAzar directly:", err);
+      console.warn("[mock-db] Error syncing lottery results directly:", err);
       return 0;
     } finally {
       syncPromise = null;
@@ -459,6 +704,8 @@ export async function syncTuazarDirectly(): Promise<number> {
   })();
   return syncPromise;
 }
+
+export const syncLotteryDirectly = syncTuazarDirectly;
 
 // Initial sync on module load
 syncTuazarDirectly();
@@ -608,10 +855,38 @@ function createMockQueryBuilder(table: string) {
     insert(rows: Record<string, unknown> | Array<Record<string, unknown>>) {
       const storeList = ((mockStore as unknown as Record<string, unknown[]>)[table] ??= []);
       const toAdd = Array.isArray(rows) ? rows : [rows];
+      const insertedRows: Record<string, unknown>[] = [];
       for (const r of toAdd) {
-        storeList.push({ id: r["id"] ?? `id-${Date.now()}-${Math.random()}`, ...r });
+        const newRow = { id: r["id"] ?? `id-${Date.now()}-${Math.random()}`, ...r };
+        storeList.push(newRow);
+        insertedRows.push(newRow);
       }
-      return Promise.resolve({ data: rows, error: null });
+      if (table === "licenses" && typeof window !== "undefined") {
+        try {
+          localStorage.setItem("pizarra_persisted_licenses", JSON.stringify(storeList));
+        } catch {
+          // ignore
+        }
+      }
+      if ((table === "profiles" || table === "user_roles") && typeof window !== "undefined") {
+        saveProfilesToStorage();
+      }
+
+      const resultData = Array.isArray(rows) ? insertedRows : insertedRows[0];
+      const resPromise = Promise.resolve({ data: resultData, error: null });
+
+      return Object.assign(resPromise, {
+        select() {
+          return Object.assign(Promise.resolve({ data: resultData, error: null }), {
+            single() {
+              return Promise.resolve({ data: insertedRows[0], error: null });
+            },
+          });
+        },
+        single() {
+          return Promise.resolve({ data: insertedRows[0], error: null });
+        },
+      });
     },
     update(changes: Record<string, unknown>) {
       isUpdate = true;
@@ -689,6 +964,16 @@ function createMockQueryBuilder(table: string) {
         if (table === "animal_images" && typeof window !== "undefined") {
           try {
             localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(remaining));
+          } catch {
+            // ignore
+          }
+        }
+        if ((table === "profiles" || table === "user_roles") && typeof window !== "undefined") {
+          saveProfilesToStorage();
+        }
+        if (table === "licenses" && typeof window !== "undefined") {
+          try {
+            localStorage.setItem("pizarra_persisted_licenses", JSON.stringify(remaining));
           } catch {
             // ignore
           }
@@ -929,6 +1214,125 @@ export function createMockSupabaseClient() {
       return createMockQueryBuilder(tableName);
     },
     rpc(fnName: string, args: Record<string, unknown>) {
+      if (fnName === "request_tv_pairing_code") {
+        const { p_device_id } = args as { p_device_id: string };
+        if (!mockStore.tv_devices) mockStore.tv_devices = [];
+        if (!mockStore.tv_pairing_codes) mockStore.tv_pairing_codes = [];
+
+        const dev = mockStore.tv_devices.find((d) => d.device_id === p_device_id);
+        if (dev && dev.is_active) {
+          const expired = dev.expires_at && new Date(dev.expires_at) < new Date();
+          if (!expired) {
+            return Promise.resolve({
+              data: {
+                status: "already_active",
+                device_name: dev.device_name,
+                expires_at: dev.expires_at,
+              },
+              error: null,
+            });
+          }
+        }
+
+        let codeMatch = mockStore.tv_pairing_codes.find((p) => p.device_id === p_device_id);
+        if (!codeMatch) {
+          const rand1 = Math.floor(100 + Math.random() * 900);
+          const rand2 = Math.floor(100 + Math.random() * 900);
+          codeMatch = {
+            code: `${rand1}-${rand2}`,
+            device_id: p_device_id,
+            created_at: new Date().toISOString(),
+          };
+          mockStore.tv_pairing_codes.push(codeMatch);
+        }
+
+        return Promise.resolve({
+          data: { status: "code_generated", code: codeMatch.code, device_id: p_device_id },
+          error: null,
+        });
+      }
+
+      if (fnName === "authorize_tv_device") {
+        const { p_code, p_device_name, p_days } = args as {
+          p_code: string;
+          p_device_name?: string;
+          p_days?: number;
+        };
+        if (!mockStore.tv_devices) mockStore.tv_devices = [];
+        if (!mockStore.tv_pairing_codes) mockStore.tv_pairing_codes = [];
+
+        const normCode = (p_code || "").trim().replace(/[^0-9]/g, "");
+        const formatted =
+          normCode.length === 6 ? `${normCode.slice(0, 3)}-${normCode.slice(3)}` : normCode;
+
+        const pairMatch = mockStore.tv_pairing_codes.find(
+          (p) => p.code.replace(/[^0-9]/g, "") === normCode,
+        );
+
+        const devId = pairMatch ? pairMatch.device_id : `TV-DIRECT-${normCode}`;
+        const expiresAt = p_days ? new Date(Date.now() + p_days * 86400000).toISOString() : null;
+
+        const existing = mockStore.tv_devices.find((d) => d.device_id === devId);
+        if (existing) {
+          existing.device_name = p_device_name || existing.device_name || "Smart TV";
+          existing.pairing_code = formatted;
+          existing.is_active = true;
+          existing.expires_at = expiresAt;
+          existing.activated_at = new Date().toISOString();
+        } else {
+          mockStore.tv_devices.push({
+            id: `tv-${Date.now()}`,
+            device_id: devId,
+            device_name: p_device_name || "Smart TV",
+            pairing_code: formatted,
+            is_active: true,
+            expires_at: expiresAt,
+            activated_at: new Date().toISOString(),
+            created_at: new Date().toISOString(),
+          });
+        }
+
+        return Promise.resolve({
+          data: {
+            success: true,
+            device_id: devId,
+            device_name: p_device_name,
+            expires_at: expiresAt,
+          },
+          error: null,
+        });
+      }
+
+      if (fnName === "check_tv_device_status") {
+        const { p_device_id } = args as { p_device_id: string };
+        if (!mockStore.tv_devices) mockStore.tv_devices = [];
+
+        const dev = mockStore.tv_devices.find((d) => d.device_id === p_device_id);
+        if (!dev) {
+          return Promise.resolve({
+            data: { active: false, message: "Pendiente de activación" },
+            error: null,
+          });
+        }
+        if (!dev.is_active) {
+          return Promise.resolve({
+            data: { active: false, message: "Televisor pausado o suspendido" },
+            error: null,
+          });
+        }
+        if (dev.expires_at && new Date(dev.expires_at) < new Date()) {
+          return Promise.resolve({
+            data: { active: false, message: "Servicio vencido" },
+            error: null,
+          });
+        }
+
+        return Promise.resolve({
+          data: { active: true, device_name: dev.device_name, expires_at: dev.expires_at },
+          error: null,
+        });
+      }
+
       if (fnName === "set_subscription_status") {
         const { target_user_id, new_status, new_expires_at } = args as {
           target_user_id: string;
