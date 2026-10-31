@@ -18,7 +18,16 @@ export function DisplayProvider({ children }: { children: ReactNode }) {
   const [storageError, setStorageError] = useState(false);
   useEffect(() => {
     try {
-      setPreferences(parseDisplayPreferences(localStorage.getItem(DISPLAY_STORAGE_KEY)));
+      const raw = localStorage.getItem(DISPLAY_STORAGE_KEY);
+      const parsed = parseDisplayPreferences(raw);
+      const migratedKey = "animalitos-display-migrated-20s";
+      if (raw && !localStorage.getItem(migratedKey)) {
+        localStorage.setItem(migratedKey, "1");
+        if (parsed.alertDurationSeconds <= 4) {
+          parsed.alertDurationSeconds = 20;
+        }
+      }
+      setPreferences(parsed);
     } catch {
       setStorageError(true);
     }

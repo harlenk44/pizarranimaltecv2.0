@@ -5,6 +5,9 @@ export const DEFAULT_DISPLAY = {
   fontSizeScale: 100,
   heroCardScale: 100,
   animalScale: 100,
+  reloadOnNewResult: false,
+  alertDurationSeconds: 20,
+  showAlertModal: true,
 };
 export type DisplayPreferences = typeof DEFAULT_DISPLAY;
 
@@ -19,6 +22,20 @@ export function parseDisplayPreferences(raw: string | null): DisplayPreferences 
       fontSizeScale: bounded(value?.fontSizeScale, 60, 220, DEFAULT_DISPLAY.fontSizeScale),
       heroCardScale: bounded(value?.heroCardScale, 60, 220, DEFAULT_DISPLAY.heroCardScale),
       animalScale: bounded(value?.animalScale, 40, 220, DEFAULT_DISPLAY.animalScale),
+      reloadOnNewResult:
+        typeof value?.reloadOnNewResult === "boolean"
+          ? value.reloadOnNewResult
+          : DEFAULT_DISPLAY.reloadOnNewResult,
+      alertDurationSeconds: bounded(
+        value?.alertDurationSeconds,
+        2,
+        30,
+        DEFAULT_DISPLAY.alertDurationSeconds,
+      ),
+      showAlertModal:
+        typeof value?.showAlertModal === "boolean"
+          ? value.showAlertModal
+          : DEFAULT_DISPLAY.showAlertModal,
     };
   } catch {
     return { ...DEFAULT_DISPLAY };

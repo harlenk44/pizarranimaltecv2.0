@@ -1,19 +1,90 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { mockStore } from "@/lib/mock-db";
-import { getDefaultGameScheduleTimes } from "@/lib/game-schedules";
+import type { ClientLicense } from "@/lib/types";
+import {
+  getDefaultGameScheduleTimes,
+  getGameScheduleTimes,
+  normalizeScheduleTime,
+} from "@/lib/game-schedules";
 import fs from "fs";
 
 const RESULTS_FILE = "/tmp/lottery_results.json";
 const LATEST_ALERT_FILE = "/tmp/lottery_latest_alert.json";
 const ANIMAL_IMAGES_FILE = "/tmp/lottery_animal_images.json";
 const GAMES_FILE = "/tmp/lottery_games.json";
+const CLIENT_LICENSES_FILE = "/tmp/lottery_client_licenses_v2.json";
+
+interface ServerLicenseState {
+  requireLicense: boolean;
+  licenses: ClientLicense[];
+}
+
+let serverLicenseState: ServerLicenseState = {
+  requireLicense: true,
+  licenses: [
+    {
+      id: "lic-default-1",
+      client_name: "Agencia Principal (Demo)",
+      pin_code: "123456",
+      status: "active",
+      expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
+      max_devices: 5,
+      bound_device_ids: [],
+      notes: "PIN de acceso inicial: 123456",
+      created_at: new Date().toISOString(),
+    },
+  ],
+};
+
+function loadServerLicenses() {
+  try {
+    if (fs.existsSync(CLIENT_LICENSES_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(CLIENT_LICENSES_FILE, "utf-8"));
+      if (parsed && typeof parsed === "object") {
+        serverLicenseState = {
+          requireLicense: Boolean(parsed.requireLicense),
+          licenses: Array.isArray(parsed.licenses) ? parsed.licenses : serverLicenseState.licenses,
+        };
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function saveServerLicenses() {
+  try {
+    fs.writeFileSync(CLIENT_LICENSES_FILE, JSON.stringify(serverLicenseState));
+  } catch {
+    // ignore
+  }
+}
+
+function sanitizeResultsList(results: unknown[]): typeof mockStore.results {
+  if (!Array.isArray(results)) return [];
+  return results.filter((r) => {
+    if (!r || typeof r !== "object") return false;
+    const res = r as { game_id?: string; draw_time?: string };
+    if (!res.game_id || !res.draw_time) return false;
+    const game = mockStore.games.find((g) => g.id === res.game_id);
+    if (!game) return true;
+    const validSchedule = new Set(
+      getGameScheduleTimes(game).map((t) => normalizeScheduleTime(t) ?? t),
+    );
+    const normDraw = normalizeScheduleTime(res.draw_time) ?? res.draw_time;
+    return validSchedule.has(normDraw);
+  });
+}
 
 function loadServerResults() {
   try {
     if (fs.existsSync(RESULTS_FILE)) {
       const data = JSON.parse(fs.readFileSync(RESULTS_FILE, "utf-8"));
       if (Array.isArray(data) && data.length > 0) {
-        mockStore.results = data;
+        mockStore.results = sanitizeResultsList(data);
+        if (mockStore.results.length !== data.length) {
+          fs.writeFileSync(RESULTS_FILE, JSON.stringify(mockStore.results));
+        }
       }
     }
   } catch {
@@ -23,6 +94,7 @@ function loadServerResults() {
 
 function saveServerResults() {
   try {
+    mockStore.results = sanitizeResultsList(mockStore.results);
     fs.writeFileSync(RESULTS_FILE, JSON.stringify(mockStore.results));
   } catch {
     // ignore
@@ -101,6 +173,66 @@ function saveServerGames() {
 loadServerResults();
 loadServerAnimalImages();
 loadServerGames();
+loadServerLicenses();
+
+let lastAutoSyncTimestamp = 0;
+let isAutoSyncing = false;
+const AUTO_SYNC_INTERVAL_MS = 15_000;
+
+async function triggerBackgroundSync(forceWait = false) {
+  const now = Date.now();
+  if (isAutoSyncing) return;
+  if (!forceWait && now - lastAutoSyncTimestamp < AUTO_SYNC_INTERVAL_MS) return;
+
+  isAutoSyncing = true;
+  lastAutoSyncTimestamp = now;
+
+  try {
+    loadServerGames();
+    loadServerResults();
+    loadServerAnimalImages();
+    const prevCount = mockStore.results.length;
+
+    const { synchronizeAutomaticResults } = await import("@/lib/result-sync.server");
+    const reports = await synchronizeAutomaticResults();
+    saveServerResults();
+
+    const anyWritten = reports.some((r) => r.written > 0) || mockStore.results.length > prevCount;
+    if (anyWritten) {
+      const latest = mockStore.results[mockStore.results.length - 1];
+      if (latest) {
+        const gameObj = mockStore.games.find((g) => g.id === latest.game_id);
+        const alertPayload = {
+          id: `auto-${latest.id || `${latest.game_id}-${latest.draw_date}-${latest.draw_time}`}`,
+          gameId: latest.game_id,
+          gameName: gameObj?.name || "Lotería",
+          gameColor: gameObj?.color || "#10b981",
+          gameLogoUrl: gameObj?.logo_url,
+          drawDate: latest.draw_date,
+          drawTime: latest.draw_time,
+          animalNumber: latest.animal_number,
+          animalName: latest.animal_name,
+        };
+        try {
+          fs.writeFileSync(LATEST_ALERT_FILE, JSON.stringify(alertPayload));
+        } catch {
+          // ignore
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("[auto-sync-warn]", err);
+  } finally {
+    isAutoSyncing = false;
+  }
+}
+
+// Background scheduler so external lotteries are checked continuously even between active page polls
+if (typeof setInterval !== "undefined") {
+  setInterval(() => {
+    triggerBackgroundSync(false).catch(() => {});
+  }, AUTO_SYNC_INTERVAL_MS);
+}
 
 export const Route = createFileRoute("/api/public/results/sync")({
   server: {
@@ -109,19 +241,19 @@ export const Route = createFileRoute("/api/public/results/sync")({
         loadServerResults();
         loadServerAnimalImages();
         loadServerGames();
+        loadServerLicenses();
         const monjeGame = mockStore.games.find((g) => g.slug === "monje-millonario");
         const monjeCount = monjeGame
           ? mockStore.results.filter((r) => r.game_id === monjeGame.id).length
           : 0;
 
-        if (mockStore.results.length === 0 || (monjeGame && monjeCount < 6)) {
-          try {
-            const { synchronizeAutomaticResults } = await import("@/lib/result-sync.server");
-            await synchronizeAutomaticResults();
-            saveServerResults();
-          } catch (err) {
-            console.warn("[sync-get-warn]", err);
-          }
+        const needsImmediateSync = mockStore.results.length === 0 || (monjeGame && monjeCount < 6);
+
+        if (needsImmediateSync) {
+          await triggerBackgroundSync(true);
+        } else {
+          // Asynchronous continuous sync in background
+          triggerBackgroundSync(false).catch(() => {});
         }
 
         let latestAlert = null;
@@ -139,6 +271,8 @@ export const Route = createFileRoute("/api/public/results/sync")({
           latestAlert,
           animalImages: mockStore.animal_images,
           games: mockStore.games,
+          requireLicense: serverLicenseState.requireLicense,
+          clientLicenses: serverLicenseState.licenses,
         });
       },
       POST: async ({ request }) => {
@@ -166,8 +300,128 @@ export const Route = createFileRoute("/api/public/results/sync")({
       },
       PUT: async ({ request }) => {
         try {
+          loadServerLicenses();
           const body = await request.json();
-          const { result, alert, animalImage, gameUpdate } = body;
+          const { result, alert, animalImage, gameUpdate, licenseAction } = body;
+          let licenseActivation: {
+            valid: boolean;
+            reason?: string;
+            license?: ClientLicense;
+          } | null = null;
+
+          if (licenseAction && typeof licenseAction === "object") {
+            const act = licenseAction as {
+              type: string;
+              requireLicense?: boolean;
+              id?: string;
+              client_name?: string;
+              pin_code?: string;
+              days?: number | null;
+              max_devices?: number;
+              notes?: string;
+              device_id?: string;
+            };
+
+            if (act.type === "toggle_enforcement") {
+              serverLicenseState.requireLicense = Boolean(act.requireLicense);
+              saveServerLicenses();
+            } else if (act.type === "create") {
+              const cleanPin =
+                (act.pin_code || "").replace(/[^0-9]/g, "").slice(0, 6) ||
+                String(Math.floor(100000 + Math.random() * 900000));
+              const expiresAt =
+                typeof act.days === "number" && act.days > 0
+                  ? new Date(Date.now() + act.days * 86400000).toISOString()
+                  : null;
+              const newLic: ClientLicense = {
+                id: `lic-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                client_name: (act.client_name || "Cliente").trim(),
+                pin_code: cleanPin,
+                status: "active",
+                expires_at: expiresAt,
+                max_devices: Math.max(1, Number(act.max_devices) || 1),
+                bound_device_ids: [],
+                notes: act.notes?.trim() || "",
+                created_at: new Date().toISOString(),
+              };
+              serverLicenseState.licenses.unshift(newLic);
+              saveServerLicenses();
+            } else if (act.type === "renew" && act.id) {
+              const target = serverLicenseState.licenses.find((l) => l.id === act.id);
+              if (target) {
+                if (act.days === null) {
+                  target.expires_at = null;
+                } else {
+                  const daysToAdd = Number(act.days) || 30;
+                  const baseDate =
+                    target.expires_at && new Date(target.expires_at) > new Date()
+                      ? new Date(target.expires_at)
+                      : new Date();
+                  target.expires_at = new Date(
+                    baseDate.getTime() + daysToAdd * 86400000,
+                  ).toISOString();
+                }
+                target.status = "active";
+                saveServerLicenses();
+              }
+            } else if (act.type === "toggle_status" && act.id) {
+              const target = serverLicenseState.licenses.find((l) => l.id === act.id);
+              if (target) {
+                target.status = target.status === "active" ? "paused" : "active";
+                saveServerLicenses();
+              }
+            } else if (act.type === "reset_devices" && act.id) {
+              const target = serverLicenseState.licenses.find((l) => l.id === act.id);
+              if (target) {
+                target.bound_device_ids = [];
+                saveServerLicenses();
+              }
+            } else if (act.type === "delete" && act.id) {
+              serverLicenseState.licenses = serverLicenseState.licenses.filter(
+                (l) => l.id !== act.id,
+              );
+              saveServerLicenses();
+            } else if (act.type === "activate_pin") {
+              const cleanPin = (act.pin_code || "").replace(/[^0-9]/g, "");
+              const devId = (act.device_id || "TV-DEFAULT").trim();
+              const match = serverLicenseState.licenses.find((l) => l.pin_code === cleanPin);
+
+              if (!match) {
+                licenseActivation = {
+                  valid: false,
+                  reason: "Código PIN inválido. Verifique los 6 dígitos con su proveedor.",
+                };
+              } else if (match.status === "paused") {
+                licenseActivation = {
+                  valid: false,
+                  reason: "Esta licencia se encuentra suspendida temporalmente.",
+                };
+              } else if (match.expires_at && new Date(match.expires_at) < new Date()) {
+                licenseActivation = {
+                  valid: false,
+                  reason: "Su suscripción ha vencido. Contacte al administrador para renovar.",
+                };
+              } else {
+                const alreadyBound = match.bound_device_ids.includes(devId);
+                if (!alreadyBound && match.bound_device_ids.length >= (match.max_devices || 1)) {
+                  licenseActivation = {
+                    valid: false,
+                    reason: `Este PIN ya está en uso en el máximo de pantallas permitidas (${match.max_devices}). Solicite liberar la pantalla anterior.`,
+                  };
+                } else {
+                  if (!alreadyBound) {
+                    match.bound_device_ids.push(devId);
+                    saveServerLicenses();
+                  }
+                  licenseActivation = {
+                    valid: true,
+                    license: match,
+                  };
+                }
+              }
+            }
+          }
+
           if (result) {
             const conflictIndex = mockStore.results.findIndex(
               (r) =>
@@ -244,6 +498,9 @@ export const Route = createFileRoute("/api/public/results/sync")({
             results: mockStore.results,
             animalImages: mockStore.animal_images,
             games: mockStore.games,
+            requireLicense: serverLicenseState.requireLicense,
+            clientLicenses: serverLicenseState.licenses,
+            licenseActivation,
           });
         } catch (err) {
           return Response.json(

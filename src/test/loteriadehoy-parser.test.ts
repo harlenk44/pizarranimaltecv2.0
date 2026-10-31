@@ -136,12 +136,22 @@ describe("loteriadehoy parser", () => {
 
   it("correctly matches game classes with matchGameClass", () => {
     expect(matchGameClass("lottoactivo", "lottoactivo")).toBe(true);
+    expect(matchGameClass("lottoactivo1", "lottoactivo")).toBe(true);
     expect(matchGameClass("lottoactivo2(monjemillonario)", "lottoactivo2(monjemillonario)")).toBe(
       true,
     );
     expect(matchGameClass("monjemillonario", "lottoactivo2(monjemillonario)")).toBe(true);
     expect(matchGameClass("guacharoactivo", "guacharoactivo")).toBe(true);
     expect(matchGameClass("elguacharitomillonario", "elguacharitomillonario")).toBe(true);
+    expect(matchGameClass("lottoactivordint", "lottoactivordint")).toBe(true);
+
+    // Cross-contamination prevention tests
+    expect(matchGameClass("lottoactivo2(monjemillonario)", "lottoactivo")).toBe(false);
+    expect(matchGameClass("lottoactivo", "lottoactivo2(monjemillonario)")).toBe(false);
+    expect(matchGameClass("lottoactivordint", "lottoactivo")).toBe(false);
+    expect(matchGameClass("lottoactivo", "lottoactivordint")).toBe(false);
+    expect(matchGameClass("elguacharitomillonario", "guacharoactivo")).toBe(false);
+    expect(matchGameClass("guacharoactivo", "elguacharitomillonario")).toBe(false);
   });
 
   it("throws LoteriaDeHoyParseError on empty or invalid HTML", () => {

@@ -1,9 +1,10 @@
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { Volume2, VolumeX, X, Clock, Trophy, ChevronRight, RotateCcw, Sliders } from "lucide-react";
 import { speakLotteryResult, stopAllAudio } from "@/lib/lottery-audio";
 import { getEmojiForNumber } from "@/lib/animals";
 import VoiceSettingsModal from "@/components/VoiceSettingsModal";
 import AnimalMedia from "@/components/AnimalMedia";
+import { getSorteoAlertKey, sorteoAlertTracker } from "@/lib/sorteo-alert-tracker";
 
 export interface ResultAlertItem {
   id: string;
@@ -71,92 +72,186 @@ export default function ResultAlertModal({
   onClose,
   voiceEnabled = true,
   onToggleVoice,
-  autoCloseSeconds = 8,
+  autoCloseSeconds = 20,
 }: ResultAlertModalProps) {
+  // Deduplicate alerts by canonical sorteo key to ensure each draw is presented only once
+  const uniqueAlerts = useMemo(() => {
+    const seen = new Set<string>();
+    const list: ResultAlertItem[] = [];
+    for (const a of alerts) {
+      const key = getSorteoAlertKey(a);
+      if (!seen.has(key)) {
+        seen.add(key);
+        list.push(a);
+      }
+    }
+    return list;
+  }, [alerts]);
+
+  const effectiveDuration = Math.max(1, autoCloseSeconds || 20);
+
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [timeLeft, setTimeLeft] = useState(autoCloseSeconds);
-  const [isPaused, setIsPaused] = useState(false);
+  const [timeLeft, setTimeLeft] = useState(effectiveDuration);
   const [isSpeaking, setIsSpeaking] = useState(false);
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
-
-  const currentAlert: ResultAlertItem | undefined = alerts[currentIndex];
-  const hasMultiple = alerts.length > 1;
   const [showVoiceSettings, setShowVoiceSettings] = useState(false);
-  const [imageFailed, setImageFailed] = useState(false);
 
-  // Reset image error state whenever the displayed alert changes
+  // Stable refs to prevent timer re-triggers on parent 5s polling re-renders
+  const uniqueAlertsRef = useRef(uniqueAlerts);
+  uniqueAlertsRef.current = uniqueAlerts;
+
+  const currentIndexRef = useRef(currentIndex);
+  currentIndexRef.current = currentIndex;
+
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  const voiceEnabledRef = useRef(voiceEnabled);
+  voiceEnabledRef.current = voiceEnabled;
+
+  const isSpeakingRef = useRef(false);
+  const timerExpiredRef = useRef(false);
+  const postSpeechTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const currentAlert: ResultAlertItem | undefined = uniqueAlerts[currentIndex];
+  const currentAlertRef = useRef(currentAlert);
+  currentAlertRef.current = currentAlert;
+
+  // Canonical string key for the active alert so object reference changes never restart the effect
+  const currentAlertKey = currentAlert ? getSorteoAlertKey(currentAlert) : null;
+  const hasMultiple = uniqueAlerts.length > 1;
+
+  // Mark currently shown alert as already alerted in the global tracker
   useEffect(() => {
-    setImageFailed(false);
-  }, [currentAlert?.id, currentAlert?.animalImageUrl]);
-
-  // Function to synthesize speech in Spanish using natural voice
-  const speakCurrent = useCallback(
-    (alert: ResultAlertItem) => {
-      if (!voiceEnabled) return;
-
-      speakLotteryResult({
-        gameName: alert.gameName,
-        drawTime: alert.drawTime,
-        animalNumber: alert.animalNumber,
-        animalName: alert.animalName,
-        animalLabel: alert.animalLabel,
-        onStart: () => setIsSpeaking(true),
-        onEnd: () => setIsSpeaking(false),
-      });
-    },
-    [voiceEnabled],
-  );
-
-  // When currentAlert changes, reset timer and speak
-  useEffect(() => {
-    if (!currentAlert) return;
-
-    setTimeLeft(autoCloseSeconds);
-    speakCurrent(currentAlert);
-
-    return () => {
-      stopAllAudio();
-    };
-  }, [currentAlert, autoCloseSeconds, speakCurrent]);
+    const active = currentAlertRef.current;
+    if (active) {
+      sorteoAlertTracker.markAsAlerted(active);
+    }
+  }, [currentAlertKey]);
 
   const handleClose = useCallback(() => {
+    if (postSpeechTimeoutRef.current) clearTimeout(postSpeechTimeoutRef.current);
     stopAllAudio();
-    if (timerRef.current) clearInterval(timerRef.current);
-    onClose();
-  }, [onClose]);
+    isSpeakingRef.current = false;
+    for (const item of uniqueAlertsRef.current) {
+      sorteoAlertTracker.markAsAlerted(item);
+    }
+    onCloseRef.current();
+  }, []);
 
-  // Countdown timer to return automatically to normal board
-  useEffect(() => {
-    if (isPaused || !currentAlert) return;
-
-    timerRef.current = setInterval(() => {
-      setTimeLeft((prev) => {
-        if (prev <= 1) {
-          // If there are more items in queue, advance; otherwise close and return to normal
-          if (currentIndex < alerts.length - 1) {
-            setCurrentIndex((i) => i + 1);
-            return autoCloseSeconds;
-          } else {
-            handleClose();
-            return 0;
-          }
-        }
-        return prev - 1;
-      });
-    }, 1000);
-
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
-  }, [currentIndex, alerts.length, isPaused, currentAlert, autoCloseSeconds, handleClose]);
-
-  const handleNext = () => {
-    if (currentIndex < alerts.length - 1) {
+  const proceedToNextOrClose = useCallback(() => {
+    if (postSpeechTimeoutRef.current) clearTimeout(postSpeechTimeoutRef.current);
+    const latestUnique = uniqueAlertsRef.current;
+    if (currentIndexRef.current < latestUnique.length - 1) {
       setCurrentIndex((i) => i + 1);
     } else {
       handleClose();
     }
-  };
+  }, [handleClose]);
+
+  const proceedRef = useRef(proceedToNextOrClose);
+  proceedRef.current = proceedToNextOrClose;
+
+  // Function to synthesize speech in Spanish using natural voice
+  const speakCurrent = useCallback((alert: ResultAlertItem) => {
+    if (!voiceEnabledRef.current) {
+      isSpeakingRef.current = false;
+      setIsSpeaking(false);
+      return;
+    }
+
+    isSpeakingRef.current = true;
+    setIsSpeaking(true);
+
+    speakLotteryResult({
+      gameName: alert.gameName,
+      drawTime: alert.drawTime,
+      animalNumber: alert.animalNumber,
+      animalName: alert.animalName,
+      animalLabel: alert.animalLabel,
+      onStart: () => {
+        isSpeakingRef.current = true;
+        setIsSpeaking(true);
+      },
+      onEnd: () => {
+        isSpeakingRef.current = false;
+        setIsSpeaking(false);
+        // Only close after speech if the full configured timer duration has also expired
+        if (timerExpiredRef.current) {
+          if (postSpeechTimeoutRef.current) clearTimeout(postSpeechTimeoutRef.current);
+          postSpeechTimeoutRef.current = setTimeout(() => {
+            proceedRef.current();
+          }, 1500);
+        }
+      },
+    });
+  }, []);
+
+  const speakCurrentRef = useRef(speakCurrent);
+  speakCurrentRef.current = speakCurrent;
+
+  const handleNext = useCallback(() => {
+    proceedToNextOrClose();
+  }, [proceedToNextOrClose]);
+
+  // TV remote and keyboard dismissal (Escape, Space, Enter, Backspace)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" || e.key === "Enter" || e.key === " " || e.key === "Backspace") {
+        e.preventDefault();
+        handleClose();
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        handleNext();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [handleClose, handleNext]);
+
+  // Authoritative auto-close timer keyed strictly on canonical currentAlertKey & effectiveDuration
+  useEffect(() => {
+    const alertToAnnounce = currentAlertRef.current;
+    if (!currentAlertKey || !alertToAnnounce) {
+      onCloseRef.current();
+      return;
+    }
+
+    timerExpiredRef.current = false;
+    if (postSpeechTimeoutRef.current) clearTimeout(postSpeechTimeoutRef.current);
+
+    const durationSec = effectiveDuration;
+    const durationMs = durationSec * 1000;
+    const endTime = Date.now() + durationMs;
+
+    setTimeLeft(durationSec);
+    speakCurrentRef.current(alertToAnnounce);
+
+    // Visual countdown ticker updates every 250ms based on actual clock
+    const tickInterval = setInterval(() => {
+      const remaining = Math.max(0, Math.ceil((endTime - Date.now()) / 1000));
+      setTimeLeft(remaining);
+    }, 250);
+
+    // Explicit setTimeout: once full duration completes, only close if voice has also finished
+    const closeTimeout = setTimeout(() => {
+      clearInterval(tickInterval);
+      setTimeLeft(0);
+      timerExpiredRef.current = true;
+
+      // If voice is still speaking, do NOT close or cut off audio!
+      // Let speech complete; onEnd callback will trigger close after speech ends
+      if (!voiceEnabledRef.current || !isSpeakingRef.current) {
+        proceedRef.current();
+      }
+    }, durationMs);
+
+    return () => {
+      clearTimeout(closeTimeout);
+      clearInterval(tickInterval);
+      if (postSpeechTimeoutRef.current) clearTimeout(postSpeechTimeoutRef.current);
+      stopAllAudio();
+    };
+  }, [currentAlertKey, currentIndex, effectiveDuration]);
 
   const handleReplayVoice = () => {
     if (currentAlert) {
@@ -169,19 +264,23 @@ export default function ResultAlertModal({
   const displayLabel =
     currentAlert.animalLabel ?? String(currentAlert.animalNumber).padStart(2, "0");
   const brandColor = currentAlert.gameColor || "#3b82f6";
-  const progressPercent = Math.max(0, Math.min(100, (timeLeft / autoCloseSeconds) * 100));
+  const progressPercent = Math.max(0, Math.min(100, (timeLeft / effectiveDuration) * 100));
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-slate-950/85 backdrop-blur-md transition-opacity duration-300 animate-in fade-in"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-slate-950/85 backdrop-blur-md transition-opacity duration-300 animate-in fade-in cursor-pointer select-none"
       role="dialog"
       aria-modal="true"
       aria-label={`Nuevo resultado de ${currentAlert.gameName}`}
-      onMouseEnter={() => setIsPaused(true)}
-      onMouseLeave={() => setIsPaused(false)}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) {
+          handleClose();
+        }
+      }}
     >
       <div
-        className="relative w-full max-w-xl rounded-2xl overflow-hidden bg-slate-900 border-2 shadow-2xl transition-all transform animate-in zoom-in-95 duration-200"
+        className="relative w-full max-w-xl rounded-2xl overflow-hidden bg-slate-900 border-2 shadow-2xl transition-all transform animate-in zoom-in-95 duration-200 cursor-default"
+        onClick={(e) => e.stopPropagation()}
         style={{
           borderColor: brandColor,
           boxShadow: `0 0 50px -10px ${brandColor}50, 0 25px 50px -12px rgba(0, 0, 0, 0.7)`,
@@ -225,7 +324,7 @@ export default function ResultAlertModal({
                 </span>
                 {hasMultiple && (
                   <span className="text-xs text-slate-400 font-mono">
-                    ({currentIndex + 1} de {alerts.length})
+                    ({currentIndex + 1} de {uniqueAlerts.length})
                   </span>
                 )}
               </div>
@@ -341,12 +440,22 @@ export default function ResultAlertModal({
 
         {/* Modal Footer with Actions */}
         <div className="px-6 py-4 bg-slate-950/70 border-t border-slate-800 flex items-center justify-between gap-3">
-          <div className="text-xs text-slate-500 hidden sm:block">
-            {isPaused ? "Pausa (pasa el cursor para ver detalles)" : "Cierre automático activo"}
+          <div className="text-xs text-slate-400 hidden sm:flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            <span>
+              {isSpeaking ? (
+                <span className="text-blue-400 font-medium">Dictando resultado en voz alta...</span>
+              ) : (
+                <>
+                  Volviendo a la pizarra en{" "}
+                  <strong className="text-white font-mono">{timeLeft}s</strong>
+                </>
+              )}
+            </span>
           </div>
 
           <div className="flex items-center gap-3 w-full sm:w-auto justify-end">
-            {hasMultiple && currentIndex < alerts.length - 1 && (
+            {hasMultiple && currentIndex < uniqueAlerts.length - 1 && (
               <button
                 type="button"
                 onClick={handleNext}

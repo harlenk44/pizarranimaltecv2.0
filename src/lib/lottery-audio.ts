@@ -26,6 +26,7 @@ export const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
 };
 
 let currentAudio: HTMLAudioElement | null = null;
+let activeSpeechToken = 0;
 
 export function loadVoiceSettings(): VoiceSettings {
   if (typeof window === "undefined") return DEFAULT_VOICE_SETTINGS;
@@ -214,12 +215,26 @@ export function playNaturalSpanishAudio(
   text: string,
   onStart?: () => void,
   onEnd?: () => void,
+  token?: number,
 ): Promise<void> {
   return new Promise((resolve) => {
-    stopAllAudio();
+    const myToken = token ?? ++activeSpeechToken;
+    if (currentAudio) {
+      try {
+        currentAudio.onplay = null;
+        currentAudio.onended = null;
+        currentAudio.onerror = null;
+        if (typeof currentAudio.pause === "function") {
+          currentAudio.pause();
+        }
+      } catch {
+        // ignore
+      }
+      currentAudio = null;
+    }
 
     if (typeof window === "undefined") {
-      onEnd?.();
+      if (myToken === activeSpeechToken) onEnd?.();
       resolve();
       return;
     }
@@ -229,15 +244,17 @@ export function playNaturalSpanishAudio(
     const audio = new Audio(audioUrl);
     currentAudio = audio;
 
-    audio.onplay = () => onStart?.();
+    audio.onplay = () => {
+      if (myToken === activeSpeechToken) onStart?.();
+    };
     audio.onended = () => {
-      currentAudio = null;
-      onEnd?.();
+      if (currentAudio === audio) currentAudio = null;
+      if (myToken === activeSpeechToken) onEnd?.();
       resolve();
     };
     audio.onerror = () => {
-      currentAudio = null;
-      onEnd?.();
+      if (currentAudio === audio) currentAudio = null;
+      if (myToken === activeSpeechToken) onEnd?.();
       resolve();
     };
 
@@ -246,22 +263,26 @@ export function playNaturalSpanishAudio(
       if (playPromise !== undefined && typeof playPromise?.catch === "function") {
         playPromise.catch((err) => {
           console.warn("[playNaturalSpanishAudio] Autoplay blocked:", err);
-          currentAudio = null;
-          onEnd?.();
+          if (currentAudio === audio) currentAudio = null;
+          if (myToken === activeSpeechToken) onEnd?.();
           resolve();
         });
       }
     } catch {
-      currentAudio = null;
-      onEnd?.();
+      if (currentAudio === audio) currentAudio = null;
+      if (myToken === activeSpeechToken) onEnd?.();
       resolve();
     }
   });
 }
 
 export function stopAllAudio(): void {
+  activeSpeechToken++;
   if (currentAudio) {
     try {
+      currentAudio.onplay = null;
+      currentAudio.onended = null;
+      currentAudio.onerror = null;
       if (typeof currentAudio.pause === "function") {
         currentAudio.pause();
       }
@@ -306,12 +327,14 @@ export async function speakLotteryResult({
   settings,
 }: SpeakOptions): Promise<void> {
   stopAllAudio();
+  const myToken = activeSpeechToken;
 
   const currentSettings = settings ?? loadVoiceSettings();
 
   // Play pleasant lottery broadcast chime first if enabled
   if (currentSettings.playChime) {
     await playLotteryChime();
+    if (myToken !== activeSpeechToken) return;
   }
 
   const timePhrase = formatTimeForSpeech(drawTime);
@@ -325,7 +348,7 @@ export async function speakLotteryResult({
   const shouldUseOnlineHd = currentSettings.engine === "online_hd" || availableSpanish.length === 0;
 
   if (shouldUseOnlineHd) {
-    await playNaturalSpanishAudio(speechText, onStart, onEnd);
+    await playNaturalSpanishAudio(speechText, onStart, onEnd, myToken);
     return;
   }
 
@@ -335,7 +358,7 @@ export async function speakLotteryResult({
     !("speechSynthesis" in window) ||
     typeof SpeechSynthesisUtterance === "undefined"
   ) {
-    onEnd?.();
+    if (myToken === activeSpeechToken) onEnd?.();
     return;
   }
 
@@ -358,13 +381,19 @@ export async function speakLotteryResult({
       utterance.lang = selectedVoice.lang;
     }
 
-    utterance.onstart = () => onStart?.();
-    utterance.onend = () => onEnd?.();
-    utterance.onerror = () => onEnd?.();
+    utterance.onstart = () => {
+      if (myToken === activeSpeechToken) onStart?.();
+    };
+    utterance.onend = () => {
+      if (myToken === activeSpeechToken) onEnd?.();
+    };
+    utterance.onerror = () => {
+      if (myToken === activeSpeechToken) onEnd?.();
+    };
 
     window.speechSynthesis.speak(utterance);
   } catch (err) {
     console.warn("[speechSynthesis] Failed, falling back to natural Spanish audio:", err);
-    await playNaturalSpanishAudio(speechText, onStart, onEnd);
+    await playNaturalSpanishAudio(speechText, onStart, onEnd, myToken);
   }
 }

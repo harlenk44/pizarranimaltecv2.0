@@ -10,6 +10,7 @@ import {
   LOTERIADEHOY_GAME_MAPPINGS,
   type LoteriaDeHoyPage,
 } from "@/lib/loteriadehoy-parser";
+import { getGameScheduleTimes, normalizeScheduleTime } from "@/lib/game-schedules";
 
 export const LOTERIADEHOY_PRIMARY_URL = "https://loteriadehoy.com/animalitos/resultados/";
 export const TUAZAR_PRIMARY_URL = "https://tuazar.com/loteria/animalitos/resultados/";
@@ -121,6 +122,8 @@ export function createTuazarProvider(tuazarGameName: string, gameSlug?: string):
         .eq("game_id", game.id);
       if (error) throw error;
       const catalogEntries = entries ?? [];
+      const scheduledTimes = getGameScheduleTimes(targetSlug ?? game.slug);
+      const validScheduleSet = new Set(scheduledTimes.map((t) => normalizeScheduleTime(t) ?? t));
 
       // 2. Primary Source: LoteriaDeHoy (faster updates, structured HTML)
       if (ldhMeta) {
@@ -139,6 +142,9 @@ export function createTuazarProvider(tuazarGameName: string, gameSlug?: string):
             for (const item of ldhDraws) {
               const drawTime = item.drawTime;
               if (!drawTime) continue;
+
+              const normTime = normalizeScheduleTime(drawTime) ?? drawTime;
+              if (!validScheduleSet.has(normTime)) continue;
 
               const normAnimal = normalizeName(item.animal);
               const numVal = Number(item.number);
@@ -228,6 +234,9 @@ export function createTuazarProvider(tuazarGameName: string, gameSlug?: string):
           if (normalizeName(result.game) !== wantedTuazar) continue;
           const drawTime = hourTo24h(result.hour);
           if (!drawTime) continue;
+
+          const normTime = normalizeScheduleTime(drawTime) ?? drawTime;
+          if (!validScheduleSet.has(normTime)) continue;
 
           const normalizedResultAnimal = normalizeName(result.animal);
           const numVal = Number(result.number);

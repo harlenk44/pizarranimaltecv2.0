@@ -8,6 +8,9 @@ import {
   Image as ImageIcon,
   Box,
   PawPrint,
+  RotateCw,
+  Bell,
+  Timer,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { DisplayProvider, useDisplay } from "@/context/DisplayContext";
@@ -214,7 +217,7 @@ function DisplayShell({ children }: { children: ReactNode }) {
               />
             </div>
 
-            {/* 4. Escala General de Tarjetas */}
+            {/* 5. Escala General de Tarjetas */}
             <div className="space-y-1.5 pt-2 border-t border-slate-800">
               <label
                 className="flex items-center justify-between text-xs font-medium text-slate-400"
@@ -233,6 +236,99 @@ function DisplayShell({ children }: { children: ReactNode }) {
                 onChange={(e) => update({ resultScale: Number(e.target.value) })}
                 className="block w-full accent-slate-500 cursor-pointer h-1.5 bg-slate-950 rounded-lg border border-slate-800"
               />
+            </div>
+
+            {/* 6. Duración de la ventana de resultado */}
+            <div className="space-y-1.5 pt-2 border-t border-slate-800">
+              <label
+                className="flex items-center justify-between text-xs font-semibold text-slate-200"
+                htmlFor="alert-duration"
+              >
+                <span className="flex items-center gap-1.5">
+                  <Timer className="w-3.5 h-3.5 text-yellow-400" /> Tiempo de Anuncio en Pantalla
+                </span>
+                <output className="font-mono text-yellow-400 font-bold tabular-nums">
+                  {preferences.alertDurationSeconds ?? 20}s
+                </output>
+              </label>
+              <input
+                id="alert-duration"
+                type="range"
+                min="4"
+                max="30"
+                step="1"
+                value={preferences.alertDurationSeconds ?? 20}
+                onChange={(e) => update({ alertDurationSeconds: Number(e.target.value) })}
+                className="block w-full accent-yellow-500 cursor-pointer h-2 bg-slate-950 rounded-lg border border-slate-800"
+              />
+              <div className="flex items-center gap-1.5 pt-1">
+                {[8, 12, 16, 20, 30].map((sec) => (
+                  <button
+                    key={sec}
+                    type="button"
+                    onClick={() => update({ alertDurationSeconds: sec })}
+                    className={`flex-1 py-1 rounded text-[11px] font-mono font-semibold tabular-nums transition border ${
+                      (preferences.alertDurationSeconds ?? 20) === sec
+                        ? "bg-yellow-500/20 text-yellow-300 border-yellow-500/50 shadow-sm"
+                        : "bg-slate-950 text-slate-400 border-slate-800 hover:bg-slate-800 hover:text-slate-200"
+                    }`}
+                  >
+                    {sec}s
+                  </button>
+                ))}
+              </div>
+              <p className="text-[10px] text-slate-400">
+                Tiempo que se muestra el cuadro con el animal ganador antes de volver
+                automáticamente a la pizarra total (por defecto 20 segundos).
+              </p>
+            </div>
+
+            {/* 7. Activar/Desactivar ventana emergente */}
+            <div className="pt-2 border-t border-slate-800 space-y-1">
+              <label
+                className="flex items-center justify-between text-xs font-semibold text-slate-200 cursor-pointer select-none"
+                htmlFor="show-alert-modal"
+              >
+                <span className="flex items-center gap-1.5">
+                  <Bell className="w-3.5 h-3.5 text-emerald-400" /> Ventana emergente al salir
+                  resultado
+                </span>
+                <input
+                  id="show-alert-modal"
+                  type="checkbox"
+                  checked={preferences.showAlertModal ?? true}
+                  onChange={(e) => update({ showAlertModal: e.target.checked })}
+                  className="w-4 h-4 accent-emerald-500 rounded cursor-pointer"
+                />
+              </label>
+              <p className="text-[10px] text-slate-400">
+                Si la desactivas, la pizarra se actualizará en vivo directamente sin mostrar la
+                ventana grande por encima.
+              </p>
+            </div>
+
+            {/* 8. Opción de recarga completa al llegar resultado */}
+            <div className="pt-2 border-t border-slate-800 space-y-1">
+              <label
+                className="flex items-center justify-between text-xs font-semibold text-slate-200 cursor-pointer select-none"
+                htmlFor="reload-on-new-result"
+              >
+                <span className="flex items-center gap-1.5">
+                  <RotateCw className="w-3.5 h-3.5 text-cyan-400" /> Recargar página al salir
+                  resultado
+                </span>
+                <input
+                  id="reload-on-new-result"
+                  type="checkbox"
+                  checked={preferences.reloadOnNewResult ?? false}
+                  onChange={(e) => update({ reloadOnNewResult: e.target.checked })}
+                  className="w-4 h-4 accent-cyan-500 rounded cursor-pointer"
+                />
+              </label>
+              <p className="text-[10px] text-slate-400">
+                La pizarra siempre se actualiza de inmediato en vivo. Si activas esta casilla,
+                además recargará toda la página al detectar cada sorteo nuevo.
+              </p>
             </div>
 
             {storageError && (

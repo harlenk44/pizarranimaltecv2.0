@@ -12,15 +12,18 @@ import {
   VolumeX,
   Sliders,
   Target,
+  KeyRound,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { useBoardSettings } from "@/context/BoardSettingsContext";
 import WeeklyBoard from "@/components/WeeklyBoard";
-import AdBanner from "@/components/AdBanner";
+import AdBanner, { AdTickerBar } from "@/components/AdBanner";
 import ResultAlertModal, { type ResultAlertItem } from "@/components/ResultAlertModal";
 import VoiceSettingsModal from "@/components/VoiceSettingsModal";
 import AnimalMedia from "@/components/AnimalMedia";
 import { lotteryDate, LOTTERY_TIMEZONE } from "@/lib/lottery-date";
+import { useDisplay } from "@/context/DisplayContext";
+import { sorteoAlertTracker, getSorteoAlertKey } from "@/lib/sorteo-alert-tracker";
 
 interface BoardPageProps {
   onAdminClick: () => void;
@@ -132,6 +135,64 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     return null;
   });
 
+  const { preferences } = useDisplay();
+  const reloadOnNewResultRef = useRef(preferences?.reloadOnNewResult ?? false);
+  const pendingReloadRef = useRef(false);
+  const alertQueueRef = useRef(alertQueue);
+  alertQueueRef.current = alertQueue;
+
+  useEffect(() => {
+    reloadOnNewResultRef.current = preferences?.reloadOnNewResult ?? false;
+  }, [preferences?.reloadOnNewResult]);
+
+  const handleAlertModalClose = useCallback(() => {
+    alertQueueRef.current = [];
+    setAlertQueue([]);
+    // If a reload was scheduled during the modal presentation, execute it now that the modal completed
+    if (pendingReloadRef.current && typeof window !== "undefined") {
+      pendingReloadRef.current = false;
+      setTimeout(() => {
+        window.location.reload();
+      }, 500);
+    }
+  }, []);
+
+  const scheduleHardReload = useCallback(
+    (resultId: string) => {
+      if (!reloadOnNewResultRef.current || typeof window === "undefined") return;
+      const key = "pizarra_last_reloaded_result_id";
+      const prev = sessionStorage.getItem(key);
+      if (prev !== resultId) {
+        sessionStorage.setItem(key, resultId);
+        // If modal is actively displaying, defer reload so modal completes full duration
+        if (alertQueueRef.current.length > 0 && (preferences?.showAlertModal ?? true)) {
+          pendingReloadRef.current = true;
+        } else {
+          setTimeout(() => {
+            window.location.reload();
+          }, 1500);
+        }
+      }
+    },
+    [preferences?.showAlertModal],
+  );
+
+  const enqueueUniqueAlert = useCallback((item: ResultAlertItem): boolean => {
+    if (sorteoAlertTracker.hasBeenAlerted(item)) {
+      return false;
+    }
+    const key = getSorteoAlertKey(item);
+    sorteoAlertTracker.markAsAlerted(key);
+    if (!alertQueueRef.current.some((a) => getSorteoAlertKey(a) === key)) {
+      alertQueueRef.current = [...alertQueueRef.current, item];
+    }
+    setAlertQueue((prev) => {
+      if (prev.some((a) => getSorteoAlertKey(a) === key)) return prev;
+      return [...prev, item];
+    });
+    return true;
+  }, []);
+
   const handleVoiceToggle = (enabled: boolean) => {
     setVoiceEnabled(enabled);
     if (typeof window !== "undefined") {
@@ -143,21 +204,40 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     if (settings.start_view === "weekly") setShowWeekly(true);
   }, [settings.start_view]);
 
+  // Pause rotation while alert modal is showing so it doesn't unmount prematurely
   useEffect(() => {
-    if (!settings.rotation_enabled) return;
+    if (!settings.rotation_enabled || alertQueue.length > 0) return;
     const timer = setInterval(
       () => setShowWeekly((current) => !current),
       settings.rotation_interval_seconds * 1000,
     );
     return () => clearInterval(timer);
-  }, [settings.rotation_enabled, settings.rotation_interval_seconds]);
+  }, [settings.rotation_enabled, settings.rotation_interval_seconds, alertQueue.length]);
 
   const fetchAll = useCallback(async () => {
     // 1. Sync from server backend to get latest results, alerts, and custom animal videos/images
+    let serverSyncedResults: Result[] = [];
     try {
       const syncRes = await fetch("/api/public/results/sync");
       if (syncRes.ok) {
         const syncData = await syncRes.json();
+
+        // Sync all latest results from server into client mockStore & storage
+        if (Array.isArray(syncData?.results) && syncData.results.length > 0) {
+          serverSyncedResults = syncData.results;
+          const { mockStore, saveResultsToStorage } = await import("@/lib/mock-db");
+          mockStore.results = syncData.results;
+          if (typeof saveResultsToStorage === "function") {
+            saveResultsToStorage();
+          } else {
+            try {
+              localStorage.setItem("pizarra_mock_results", JSON.stringify(syncData.results));
+            } catch {
+              // ignore
+            }
+          }
+        }
+
         // Sync animal images into mockStore & localStorage so all TVs have them
         if (Array.isArray(syncData?.animalImages) && syncData.animalImages.length > 0) {
           const { mockStore } = await import("@/lib/mock-db");
@@ -172,32 +252,12 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           }
         }
 
-        // If server broadcasted a latestAlert, announce it if not already announced
+        // If server broadcasted a latestAlert, announce it only if this draw hasn't been alerted yet
         if (syncData?.latestAlert && syncData.latestAlert.id) {
           const alert = syncData.latestAlert as ResultAlertItem;
-          const lastId =
-            lastAlertAnnouncedIdRef.current ||
-            (typeof window !== "undefined"
-              ? localStorage.getItem("pizarra_last_announced_alert_id")
-              : null);
-
-          if (alert.id !== lastId) {
-            const parts = alert.id.split("-");
-            const ts = parseInt(parts[parts.length - 1] ?? "0", 10);
-            const isRecent = !ts || Date.now() - ts < 5 * 60 * 1000;
-
-            if (isRecent) {
-              lastAlertAnnouncedIdRef.current = alert.id;
-              try {
-                localStorage.setItem("pizarra_last_announced_alert_id", alert.id);
-              } catch {
-                // ignore
-              }
-              setAlertQueue((prev) => {
-                if (prev.some((a) => a.id === alert.id)) return prev;
-                return [...prev, alert];
-              });
-            }
+          const enqueued = enqueueUniqueAlert(alert);
+          if (enqueued) {
+            scheduleHardReload(alert.id);
           }
         }
       }
@@ -219,6 +279,15 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     const [resultsPromises, imagesData, entriesData] = await Promise.all([
       Promise.all(
         (gamesData as Game[]).map(async (g) => {
+          // If serverSyncedResults has fresh results for this game today, prioritize them immediately
+          const matching = serverSyncedResults.filter(
+            (r) => r.game_id === g.id && r.draw_date === today,
+          );
+          if (matching.length > 0) {
+            matching.sort((a, b) => a.draw_time.localeCompare(b.draw_time));
+            return { gameId: g.id, results: matching };
+          }
+
           const { data } = await supabase
             .from("results")
             .select("*")
@@ -265,27 +334,35 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
 
         if (!isInitialLoadRef.current) {
           if (prevSig === undefined || prevSig !== sig) {
-            const displayName = nameMap[`${res.game_id}:${res.animal_number}`] ?? res.animal_name;
-            const displayLabel =
-              labelMap[`${res.game_id}:${res.animal_number}`] ??
-              String(res.animal_number).padStart(2, "0");
-            const imgUrl =
-              imgMap[`${res.game_id}:${res.animal_number}`] ?? imgMap[`any:${res.animal_number}`];
-
-            newAlerts.push({
-              id: `${res.id}-${Date.now()}`,
+            const candidate = {
               gameId: gameObj.id,
-              gameName: gameObj.name,
-              gameColor: gameObj.color,
-              gameLogoUrl: gameObj.logo_url,
               drawDate: res.draw_date,
               drawTime: res.draw_time,
-              animalNumber: res.animal_number,
-              animalName: displayName,
-              animalLabel: displayLabel,
-              animalImageUrl: imgUrl,
-              animalEmoji: getAnimalEmoji(res.animal_number, displayName),
-            });
+            };
+
+            if (!sorteoAlertTracker.hasBeenAlerted(candidate)) {
+              const displayName = nameMap[`${res.game_id}:${res.animal_number}`] ?? res.animal_name;
+              const displayLabel =
+                labelMap[`${res.game_id}:${res.animal_number}`] ??
+                String(res.animal_number).padStart(2, "0");
+              const imgUrl =
+                imgMap[`${res.game_id}:${res.animal_number}`] ?? imgMap[`any:${res.animal_number}`];
+
+              newAlerts.push({
+                id: `draw-${res.id}-${res.draw_date}-${res.draw_time}`,
+                gameId: gameObj.id,
+                gameName: gameObj.name,
+                gameColor: gameObj.color,
+                gameLogoUrl: gameObj.logo_url,
+                drawDate: res.draw_date,
+                drawTime: res.draw_time,
+                animalNumber: res.animal_number,
+                animalName: displayName,
+                animalLabel: displayLabel,
+                animalImageUrl: imgUrl,
+                animalEmoji: getAnimalEmoji(res.animal_number, displayName),
+              });
+            }
           }
         }
         prevSignaturesRef.current.set(res.id, sig);
@@ -294,14 +371,33 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     setResultsMap(map);
 
     if (isInitialLoadRef.current) {
+      // Mark all pre-existing draws loaded on startup as already alerted
+      const existingItems: { gameId: string; drawDate: string; drawTime: string }[] = [];
+      for (const r of resultsPromises) {
+        for (const res of r.results) {
+          existingItems.push({
+            gameId: res.game_id,
+            drawDate: res.draw_date,
+            drawTime: res.draw_time,
+          });
+        }
+      }
+      sorteoAlertTracker.markMultipleAsAlerted(existingItems);
       isInitialLoadRef.current = false;
     } else if (newAlerts.length > 0) {
-      setAlertQueue((prev) => [...prev, ...newAlerts]);
+      let anyEnqueued = false;
+      for (const alert of newAlerts) {
+        if (enqueueUniqueAlert(alert)) {
+          anyEnqueued = true;
+        }
+      }
+      const lastNew = newAlerts[newAlerts.length - 1];
+      if (anyEnqueued && lastNew) scheduleHardReload(lastNew.id);
     }
 
     setLastUpdate(new Date());
     setLoading(false);
-  }, []);
+  }, [enqueueUniqueAlert, scheduleHardReload]);
 
   // Listen for real-time broadcasts and check pending alerts on mount
   useEffect(() => {
@@ -311,16 +407,10 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       bc.onmessage = (event) => {
         if (event.data?.type === "NEW_RESULT_ALERT" && event.data.alert) {
           const incoming = event.data.alert as ResultAlertItem;
-          lastAlertAnnouncedIdRef.current = incoming.id;
-          try {
-            localStorage.setItem("pizarra_last_announced_alert_id", incoming.id);
-          } catch {
-            // ignore
+          const enqueued = enqueueUniqueAlert(incoming);
+          if (enqueued) {
+            scheduleHardReload(incoming.id);
           }
-          setAlertQueue((prev) => {
-            if (prev.some((a) => a.id === incoming.id)) return prev;
-            return [...prev, incoming];
-          });
           fetchAll();
         } else if (event.data?.type === "ANIMAL_MEDIA_UPDATED") {
           fetchAll();
@@ -336,11 +426,9 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         if (raw) {
           const list = JSON.parse(raw);
           if (Array.isArray(list) && list.length > 0) {
-            setAlertQueue((prev) => {
-              const prevIds = new Set(prev.map((a) => a.id));
-              const fresh = list.filter((a) => !prevIds.has(a.id));
-              return fresh.length > 0 ? [...prev, ...fresh] : prev;
-            });
+            for (const item of list as ResultAlertItem[]) {
+              enqueueUniqueAlert(item);
+            }
             localStorage.removeItem("pizarra_pending_result_alerts");
           }
         }
@@ -362,7 +450,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       bc?.close();
       window.removeEventListener("storage", onStorage);
     };
-  }, [fetchAll]);
+  }, [enqueueUniqueAlert, fetchAll, scheduleHardReload]);
 
   const handleManualRefresh = useCallback(async () => {
     try {
@@ -382,7 +470,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
 
   useEffect(() => {
     fetchAll();
-    const interval = setInterval(fetchAll, 10000);
+    const interval = setInterval(fetchAll, 5000);
     return () => clearInterval(interval);
   }, [fetchAll]);
 
@@ -456,12 +544,13 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     return (
       <>
         <WeeklyBoard onClose={() => setShowWeekly(false)} />
-        {alertQueue.length > 0 && (
+        {alertQueue.length > 0 && (preferences.showAlertModal ?? true) && (
           <ResultAlertModal
             alerts={alertQueue}
+            autoCloseSeconds={preferences.alertDurationSeconds ?? 20}
             voiceEnabled={voiceEnabled}
             onToggleVoice={handleVoiceToggle}
-            onClose={() => setAlertQueue([])}
+            onClose={handleAlertModalClose}
           />
         )}
       </>
@@ -554,6 +643,14 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
               <RefreshCw className="w-4 h-4" />
             </button>
             <button
+              onClick={() => window.dispatchEvent(new CustomEvent("pizarra:open-license-screen"))}
+              className="p-2 rounded-lg bg-slate-900 border border-slate-800 hover:bg-slate-800 transition text-amber-400 flex items-center gap-1.5 text-xs font-semibold"
+              title="Cambiar o registrar PIN de Licencia"
+            >
+              <KeyRound className="w-4 h-4" />
+              <span className="hidden sm:inline">Licencia</span>
+            </button>
+            <button
               onClick={onAdminClick}
               className="p-2 rounded-lg bg-slate-900 border border-slate-800 hover:bg-slate-800 transition text-slate-300"
               title="Panel de administración"
@@ -563,6 +660,10 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           </div>
         </div>
       </header>
+
+      {/* Top & Fullwidth Ad Banners */}
+      <AdBanner placement="top" />
+      <AdBanner placement="fullwidth" />
 
       {/* Dynamic Screen-Filling Grid Container */}
       <main
@@ -593,6 +694,10 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         )}
       </main>
 
+      {/* Bottom Ad Banner & Live Promotional Ticker */}
+      <AdBanner placement="bottom" />
+      <AdTickerBar />
+
       {/* Footer */}
       <footer className="px-6 py-1 bg-black border-t border-slate-900/80 text-center flex-shrink-0">
         <p className="text-[10px] text-slate-600 font-mono">
@@ -601,12 +706,13 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       </footer>
 
       {/* Real-time result announcement modal */}
-      {alertQueue.length > 0 && (
+      {alertQueue.length > 0 && (preferences.showAlertModal ?? true) && (
         <ResultAlertModal
           alerts={alertQueue}
+          autoCloseSeconds={preferences.alertDurationSeconds ?? 20}
           voiceEnabled={voiceEnabled}
           onToggleVoice={handleVoiceToggle}
-          onClose={() => setAlertQueue([])}
+          onClose={handleAlertModalClose}
         />
       )}
 
@@ -651,9 +757,15 @@ function GameCard({
   animalLabels: AnimalLabelMap;
   settings: ReturnType<typeof useBoardSettings>["settings"];
 }) {
-  const results = game.latest_results;
-  const scheduleTimes = buildFullSchedule(game, results);
-  const latestResult = results.length > 0 ? results[results.length - 1] : null;
+  const scheduleTimes = buildFullSchedule(game, game.latest_results || []);
+  const validSlots = new Set(scheduleTimes.map((t) => t.substring(0, 5).replace(/^0/, "")));
+  const validResults = (game.latest_results || [])
+    .filter((r) => {
+      const slot = r.draw_time.substring(0, 5).replace(/^0/, "");
+      return validSlots.has(slot);
+    })
+    .sort((a, b) => a.draw_time.localeCompare(b.draw_time));
+  const latestResult = validResults.length > 0 ? validResults[validResults.length - 1] : null;
 
   const latestImgUrl = latestResult
     ? (animalImages[`${game.id}:${latestResult.animal_number}`] ??
@@ -707,7 +819,9 @@ function GameCard({
             {game.name}
           </h2>
           <p className="fluid-game-subtitle font-mono truncate">
-            {results.length >= scheduleTimes.length ? "Sorteos de hoy completos" : "En progreso"}
+            {validResults.length >= scheduleTimes.length
+              ? "Sorteos de hoy completos"
+              : "En progreso"}
           </p>
         </div>
       </div>
@@ -763,7 +877,7 @@ function GameCard({
       {/* Bottom Schedule Matrix Grid */}
       <div className="fluid-schedule-matrix">
         {scheduleTimes.map((timeSlot) => {
-          const res = findResultForTimeSlot(results, timeSlot);
+          const res = findResultForTimeSlot(validResults, timeSlot);
           const displayNum = res
             ? (animalLabels[`${game.id}:${res.animal_number}`] ??
               String(res.animal_number).padStart(2, "0"))

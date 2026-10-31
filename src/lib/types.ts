@@ -140,3 +140,27 @@ export interface TvPairingCode {
   device_id: string;
   created_at: string;
 }
+
+export interface LicenseInfo {
+  id: string;
+  username: string;
+  password_hash: string;
+  serial_number: string;
+  is_active: boolean;
+  device_id: string | null;
+  activated_at: string | null;
+  expires_at: string | null;
+  created_at: string;
+}
+
+export interface ClientLicense {
+  id: string;
+  client_name: string;
+  pin_code: string;
+  status: "active" | "paused";
+  expires_at: string | null;
+  max_devices: number;
+  bound_device_ids: string[];
+  notes?: string;
+  created_at: string;
+}

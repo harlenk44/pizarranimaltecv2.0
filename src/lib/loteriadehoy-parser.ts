@@ -34,31 +34,64 @@ export const LOTERIADEHOY_GAME_MAPPINGS: Readonly<
   },
 };
 
+export function classifyLoteriaDeHoyGame(identifier: string): string | null {
+  if (!identifier) return null;
+  const clean = identifier.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (!clean) return null;
+
+  // Specific compound games first:
+  // 1. Monje Millonario (must be checked before lottoactivo)
+  if (clean.includes("monje") || clean.includes("lottoactivo2")) {
+    return "monje-millonario";
+  }
+  // 2. Lotto Activo RD Internacional (must be checked before lottoactivo)
+  if (
+    clean.includes("rdint") ||
+    clean.includes("internacional") ||
+    clean.includes("lottoactivord")
+  ) {
+    return "lotto-activo-internacional";
+  }
+  // 3. Guacharito Millonario (must be checked before guacharo)
+  if (clean.includes("guacharito")) {
+    return "guacharito";
+  }
+  // 4. Guacharo Activo
+  if (clean.includes("guacharo")) {
+    return "guacharo";
+  }
+  // 5. La Granjita
+  if (clean.includes("granjita")) {
+    return "granjita";
+  }
+  // 6. Selva Plus
+  if (clean.includes("selva")) {
+    return "selva-plus";
+  }
+  // 7. Loto Chaima
+  if (clean.includes("chaima")) {
+    return "loto-chaim-a";
+  }
+  // 8. Standard Lotto Activo (only if not monje and not rd/internacional)
+  if (clean === "lottoactivo" || clean === "lottoactivo1" || clean.startsWith("lottoactivo")) {
+    return "lotto-activo";
+  }
+
+  return null;
+}
+
 export function matchGameClass(rawClass: string, targetClass: string): boolean {
   if (!rawClass || !targetClass) return false;
+  const rawId = classifyLoteriaDeHoyGame(rawClass);
+  const targetId = classifyLoteriaDeHoyGame(targetClass);
+
+  if (rawId && targetId) {
+    return rawId === targetId;
+  }
+
   const cleanRaw = rawClass.toLowerCase().replace(/[^a-z0-9]/g, "");
   const cleanTarget = targetClass.toLowerCase().replace(/[^a-z0-9]/g, "");
-  if (cleanRaw === cleanTarget) return true;
-  if (cleanRaw.includes(cleanTarget) || cleanTarget.includes(cleanRaw)) return true;
-
-  if (
-    cleanTarget.includes("monje") &&
-    (cleanRaw.includes("monje") || cleanRaw.includes("lottoactivo2"))
-  )
-    return true;
-  if (cleanTarget.includes("guacharo") && cleanRaw.includes("guacharo")) return true;
-  if (cleanTarget.includes("granjita") && cleanRaw.includes("granjita")) return true;
-  if (cleanTarget.includes("chaima") && cleanRaw.includes("chaima")) return true;
-  if (cleanTarget.includes("selva") && cleanRaw.includes("selva")) return true;
-  if (cleanTarget === "lottoactivo" && (cleanRaw === "lottoactivo" || cleanRaw === "lottoactivo1"))
-    return true;
-  if (
-    cleanTarget.includes("lottoactivord") &&
-    (cleanRaw.includes("rd") || cleanRaw.includes("internacional"))
-  )
-    return true;
-
-  return false;
+  return cleanRaw === cleanTarget;
 }
 
 function extractDate(html: string): string | null {
@@ -227,12 +260,12 @@ export function parseLoteriaDeHoyResults(html: string): LoteriaDeHoyPage {
         parseCardMatch(cardMatch, cur.className, cur.title);
       }
     }
-  }
-
-  cardRegex.lastIndex = 0;
-  let globalCardMatch: RegExpExecArray | null;
-  while ((globalCardMatch = cardRegex.exec(html)) !== null) {
-    parseCardMatch(globalCardMatch, "", "");
+  } else {
+    cardRegex.lastIndex = 0;
+    let globalCardMatch: RegExpExecArray | null;
+    while ((globalCardMatch = cardRegex.exec(html)) !== null) {
+      parseCardMatch(globalCardMatch, "", "");
+    }
   }
 
   if (gameSections.length === 0 && results.length === 0) {

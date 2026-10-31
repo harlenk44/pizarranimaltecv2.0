@@ -3,10 +3,40 @@ import fs from "fs";
 import path from "path";
 
 const MEDIA_DIR = "/tmp/lottery_media";
+const ADS_STORE_FILE = "/tmp/lottery_ads_store.json";
 
 if (!fs.existsSync(MEDIA_DIR)) {
   try {
     fs.mkdirSync(MEDIA_DIR, { recursive: true });
+  } catch {
+    // ignore
+  }
+}
+
+function readAdsStore() {
+  try {
+    if (fs.existsSync(ADS_STORE_FILE)) {
+      return JSON.parse(fs.readFileSync(ADS_STORE_FILE, "utf-8"));
+    }
+  } catch {
+    // ignore
+  }
+  return {
+    ads: [],
+    ticker: {
+      enabled: false,
+      text: "¡Bienvenidos! Consulta los resultados de animalitos en vivo · Pagos al instante",
+      bgColor: "#1e3a8a",
+      textColor: "#ffffff",
+      speedSeconds: 25,
+      carouselIntervalSeconds: 8,
+    },
+  };
+}
+
+function writeAdsStore(data: unknown) {
+  try {
+    fs.writeFileSync(ADS_STORE_FILE, JSON.stringify(data));
   } catch {
     // ignore
   }
@@ -45,6 +75,9 @@ export const Route = createFileRoute("/api/media")({
     handlers: {
       GET: async ({ request }) => {
         const url = new URL(request.url);
+        if (url.searchParams.get("store") === "ads") {
+          return Response.json(readAdsStore());
+        }
         const fileName = url.searchParams.get("file");
         if (!fileName) {
           return new Response("Missing file parameter", { status: 400 });
@@ -150,6 +183,26 @@ export const Route = createFileRoute("/api/media")({
               error: "Error saving media",
               details: err instanceof Error ? err.message : String(err),
             },
+            { status: 500 },
+          );
+        }
+      },
+      PUT: async ({ request }) => {
+        try {
+          const body = await request.json();
+          const current = readAdsStore();
+          const next = {
+            ads: Array.isArray(body.ads) ? body.ads : current.ads,
+            ticker:
+              body.ticker && typeof body.ticker === "object"
+                ? { ...current.ticker, ...body.ticker }
+                : current.ticker,
+          };
+          writeAdsStore(next);
+          return Response.json({ status: "ok", ...next });
+        } catch (err) {
+          return Response.json(
+            { error: "Error saving ads store", details: String(err) },
             { status: 500 },
           );
         }

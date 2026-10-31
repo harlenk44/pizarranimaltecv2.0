@@ -30,6 +30,9 @@ describe("Device-local board sizes", () => {
         fontSizeScale: 100,
         heroCardScale: 100,
         animalScale: 100,
+        reloadOnNewResult: false,
+        alertDurationSeconds: 20,
+        showAlertModal: true,
       }),
     );
     first.unmount();
@@ -47,6 +50,37 @@ describe("Device-local board sizes", () => {
       fontSizeScale: 100,
       heroCardScale: 100,
       animalScale: 100,
+      reloadOnNewResult: false,
+      alertDurationSeconds: 20,
+      showAlertModal: true,
+    });
+  });
+  it("supports parsing and toggling reloadOnNewResult preference", () => {
+    expect(
+      parseDisplayPreferences(JSON.stringify({ reloadOnNewResult: true })).reloadOnNewResult,
+    ).toBe(true);
+    expect(
+      parseDisplayPreferences(JSON.stringify({ reloadOnNewResult: false })).reloadOnNewResult,
+    ).toBe(false);
+  });
+  it("supports parsing alertDurationSeconds up to 20s and showAlertModal preferences", () => {
+    expect(
+      parseDisplayPreferences(JSON.stringify({ alertDurationSeconds: 20, showAlertModal: true })),
+    ).toMatchObject({
+      alertDurationSeconds: 20,
+      showAlertModal: true,
+    });
+    expect(
+      parseDisplayPreferences(JSON.stringify({ alertDurationSeconds: 6, showAlertModal: false })),
+    ).toEqual({
+      resultScale: 125,
+      logoSize: 72,
+      fontSizeScale: 100,
+      heroCardScale: 100,
+      animalScale: 100,
+      reloadOnNewResult: false,
+      alertDurationSeconds: 6,
+      showAlertModal: false,
     });
   });
 });

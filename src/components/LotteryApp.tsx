@@ -6,6 +6,7 @@ import BoardPage from "@/views/BoardPage";
 import AdminPage from "@/views/AdminPage";
 import { Loader2 } from "lucide-react";
 import BoardDisplay from "@/components/BoardDisplay";
+import LicenseGate from "@/components/LicenseGate";
 
 function AppContent() {
   const { profile, loading: authLoading } = useAuth();
@@ -40,11 +41,13 @@ function AppContent() {
     );
   }
 
-  // 2. Direct Live Board Display (Direct access to lottery board)
+  // 2. Direct Live Board Display wrapped in LicenseGate and BoardDisplay
   return (
-    <BoardDisplay>
-      <BoardPage onAdminClick={() => setView("admin")} />
-    </BoardDisplay>
+    <LicenseGate isAdmin={isAdmin} onAdminClick={() => setView("admin")}>
+      <BoardDisplay>
+        <BoardPage onAdminClick={() => setView("admin")} />
+      </BoardDisplay>
+    </LicenseGate>
   );
 }
 

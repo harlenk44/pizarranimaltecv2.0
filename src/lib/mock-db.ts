@@ -15,7 +15,11 @@ import {
   matchGameClass,
   LOTERIADEHOY_GAME_MAPPINGS,
 } from "@/lib/loteriadehoy-parser";
-import { DEFAULT_GAME_SCHEDULES } from "@/lib/game-schedules";
+import {
+  DEFAULT_GAME_SCHEDULES,
+  getGameScheduleTimes,
+  normalizeScheduleTime,
+} from "@/lib/game-schedules";
 
 export interface MockStore {
   games: Game[];
@@ -553,6 +557,9 @@ export async function syncTuazarDirectly(): Promise<number> {
             if (effectiveMode === "manual" || !game.is_active) continue;
 
             const catalog = mockStore.animal_entries.filter((e) => e.game_id === game.id);
+            const validSchedule = new Set(
+              getGameScheduleTimes(game).map((t) => normalizeScheduleTime(t) ?? t),
+            );
             const draws = ldhPage.results.filter(
               (r) =>
                 matchGameClass(r.gameClass, meta.className) ||
@@ -562,6 +569,8 @@ export async function syncTuazarDirectly(): Promise<number> {
             for (const draw of draws) {
               const drawTime = draw.drawTime;
               if (!drawTime) continue;
+              const normDraw = normalizeScheduleTime(drawTime) ?? drawTime;
+              if (!validSchedule.has(normDraw)) continue;
 
               const matched = matchDrawWithCatalog(draw.number, draw.animal, catalog, game.slug);
               if (!matched) continue;
@@ -634,12 +643,17 @@ export async function syncTuazarDirectly(): Promise<number> {
               if (effectiveMode === "manual" || !game.is_active) continue;
 
               const catalog = mockStore.animal_entries.filter((e) => e.game_id === game.id);
+              const validSchedule = new Set(
+                getGameScheduleTimes(game).map((t) => normalizeScheduleTime(t) ?? t),
+              );
               const wanted = normalizeName(tuazarName);
               const draws = page.results.filter((r) => normalizeName(r.game) === wanted);
 
               for (const draw of draws) {
                 const drawTime = hourTo24h(draw.hour);
                 if (!drawTime) continue;
+                const normDraw = normalizeScheduleTime(drawTime) ?? drawTime;
+                if (!validSchedule.has(normDraw)) continue;
 
                 const matched = matchDrawWithCatalog(draw.number, draw.animal, catalog, game.slug);
                 if (!matched) continue;
@@ -1389,6 +1403,17 @@ export function createMockSupabaseClient() {
       }
       if (fnName === "sync_automatic_result") {
         const { p_game_id, p_draw_date, p_draw_time, p_animal_number, p_animal_name } = args;
+        const targetGame = mockStore.games.find((g) => g.id === p_game_id);
+        if (targetGame) {
+          const validSchedule = new Set(
+            getGameScheduleTimes(targetGame).map((t) => normalizeScheduleTime(t) ?? t),
+          );
+          const normDrawTime =
+            normalizeScheduleTime(p_draw_time as string) ?? (p_draw_time as string);
+          if (!validSchedule.has(normDrawTime)) {
+            return Promise.resolve({ data: false, error: null });
+          }
+        }
         const existing = mockStore.results.find(
           (r) =>
             r.game_id === p_game_id && r.draw_date === p_draw_date && r.draw_time === p_draw_time,

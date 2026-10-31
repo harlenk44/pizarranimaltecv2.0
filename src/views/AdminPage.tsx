@@ -17,6 +17,8 @@ import type {
   AdMediaType,
 } from "@/lib/types";
 import DesignManager from "@/components/DesignManager";
+import LicensesManager from "@/components/LicensesManager";
+import AdsStudioManager from "@/components/AdsStudioManager";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -58,6 +60,7 @@ import {
   Pencil,
   RefreshCw,
   Video,
+  KeyRound,
 } from "lucide-react";
 import AnimalMedia, { isVideoMedia } from "@/components/AnimalMedia";
 import { mockStore } from "@/lib/mock-db";
@@ -89,7 +92,7 @@ interface AdminPageProps {
   onBack: () => void;
 }
 
-type Tab = "results" | "games" | "animals" | "ads" | "design";
+type Tab = "results" | "games" | "animals" | "ads" | "design" | "licenses";
 
 export default function AdminPage({ onBack }: AdminPageProps) {
   const [tab, setTab] = useState<Tab>("results");
@@ -186,6 +189,12 @@ export default function AdminPage({ onBack }: AdminPageProps) {
         >
           <Palette className="w-4 h-4" /> Diseño
         </button>
+        <button
+          onClick={() => setTab("licenses")}
+          className={`px-4 py-2 rounded-lg text-sm font-medium transition flex items-center gap-2 ${tab === "licenses" ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-400 hover:text-white"}`}
+        >
+          <KeyRound className="w-4 h-4" /> Licencias y Clientes
+        </button>
       </div>
 
       <main className="flex-1 p-6 overflow-auto">
@@ -200,7 +209,9 @@ export default function AdminPage({ onBack }: AdminPageProps) {
         ) : tab === "animals" ? (
           <AnimalsManager games={games} />
         ) : tab === "ads" ? (
-          <AdsManager />
+          <AdsStudioManager />
+        ) : tab === "licenses" ? (
+          <LicensesManager />
         ) : (
           <DesignManager />
         )}
