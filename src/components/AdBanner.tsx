@@ -6,10 +6,11 @@ import {
   type AdTickerConfig,
   type AdsStoreState,
 } from "@/lib/ads-service";
+import { lotteryDate } from "@/lib/lottery-date";
 import { X, Megaphone } from "lucide-react";
 
 interface AdBannerProps {
-  placement: AdPlacement;
+  placement: AdPlacement | AdPlacement[];
   className?: string;
 }
 
@@ -21,15 +22,19 @@ export default function AdBanner({ placement, className = "" }: AdBannerProps) {
 
   const applyStore = useCallback(
     (store: AdsStoreState) => {
-      const now = new Date().toISOString();
+      const allowedPlacements = new Set(Array.isArray(placement) ? placement : [placement]);
+      const todayStr = lotteryDate();
+      const clockValid = todayStr >= "2025-01-01";
       const filtered = (store.ads || [])
         .filter((a) => {
-          if (!a.is_active || a.placement !== placement) return false;
-          if (a.starts_at && a.starts_at > now) return false;
-          if (a.ends_at && a.ends_at < now) return false;
+          if (!a.is_active) return false;
+          const adPlacement = a.placement || "top";
+          if (!allowedPlacements.has(adPlacement)) return false;
+          if (clockValid && a.starts_at && a.starts_at.slice(0, 10) > todayStr) return false;
+          if (clockValid && a.ends_at && a.ends_at.slice(0, 10) < todayStr) return false;
           return true;
         })
-        .sort((a, b) => a.display_order - b.display_order);
+        .sort((a, b) => (a.display_order ?? 0) - (b.display_order ?? 0));
 
       setAds(filtered);
       if (store.ticker?.carouselIntervalSeconds) {
@@ -48,7 +53,7 @@ export default function AdBanner({ placement, className = "" }: AdBannerProps) {
     };
 
     load();
-    const poll = setInterval(load, 10000);
+    const poll = setInterval(load, 4000);
 
     let bc: BroadcastChannel | null = null;
     try {
@@ -93,12 +98,10 @@ export default function AdBanner({ placement, className = "" }: AdBannerProps) {
 
   const ad = visibleAds[activeIndex % visibleAds.length] ?? visibleAds[0]!;
 
-  const heightClass =
-    placement === "sidebar"
-      ? "h-full min-h-[220px]"
-      : placement === "fullwidth"
-        ? "h-24 sm:h-32 md:h-40"
-        : "h-16 sm:h-20 md:h-24";
+  const isSidebar = placement === "sidebar";
+  const containerSizeClass = isSidebar
+    ? "w-1/4 h-full shrink-0 overflow-hidden p-1.5"
+    : "w-full h-[15vh] shrink-0 overflow-hidden px-3 py-1";
 
   const Wrapper = ad.link_url ? "a" : "div";
   const wrapperProps = ad.link_url
@@ -106,16 +109,16 @@ export default function AdBanner({ placement, className = "" }: AdBannerProps) {
     : {};
 
   return (
-    <div className={`relative group flex-shrink-0 px-3 py-1 ${className}`}>
+    <div className={`relative group ${containerSizeClass} ${className}`}>
       <Wrapper
         {...wrapperProps}
-        className={`relative block w-full overflow-hidden rounded-xl border border-slate-800/90 bg-slate-950 shadow-lg ${heightClass}`}
+        className="w-full h-full overflow-hidden relative flex items-center justify-center rounded-xl border border-slate-800/90 bg-slate-950 shadow-lg"
       >
         {ad.media_type === "video" ? (
           <video
             key={ad.image_url}
             src={ad.image_url}
-            className="w-full h-full object-cover"
+            className="w-full h-full object-contain max-h-full max-w-full block"
             autoPlay
             muted
             loop
@@ -127,7 +130,7 @@ export default function AdBanner({ placement, className = "" }: AdBannerProps) {
             key={ad.image_url}
             src={ad.image_url}
             alt={ad.title || "Publicidad"}
-            className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.01]"
+            className="w-full h-full object-contain max-h-full max-w-full block"
           />
         )}
 

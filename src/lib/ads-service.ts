@@ -88,18 +88,23 @@ export function saveLocalAdsStore(state: Partial<AdsStoreState>): AdsStoreState 
 
 export async function fetchAdsStore(): Promise<AdsStoreState> {
   const local = loadLocalAdsStore();
-  try {
-    const res = await fetch("/api/media?store=ads");
-    if (res.ok) {
-      const serverData = await res.json();
-      const serverAds = Array.isArray(serverData?.ads) ? (serverData.ads as Ad[]) : [];
-      const serverTicker =
-        serverData?.ticker && typeof serverData.ticker === "object"
-          ? ({ ...DEFAULT_AD_TICKER, ...serverData.ticker } as AdTickerConfig)
-          : local.ticker;
+  let serverAds: Ad[] = [];
+  let serverTicker: AdTickerConfig = local.ticker;
+  let serverReachable = false;
 
-      // If server has ads or local is empty, sync from server
-      if (serverAds.length > 0 || local.ads.length === 0) {
+  try {
+    const res = await fetch(`/api/media?store=ads&_t=${Date.now()}`, {
+      cache: "no-store",
+    });
+    if (res.ok) {
+      serverReachable = true;
+      const serverData = await res.json();
+      serverAds = Array.isArray(serverData?.ads) ? (serverData.ads as Ad[]) : [];
+      if (serverData?.ticker && typeof serverData.ticker === "object") {
+        serverTicker = { ...DEFAULT_AD_TICKER, ...serverData.ticker };
+      }
+
+      if (serverAds.length > 0) {
         const merged: AdsStoreState = {
           ads: serverAds,
           ticker: serverTicker,
@@ -119,19 +124,44 @@ export async function fetchAdsStore(): Promise<AdsStoreState> {
     // fallback to supabase/mock-db or local
   }
 
+  // If server had 0 ads (e.g., right after republishing or container restart), check Supabase
   try {
     const { data } = await supabase
       .from("ads")
       .select("*")
       .order("display_order", { ascending: true });
-    if (Array.isArray(data) && data.length > 0 && local.ads.length === 0) {
-      return { ads: data as Ad[], ticker: local.ticker };
+    if (Array.isArray(data) && data.length > 0) {
+      const supaState: AdsStoreState = {
+        ads: data as Ad[],
+        ticker: serverTicker,
+      };
+      if (serverReachable) {
+        fetch("/api/media?store=ads", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(supaState),
+        }).catch(() => {});
+      }
+      return supaState;
     }
   } catch {
     // ignore
   }
 
-  return local;
+  // If this device (e.g. Admin browser) has ads in localStorage while server is empty after republish,
+  // automatically re-publish local ads to the server so Smart TVs receive them immediately.
+  if (local.ads.length > 0 && serverReachable && serverAds.length === 0) {
+    fetch("/api/media?store=ads", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(local),
+    }).catch(() => {});
+  }
+
+  return {
+    ads: local.ads,
+    ticker: serverReachable ? serverTicker : local.ticker,
+  };
 }
 
 export async function persistAdsStore(state: Partial<AdsStoreState>): Promise<AdsStoreState> {
@@ -145,35 +175,99 @@ export async function persistAdsStore(state: Partial<AdsStoreState>): Promise<Ad
   } catch {
     // ignore
   }
+
+  if (state.ads !== undefined) {
+    try {
+      await supabase.from("ads").delete().neq("id", "");
+      if (updated.ads.length > 0) {
+        await supabase.from("ads").upsert(updated.ads, { onConflict: "id" });
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   return updated;
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(new Error("No se pudo leer el archivo multimedia"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function compressImageToDataUrl(file: File): Promise<string> {
+  const rawDataUrl = await readFileAsDataUrl(file);
+  if (file.type === "image/gif" || file.type === "image/svg+xml" || file.size <= 350 * 1024) {
+    return rawDataUrl;
+  }
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const maxW = 1600;
+        const maxH = 900;
+        let w = img.naturalWidth || img.width;
+        let h = img.naturalHeight || img.height;
+        if (w > maxW || h > maxH) {
+          const ratio = Math.min(maxW / w, maxH / h);
+          w = Math.round(w * ratio);
+          h = Math.round(h * ratio);
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          resolve(rawDataUrl);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, w, h);
+        const outType = file.type === "image/png" ? "image/png" : "image/jpeg";
+        const compressed = canvas.toDataURL(outType, 0.88);
+        resolve(compressed.length < rawDataUrl.length ? compressed : rawDataUrl);
+      } catch {
+        resolve(rawDataUrl);
+      }
+    };
+    img.onerror = () => resolve(rawDataUrl);
+    img.src = rawDataUrl;
+  });
 }
 
 export async function uploadAdMediaFile(
   file: File,
 ): Promise<{ url: string; mediaType: "image" | "video" }> {
   const mediaType: "image" | "video" = file.type.startsWith("video/") ? "video" : "image";
+
+  // For images, embed a self-contained data URL so banners never break across Cloud Run instances or republishes
+  if (mediaType === "image") {
+    const dataUrl = await compressImageToDataUrl(file);
+    return { url: dataUrl, mediaType: "image" };
+  }
+
   const formData = new FormData();
   formData.append("file", file);
 
-  const res = await fetch("/api/media", {
-    method: "POST",
-    body: formData,
-  });
+  try {
+    const res = await fetch("/api/media", {
+      method: "POST",
+      body: formData,
+    });
 
-  if (res.ok) {
-    const data = await res.json();
-    if (data?.url) {
-      return { url: data.url, mediaType };
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.url) {
+        return { url: data.url, mediaType };
+      }
     }
+  } catch {
+    // fallback to dataURL
   }
 
-  // Fallback to dataURL if multipart upload fails
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      resolve({ url: reader.result as string, mediaType });
-    };
-    reader.onerror = () => reject(new Error("No se pudo leer el archivo multimedia"));
-    reader.readAsDataURL(file);
-  });
+  const fallbackUrl = await readFileAsDataUrl(file);
+  return { url: fallbackUrl, mediaType };
 }

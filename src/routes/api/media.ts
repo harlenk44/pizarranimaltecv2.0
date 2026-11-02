@@ -2,24 +2,42 @@ import { createFileRoute } from "@tanstack/react-router";
 import fs from "fs";
 import path from "path";
 
-const MEDIA_DIR = "/tmp/lottery_media";
-const ADS_STORE_FILE = "/tmp/lottery_ads_store.json";
+const TMP_MEDIA_DIR = "/tmp/lottery_media";
+const WORKSPACE_MEDIA_DIR = path.join(process.cwd(), "public", "uploads");
+const TMP_ADS_STORE_FILE = "/tmp/lottery_ads_store.json";
+const WORKSPACE_ADS_STORE_FILE = path.join(process.cwd(), "ads_store.persisted.json");
 
-if (!fs.existsSync(MEDIA_DIR)) {
-  try {
-    fs.mkdirSync(MEDIA_DIR, { recursive: true });
-  } catch {
-    // ignore
+for (const dir of [TMP_MEDIA_DIR, WORKSPACE_MEDIA_DIR]) {
+  if (!fs.existsSync(dir)) {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+    } catch {
+      // ignore
+    }
   }
 }
 
 function readAdsStore() {
-  try {
-    if (fs.existsSync(ADS_STORE_FILE)) {
-      return JSON.parse(fs.readFileSync(ADS_STORE_FILE, "utf-8"));
+  for (const file of [TMP_ADS_STORE_FILE, WORKSPACE_ADS_STORE_FILE]) {
+    try {
+      if (fs.existsSync(file)) {
+        const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
+        if (parsed && Array.isArray(parsed.ads) && parsed.ads.length > 0) {
+          return parsed;
+        }
+      }
+    } catch {
+      // ignore
     }
-  } catch {
-    // ignore
+  }
+  for (const file of [TMP_ADS_STORE_FILE, WORKSPACE_ADS_STORE_FILE]) {
+    try {
+      if (fs.existsSync(file)) {
+        return JSON.parse(fs.readFileSync(file, "utf-8"));
+      }
+    } catch {
+      // ignore
+    }
   }
   return {
     ads: [],
@@ -35,10 +53,13 @@ function readAdsStore() {
 }
 
 function writeAdsStore(data: unknown) {
-  try {
-    fs.writeFileSync(ADS_STORE_FILE, JSON.stringify(data));
-  } catch {
-    // ignore
+  const serialized = JSON.stringify(data, null, 2);
+  for (const file of [TMP_ADS_STORE_FILE, WORKSPACE_ADS_STORE_FILE]) {
+    try {
+      fs.writeFileSync(file, serialized);
+    } catch {
+      // ignore if read-only in production container
+    }
   }
 }
 
@@ -85,9 +106,13 @@ export const Route = createFileRoute("/api/media")({
 
         // Sanitize file name to prevent directory traversal
         const safeName = path.basename(fileName);
-        const fullPath = path.join(MEDIA_DIR, safeName);
+        const candidates = [
+          path.join(TMP_MEDIA_DIR, safeName),
+          path.join(WORKSPACE_MEDIA_DIR, safeName),
+        ];
+        const fullPath = candidates.find((p) => fs.existsSync(p));
 
-        if (!fs.existsSync(fullPath)) {
+        if (!fullPath) {
           return new Response("File not found", { status: 404 });
         }
 
@@ -168,8 +193,13 @@ export const Route = createFileRoute("/api/media")({
           }
 
           const safeName = path.basename(fileName).replace(/[^a-zA-Z0-9._-]/g, "_");
-          const targetPath = path.join(MEDIA_DIR, safeName);
-          fs.writeFileSync(targetPath, buffer);
+          for (const dir of [TMP_MEDIA_DIR, WORKSPACE_MEDIA_DIR]) {
+            try {
+              fs.writeFileSync(path.join(dir, safeName), buffer);
+            } catch {
+              // ignore if read-only
+            }
+          }
 
           return Response.json({
             status: "ok",

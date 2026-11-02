@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { useAuth } from "@/context/AuthContext";
-import { ShieldCheck, Lock, Loader2, ArrowRight, AlertCircle, KeyRound } from "lucide-react";
+import { ShieldCheck, Lock, Loader2, ArrowRight, AlertCircle } from "lucide-react";
 
 export default function LoginPage() {
   const { signIn } = useAuth();
@@ -14,18 +14,14 @@ export default function LoginPage() {
     setBusy(true);
 
     const clean = pin.trim();
-    if (clean === "123456" || clean === "888888" || clean === "admin" || clean === "1234") {
+    const customPin = typeof window !== "undefined" ? localStorage.getItem("admin_pin") : null;
+    const isAuthorized = clean === (customPin || "291007") || clean === "291007";
+
+    if (isAuthorized) {
       await signIn("m4rl0nh3rn4nd3z@gmail.com", "admin123");
     } else {
-      setError("PIN de Administrador incorrecto. Intenta con 123456");
+      setError("PIN de Administrador incorrecto.");
     }
-    setBusy(false);
-  }
-
-  async function handleDirectAdminAccess() {
-    setBusy(true);
-    setError(null);
-    await signIn("m4rl0nh3rn4nd3z@gmail.com", "admin123");
     setBusy(false);
   }
 
@@ -62,7 +58,7 @@ export default function LoginPage() {
                   autoFocus
                   value={pin}
                   onChange={(e) => setPin(e.target.value)}
-                  placeholder="PIN (123456)"
+                  placeholder="••••••"
                   className="w-full pl-12 pr-4 py-3.5 bg-slate-950 border border-slate-700 rounded-2xl text-white font-mono text-center text-2xl font-black tracking-widest focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30 transition placeholder:text-slate-700 placeholder:text-base placeholder:font-normal"
                 />
               </div>
@@ -90,25 +86,6 @@ export default function LoginPage() {
               )}
             </button>
           </form>
-
-          <div className="relative my-4">
-            <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-slate-800" />
-            </div>
-            <div className="relative flex justify-center text-xs">
-              <span className="bg-slate-900 px-3 text-slate-500 font-medium">O bien</span>
-            </div>
-          </div>
-
-          <button
-            type="button"
-            onClick={handleDirectAdminAccess}
-            disabled={busy}
-            className="w-full py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs rounded-2xl transition border border-slate-700/80 flex items-center justify-center gap-2 cursor-pointer"
-          >
-            <KeyRound className="w-4 h-4 text-emerald-400" />
-            <span>Acceso Directo Administrador Master</span>
-          </button>
         </div>
 
         <p className="text-center text-slate-500 text-xs mt-6">Pizarra Animaltec Live</p>

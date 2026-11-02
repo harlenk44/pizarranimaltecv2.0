@@ -535,6 +535,22 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     }
   };
 
+  const handleExitToEntryPanel = async () => {
+    try {
+      localStorage.removeItem("pizarra_activated_pin");
+    } catch {
+      // ignore
+    }
+    if (profile) {
+      try {
+        await signOut();
+      } catch {
+        // ignore
+      }
+    }
+    window.dispatchEvent(new CustomEvent("pizarra:open-license-screen"));
+  };
+
   const gameCards: GameWithResults[] = games.map((g) => ({
     ...g,
     latest_results: resultsMap[g.id] ?? [],
@@ -559,7 +575,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
 
   return (
     <div
-      className="full-screen-board font-sans"
+      className="full-screen-board h-screen w-screen overflow-hidden flex flex-col font-sans"
       style={{
         backgroundColor: settings.background_color || "#000000",
         color: settings.text_color || "#ffffff",
@@ -568,7 +584,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     >
       {/* Header */}
       <header
-        className="board-fluid-header flex items-center justify-between"
+        className="board-fluid-header shrink-0 flex items-center justify-between"
         style={{
           backgroundColor: settings.surface_color || "transparent",
         }}
@@ -576,7 +592,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         {/* Left Title */}
         <div className="flex items-center gap-3">
           <h1
-            className="text-2xl sm:text-3xl lg:text-4xl font-black tracking-tight font-sans"
+            className="text-xl sm:text-2xl lg:text-3xl font-black tracking-tight font-sans"
             style={{ color: settings.text_color || "#ffffff" }}
           >
             Pizarra Animaltec
@@ -586,7 +602,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         {/* Right Clock & Controls */}
         <div className="flex items-center gap-4 sm:gap-6">
           <div className="text-right">
-            <div className="text-2xl sm:text-3xl lg:text-4xl font-mono font-black text-emerald-400 tracking-tight tabular-nums leading-none">
+            <div className="text-xl sm:text-2xl lg:text-3xl font-mono font-black text-emerald-400 tracking-tight tabular-nums leading-none">
               {clock.toLocaleTimeString("es-VE", {
                 timeZone: LOTTERY_TIMEZONE,
                 hour: "2-digit",
@@ -595,7 +611,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
                 hour12: false,
               })}
             </div>
-            <div className="text-xs sm:text-sm font-semibold opacity-90 mt-1">
+            <div className="text-[11px] sm:text-xs font-semibold opacity-90 mt-0.5">
               {formatBoardDate(clock)}
             </div>
           </div>
@@ -657,49 +673,63 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
             >
               <Settings className="w-4 h-4" />
             </button>
+            <button
+              onClick={handleExitToEntryPanel}
+              className="px-2.5 py-1.5 sm:px-3 sm:py-2 rounded-lg bg-red-950/70 border border-red-700/80 hover:bg-red-900/80 text-red-200 transition flex items-center gap-1.5 text-xs font-bold shadow-md cursor-pointer"
+              title="Salir de la pizarra y volver al panel de entrada"
+            >
+              <LogOut className="w-4 h-4 text-red-400" />
+              <span>Salir</span>
+            </button>
           </div>
         </div>
       </header>
 
-      {/* Top & Fullwidth Ad Banners */}
-      <AdBanner placement="top" />
-      <AdBanner placement="fullwidth" />
+      {/* Top / Fullwidth Ad Banner (Fixed 15vh shrink-0 when active) */}
+      <AdBanner placement={["top", "fullwidth"]} />
 
-      {/* Dynamic Screen-Filling Grid Container */}
-      <main
-        className="board-fluid-main"
-        style={{ backgroundColor: settings.background_color || "#000000" }}
-      >
-        {loading ? (
-          <div className="flex items-center justify-center h-full">
-            <div className="animate-pulse text-slate-400 font-medium">Cargando resultados...</div>
-          </div>
-        ) : gameCards.length === 0 ? (
-          <div className="flex items-center justify-center h-full text-slate-400">
-            No hay juegos activos configurados.
-          </div>
-        ) : (
-          <div className="board-fluid-grid" style={getDynamicGridStyle(gameCards.length)}>
-            {gameCards.map((game) => (
-              <GameCard
-                key={game.id}
-                game={game}
-                animalImages={animalImages}
-                animalNames={animalNames}
-                animalLabels={animalLabels}
-                settings={settings}
-              />
-            ))}
-          </div>
-        )}
-      </main>
+      {/* Main Board & Optional Sidebar Ad Container (Fixed 75% / 25% when sidebar active) */}
+      <div className="flex-1 min-h-0 min-w-0 w-full flex flex-row overflow-hidden">
+        <main
+          className="board-fluid-main w-3/4 flex-1 min-h-0 min-w-0 h-full overflow-hidden"
+          style={{ backgroundColor: settings.background_color || "#000000" }}
+        >
+          {loading ? (
+            <div className="flex items-center justify-center h-full">
+              <div className="animate-pulse text-slate-400 font-medium">Cargando resultados...</div>
+            </div>
+          ) : gameCards.length === 0 ? (
+            <div className="flex items-center justify-center h-full text-slate-400">
+              No hay juegos activos configurados.
+            </div>
+          ) : (
+            <div
+              className="board-fluid-grid grid h-full w-full min-h-0 min-w-0 auto-rows-fr overflow-hidden"
+              style={getDynamicGridStyle(gameCards.length)}
+            >
+              {gameCards.map((game) => (
+                <GameCard
+                  key={game.id}
+                  game={game}
+                  animalImages={animalImages}
+                  animalNames={animalNames}
+                  animalLabels={animalLabels}
+                  settings={settings}
+                />
+              ))}
+            </div>
+          )}
+        </main>
+
+        <AdBanner placement="sidebar" />
+      </div>
 
       {/* Bottom Ad Banner & Live Promotional Ticker */}
       <AdBanner placement="bottom" />
       <AdTickerBar />
 
       {/* Footer */}
-      <footer className="px-6 py-1 bg-black border-t border-slate-900/80 text-center flex-shrink-0">
+      <footer className="px-6 py-0.5 bg-black border-t border-slate-900/80 text-center shrink-0">
         <p className="text-[10px] text-slate-600 font-mono">
           pizarraianimaltec · Pizarra de Resultados de Lotería en Vivo
         </p>
@@ -781,7 +811,7 @@ function GameCard({
 
   return (
     <div
-      className="fluid-game-card"
+      className="fluid-game-card h-full w-full min-h-0 min-w-0 overflow-hidden flex flex-col justify-between"
       style={{
         backgroundColor: settings.card_color || "#000000",
         borderColor: game.color,
@@ -789,21 +819,21 @@ function GameCard({
       }}
     >
       {/* Top Header */}
-      <div className="fluid-card-header">
+      <div className="fluid-card-header shrink-0">
         {game.logo_url ? (
           <div
-            className="rounded-full border border-slate-800 bg-slate-900 flex items-center justify-center overflow-hidden flex-shrink-0 fluid-logo-wrapper"
+            className="rounded-full border border-slate-800 bg-slate-900 flex items-center justify-center overflow-hidden shrink-0 fluid-logo-wrapper"
             style={{ width: "var(--display-logo)", height: "var(--display-logo)" }}
           >
             <img
               src={game.logo_url}
               alt={game.name}
-              className="w-full h-full object-contain p-0.5"
+              className="w-full h-full object-contain max-h-full max-w-full p-0.5"
             />
           </div>
         ) : (
           <div
-            className="rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 fluid-logo-wrapper"
+            className="rounded-full flex items-center justify-center text-xs font-bold shrink-0 fluid-logo-wrapper"
             style={{
               backgroundColor: `${game.color}20`,
               color: game.color,
@@ -828,16 +858,16 @@ function GameCard({
 
       {/* Hero Center Display (Customized by result_row_color, --display-hero-scale and --display-animal-scale) */}
       <div
-        className="fluid-hero-banner"
+        className="fluid-hero-banner shrink-0 min-h-0 overflow-hidden"
         style={{
           backgroundColor: settings.result_row_color || "rgba(15, 23, 42, 0.8)",
         }}
       >
         <div
-          className="fluid-hero-avatar rounded-xl bg-slate-950/90 border border-slate-700/80 flex items-center justify-center flex-shrink-0 overflow-hidden shadow-inner p-1"
+          className="fluid-hero-avatar rounded-xl bg-slate-950/90 border border-slate-700/80 flex items-center justify-center shrink-0 overflow-hidden shadow-inner p-1"
           style={{
-            width: "calc(clamp(3.2rem, 4.8vw, 6rem) * var(--display-animal-scale, 1))",
-            height: "calc(clamp(3.2rem, 4.8vw, 6rem) * var(--display-animal-scale, 1))",
+            width: "calc(clamp(2.2rem, min(5.5vh, 4vw), 4.8rem) * var(--display-animal-scale, 1))",
+            height: "calc(clamp(2.2rem, min(5.5vh, 4vw), 4.8rem) * var(--display-animal-scale, 1))",
           }}
         >
           {latestResult ? (
@@ -845,16 +875,16 @@ function GameCard({
               imageUrl={latestImgUrl}
               name={latestDisplayName}
               number={latestResult.animal_number}
-              className="w-full h-full object-contain p-0.5 drop-shadow-md rounded-lg"
+              className="w-full h-full object-contain max-h-full max-w-full p-0.5 drop-shadow-md rounded-lg"
             />
           ) : (
-            <Target className="w-8 h-8 sm:w-10 sm:h-10 text-slate-500" />
+            <Target className="w-6 h-6 sm:w-8 sm:h-8 text-slate-500" />
           )}
         </div>
 
-        <div className="flex-1 text-right min-w-0">
+        <div className="flex-1 text-right min-w-0 overflow-hidden">
           <div
-            className="h-2 w-12 sm:w-16 rounded-full ml-auto mb-1.5 shadow-sm"
+            className="h-1.5 w-10 sm:w-14 rounded-full ml-auto mb-1 shadow-sm"
             style={{ backgroundColor: game.color }}
           />
           {latestResult ? (
@@ -862,12 +892,12 @@ function GameCard({
               <div className="fluid-hero-text font-black text-white tracking-wide truncate">
                 {latestLabel} - {latestDisplayName.toUpperCase()}
               </div>
-              <div className="fluid-hero-time font-mono font-semibold text-slate-300 mt-0.5">
+              <div className="fluid-hero-time font-mono font-semibold text-slate-300 mt-0.5 truncate">
                 {formatTime(latestResult.draw_time)}
               </div>
             </div>
           ) : (
-            <div className="fluid-hero-text font-bold text-slate-400 tracking-wide">
+            <div className="fluid-hero-text font-bold text-slate-400 tracking-wide truncate">
               Esperando sorteo
             </div>
           )}
@@ -875,7 +905,7 @@ function GameCard({
       </div>
 
       {/* Bottom Schedule Matrix Grid */}
-      <div className="fluid-schedule-matrix">
+      <div className="fluid-schedule-matrix grid flex-1 h-full w-full min-h-0 min-w-0 grid-cols-4 auto-rows-fr overflow-hidden">
         {scheduleTimes.map((timeSlot) => {
           const res = findResultForTimeSlot(validResults, timeSlot);
           const displayNum = res
@@ -886,7 +916,7 @@ function GameCard({
           return (
             <div
               key={timeSlot}
-              className={`fluid-schedule-cell transition ${
+              className={`fluid-schedule-cell h-full w-full min-h-0 min-w-0 overflow-hidden transition ${
                 res ? "border-slate-700/90 shadow-sm" : "border-slate-800/80 opacity-80"
               }`}
               style={{
@@ -895,8 +925,8 @@ function GameCard({
                   : "rgba(2, 6, 23, 0.6)",
               }}
             >
-              <div className="fluid-cell-time">{formatTime(timeSlot)}</div>
-              <div className="fluid-cell-result truncate">
+              <div className="fluid-cell-time truncate w-full">{formatTime(timeSlot)}</div>
+              <div className="fluid-cell-result truncate w-full">
                 {res ? (
                   <span style={{ color: game.color }} className="font-black">
                     {displayNum}

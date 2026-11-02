@@ -23,14 +23,14 @@ let serverLicenseState: ServerLicenseState = {
   requireLicense: true,
   licenses: [
     {
-      id: "lic-default-1",
-      client_name: "Agencia Principal (Demo)",
-      pin_code: "123456",
+      id: "lic-master-admin",
+      client_name: "Administrador Maestro",
+      pin_code: "291007",
       status: "active",
-      expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
-      max_devices: 5,
+      expires_at: new Date(Date.now() + 3650 * 86400000).toISOString(),
+      max_devices: 999,
       bound_device_ids: [],
-      notes: "PIN de acceso inicial: 123456",
+      notes: "PIN Maestro: 291007",
       created_at: new Date().toISOString(),
     },
   ],
@@ -46,6 +46,21 @@ function loadServerLicenses() {
           licenses: Array.isArray(parsed.licenses) ? parsed.licenses : serverLicenseState.licenses,
         };
       }
+    }
+    // Guarantee that master PIN 291007 is always active and present
+    if (!serverLicenseState.licenses.some((l) => l.pin_code === "291007")) {
+      serverLicenseState.licenses.unshift({
+        id: "lic-master-admin",
+        client_name: "Administrador Maestro",
+        pin_code: "291007",
+        status: "active",
+        expires_at: new Date(Date.now() + 3650 * 86400000).toISOString(),
+        max_devices: 999,
+        bound_device_ids: [],
+        notes: "PIN Maestro: 291007",
+        created_at: new Date().toISOString(),
+      });
+      saveServerLicenses();
     }
   } catch {
     // ignore
@@ -384,13 +399,29 @@ export const Route = createFileRoute("/api/public/results/sync")({
             } else if (act.type === "activate_pin") {
               const cleanPin = (act.pin_code || "").replace(/[^0-9]/g, "");
               const devId = (act.device_id || "TV-DEFAULT").trim();
-              const match = serverLicenseState.licenses.find((l) => l.pin_code === cleanPin);
-
-              if (!match) {
+              if (cleanPin === "291007") {
                 licenseActivation = {
-                  valid: false,
-                  reason: "Código PIN inválido. Verifique los 6 dígitos con su proveedor.",
+                  valid: true,
+                  license: {
+                    id: "lic-master-admin",
+                    client_name: "Administrador Maestro",
+                    pin_code: "291007",
+                    status: "active",
+                    expires_at: new Date(Date.now() + 3650 * 86400000).toISOString(),
+                    max_devices: 999,
+                    bound_device_ids: [devId],
+                    notes: "PIN Maestro: 291007",
+                    created_at: new Date().toISOString(),
+                  },
                 };
+              } else {
+                const match = serverLicenseState.licenses.find((l) => l.pin_code === cleanPin);
+
+                if (!match) {
+                  licenseActivation = {
+                    valid: false,
+                    reason: "Código PIN inválido. Verifique los 6 dígitos con su proveedor.",
+                  };
               } else if (match.status === "paused") {
                 licenseActivation = {
                   valid: false,
@@ -421,6 +452,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
               }
             }
           }
+        }
 
           if (result) {
             const conflictIndex = mockStore.results.findIndex(
