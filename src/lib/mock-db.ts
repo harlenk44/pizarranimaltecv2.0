@@ -1452,6 +1452,17 @@ export function createMockSupabaseClient() {
     storage: {
       from(bucket: string = "animal-images") {
         return {
+          getPublicUrl(path: string) {
+            let dataUrl = mockStorageFiles.get(`${bucket}:${path}`) || mockStorageFiles.get(path);
+            if (!dataUrl && typeof window !== "undefined") {
+              try {
+                dataUrl = localStorage.getItem(`pizarra_storage_${bucket}_${path}`) ?? undefined;
+              } catch {
+                // ignore
+              }
+            }
+            return { data: { publicUrl: dataUrl || path } };
+          },
           async createSignedUrl(path: string) {
             let dataUrl = mockStorageFiles.get(`${bucket}:${path}`) || mockStorageFiles.get(path);
             if (!dataUrl && typeof window !== "undefined") {

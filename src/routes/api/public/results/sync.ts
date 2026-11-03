@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { mockStore } from "@/lib/mock-db";
 import type { ClientLicense } from "@/lib/types";
+import { TRIPLE_GAMES, buildTripleAlertItem, type TripleResult } from "@/lib/triples";
 import {
   getDefaultGameScheduleTimes,
   getGameScheduleTimes,
@@ -9,10 +10,34 @@ import {
 import fs from "fs";
 
 const RESULTS_FILE = "/tmp/lottery_results.json";
+const TRIPLE_RESULTS_FILE = "/tmp/lottery_triples_results.json";
 const LATEST_ALERT_FILE = "/tmp/lottery_latest_alert.json";
 const ANIMAL_IMAGES_FILE = "/tmp/lottery_animal_images.json";
 const GAMES_FILE = "/tmp/lottery_games.json";
 const CLIENT_LICENSES_FILE = "/tmp/lottery_client_licenses_v2.json";
+
+let serverTripleResults: TripleResult[] = [];
+
+function loadServerTripleResults() {
+  try {
+    if (fs.existsSync(TRIPLE_RESULTS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(TRIPLE_RESULTS_FILE, "utf-8"));
+      if (Array.isArray(data)) {
+        serverTripleResults = data;
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function saveServerTripleResults() {
+  try {
+    fs.writeFileSync(TRIPLE_RESULTS_FILE, JSON.stringify(serverTripleResults));
+  } catch {
+    // ignore
+  }
+}
 
 interface ServerLicenseState {
   requireLicense: boolean;
@@ -186,6 +211,7 @@ function saveServerGames() {
 }
 
 loadServerResults();
+loadServerTripleResults();
 loadServerAnimalImages();
 loadServerGames();
 loadServerLicenses();
@@ -205,18 +231,40 @@ async function triggerBackgroundSync(forceWait = false) {
   try {
     loadServerGames();
     loadServerResults();
+    loadServerTripleResults();
     loadServerAnimalImages();
     const prevCount = mockStore.results.length;
+    const hadPriorTriples = serverTripleResults.length > 0;
 
-    const { synchronizeAutomaticResults } = await import("@/lib/result-sync.server");
-    const reports = await synchronizeAutomaticResults();
+    const [{ synchronizeAutomaticResults }, { synchronizeAutomaticTriplesResults }] =
+      await Promise.all([
+        import("@/lib/result-sync.server"),
+        import("@/lib/triples-sync.server"),
+      ]);
+
+    const [reports, triplesSync] = await Promise.all([
+      synchronizeAutomaticResults(),
+      synchronizeAutomaticTriplesResults(serverTripleResults),
+    ]);
+
     saveServerResults();
+
+    serverTripleResults = triplesSync.merged;
+    saveServerTripleResults();
 
     const anyWritten = reports.some((r) => r.written > 0) || mockStore.results.length > prevCount;
     if (anyWritten) {
       const latest = mockStore.results[mockStore.results.length - 1];
       if (latest) {
         const gameObj = mockStore.games.find((g) => g.id === latest.game_id);
+        const exactImg = mockStore.animal_images.find(
+          (img) =>
+            (img.game_id === latest.game_id || (gameObj && img.game_id === gameObj.slug)) &&
+            img.animal_number === latest.animal_number,
+        );
+        const fallbackImg = mockStore.animal_images.find(
+          (img) => img.animal_number === latest.animal_number,
+        );
         const alertPayload = {
           id: `auto-${latest.id || `${latest.game_id}-${latest.draw_date}-${latest.draw_time}`}`,
           gameId: latest.game_id,
@@ -227,11 +275,25 @@ async function triggerBackgroundSync(forceWait = false) {
           drawTime: latest.draw_time,
           animalNumber: latest.animal_number,
           animalName: latest.animal_name,
+          animalImageUrl: exactImg?.image_url ?? fallbackImg?.image_url ?? null,
         };
         try {
           fs.writeFileSync(LATEST_ALERT_FILE, JSON.stringify(alertPayload));
         } catch {
           // ignore
+        }
+      }
+    } else if (hadPriorTriples && triplesSync.newlyAdded.length > 0) {
+      const latestTriple = triplesSync.newlyAdded[triplesSync.newlyAdded.length - 1];
+      if (latestTriple) {
+        const tripleGame = TRIPLE_GAMES.find((g) => g.id === latestTriple.game_id);
+        if (tripleGame) {
+          const alertPayload = buildTripleAlertItem(latestTriple, tripleGame);
+          try {
+            fs.writeFileSync(LATEST_ALERT_FILE, JSON.stringify(alertPayload));
+          } catch {
+            // ignore
+          }
         }
       }
     }
@@ -254,6 +316,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
     handlers: {
       GET: async () => {
         loadServerResults();
+        loadServerTripleResults();
         loadServerAnimalImages();
         loadServerGames();
         loadServerLicenses();
@@ -262,7 +325,10 @@ export const Route = createFileRoute("/api/public/results/sync")({
           ? mockStore.results.filter((r) => r.game_id === monjeGame.id).length
           : 0;
 
-        const needsImmediateSync = mockStore.results.length === 0 || (monjeGame && monjeCount < 6);
+        const needsImmediateSync =
+          mockStore.results.length === 0 ||
+          serverTripleResults.length === 0 ||
+          (monjeGame && monjeCount < 6);
 
         if (needsImmediateSync) {
           await triggerBackgroundSync(true);
@@ -283,6 +349,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
         return Response.json({
           status: "ok",
           results: mockStore.results,
+          tripleResults: serverTripleResults,
           latestAlert,
           animalImages: mockStore.animal_images,
           games: mockStore.games,
@@ -298,10 +365,24 @@ export const Route = createFileRoute("/api/public/results/sync")({
         }
         try {
           loadServerGames();
-          const { synchronizeAutomaticResults } = await import("@/lib/result-sync.server");
-          const reports = await synchronizeAutomaticResults();
+          loadServerTripleResults();
+          const [{ synchronizeAutomaticResults }, { synchronizeAutomaticTriplesResults }] =
+            await Promise.all([
+              import("@/lib/result-sync.server"),
+              import("@/lib/triples-sync.server"),
+            ]);
+          const [reports, triplesSync] = await Promise.all([
+            synchronizeAutomaticResults(),
+            synchronizeAutomaticTriplesResults(serverTripleResults),
+          ]);
           saveServerResults();
-          return Response.json({ reports, results: mockStore.results });
+          serverTripleResults = triplesSync.merged;
+          saveServerTripleResults();
+          return Response.json({
+            reports,
+            results: mockStore.results,
+            tripleResults: serverTripleResults,
+          });
         } catch (err) {
           console.error("[sync-error]", err);
           return Response.json(
@@ -316,8 +397,18 @@ export const Route = createFileRoute("/api/public/results/sync")({
       PUT: async ({ request }) => {
         try {
           loadServerLicenses();
+          loadServerTripleResults();
           const body = await request.json();
-          const { result, alert, animalImage, gameUpdate, licenseAction } = body;
+          const {
+            result,
+            tripleResult,
+            deleteTripleId,
+            alert,
+            animalImage,
+            deleteAnimalImage,
+            gameUpdate,
+            licenseAction,
+          } = body;
           let licenseActivation: {
             valid: boolean;
             reason?: string;
@@ -475,6 +566,33 @@ export const Route = createFileRoute("/api/public/results/sync")({
             saveServerResults();
           }
 
+          if (tripleResult && typeof tripleResult === "object") {
+            const tr = tripleResult as TripleResult;
+            const conflictIdx = serverTripleResults.findIndex(
+              (r) =>
+                r.game_id === tr.game_id &&
+                r.draw_date === tr.draw_date &&
+                r.draw_time === tr.draw_time,
+            );
+            if (conflictIdx >= 0) {
+              serverTripleResults[conflictIdx] = {
+                ...serverTripleResults[conflictIdx],
+                ...tr,
+              };
+            } else {
+              serverTripleResults.push({
+                ...tr,
+                id: tr.id || `triple-${tr.game_id}-${tr.draw_date}-${tr.draw_time}`,
+              });
+            }
+            saveServerTripleResults();
+          }
+
+          if (deleteTripleId && typeof deleteTripleId === "string") {
+            serverTripleResults = serverTripleResults.filter((r) => r.id !== deleteTripleId);
+            saveServerTripleResults();
+          }
+
           if (gameUpdate) {
             const { id, loading_mode, mode, schedule_times, color, name, is_active, logo_url } =
               gameUpdate;
@@ -517,6 +635,17 @@ export const Route = createFileRoute("/api/public/results/sync")({
             saveServerAnimalImages();
           }
 
+          if (deleteAnimalImage && typeof deleteAnimalImage === "object") {
+            mockStore.animal_images = mockStore.animal_images.filter(
+              (img) =>
+                !(
+                  img.game_id === deleteAnimalImage.game_id &&
+                  img.animal_number === deleteAnimalImage.animal_number
+                ),
+            );
+            saveServerAnimalImages();
+          }
+
           if (alert) {
             try {
               fs.writeFileSync(LATEST_ALERT_FILE, JSON.stringify(alert));
@@ -528,6 +657,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
           return Response.json({
             status: "ok",
             results: mockStore.results,
+            tripleResults: serverTripleResults,
             animalImages: mockStore.animal_images,
             games: mockStore.games,
             requireLicense: serverLicenseState.requireLicense,

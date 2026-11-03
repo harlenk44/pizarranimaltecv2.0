@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { supabase } from "@/lib/supabase";
 import { getEmojiForNumber } from "@/lib/animals";
 import type { Game, Result, GameWithResults, AnimalImage, AnimalEntry } from "@/lib/types";
@@ -7,7 +7,9 @@ import {
   LogOut,
   Settings,
   RefreshCw,
-  CalendarDays,
+  Hash,
+  PawPrint,
+  Repeat,
   Volume2,
   VolumeX,
   Sliders,
@@ -16,7 +18,8 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { useBoardSettings } from "@/context/BoardSettingsContext";
-import WeeklyBoard from "@/components/WeeklyBoard";
+import TriplesBoard from "@/components/TriplesBoard";
+import { TRIPLE_GAMES, buildTripleAlertItem, type TripleResult } from "@/lib/triples";
 import AdBanner, { AdTickerBar } from "@/components/AdBanner";
 import ResultAlertModal, { type ResultAlertItem } from "@/components/ResultAlertModal";
 import VoiceSettingsModal from "@/components/VoiceSettingsModal";
@@ -32,6 +35,35 @@ interface BoardPageProps {
 type AnimalImageMap = Record<string, string>;
 type AnimalNameMap = Record<string, string>;
 type AnimalLabelMap = Record<string, string>;
+
+function resolveAlertWithAnimalImage(
+  item: ResultAlertItem,
+  imgMap: AnimalImageMap,
+  gamesList: Game[],
+): ResultAlertItem {
+  if (item.id?.startsWith("triple-")) {
+    return item;
+  }
+  const gameObj = gamesList.find(
+    (g) =>
+      g.id === item.gameId ||
+      g.slug === item.gameId ||
+      (item.gameName && g.name.toLowerCase() === item.gameName.toLowerCase()),
+  );
+  const resolvedUrl =
+    imgMap[`${item.gameId}:${item.animalNumber}`] ??
+    (gameObj ? imgMap[`${gameObj.id}:${item.animalNumber}`] : undefined) ??
+    (gameObj ? imgMap[`${gameObj.slug}:${item.animalNumber}`] : undefined) ??
+    item.animalImageUrl ??
+    imgMap[`any:${item.animalNumber}`] ??
+    null;
+
+  return {
+    ...item,
+    animalImageUrl: resolvedUrl,
+    gameLogoUrl: item.gameLogoUrl ?? gameObj?.logo_url ?? null,
+  };
+}
 
 function formatTime(timeStr: string): string {
   const [h, m] = timeStr.split(":");
@@ -116,7 +148,28 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
   const [loading, setLoading] = useState(true);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [clock, setClock] = useState(new Date());
-  const [showWeekly, setShowWeekly] = useState(false);
+  const [showTriples, setShowTriples] = useState(false);
+  const [tripleResults, setTripleResults] = useState<TripleResult[]>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const raw = localStorage.getItem("pizarra_triple_results");
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) return parsed;
+        }
+      } catch {
+        // ignore
+      }
+    }
+    return [];
+  });
+  const [autoRotate, setAutoRotate] = useState<boolean>(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("pizarra_auto_rotate_views");
+      if (saved !== null) return saved === "true";
+    }
+    return false;
+  });
   const [showVoiceSettings, setShowVoiceSettings] = useState(false);
   const [alertQueue, setAlertQueue] = useState<ResultAlertItem[]>([]);
   const [voiceEnabled, setVoiceEnabled] = useState<boolean>(() => {
@@ -140,6 +193,10 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
   const pendingReloadRef = useRef(false);
   const alertQueueRef = useRef(alertQueue);
   alertQueueRef.current = alertQueue;
+  const animalImagesRef = useRef<AnimalImageMap>(animalImages);
+  animalImagesRef.current = animalImages;
+  const gamesRef = useRef<Game[]>(games);
+  gamesRef.current = games;
 
   useEffect(() => {
     reloadOnNewResultRef.current = preferences?.reloadOnNewResult ?? false;
@@ -177,7 +234,12 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     [preferences?.showAlertModal],
   );
 
-  const enqueueUniqueAlert = useCallback((item: ResultAlertItem): boolean => {
+  const enqueueUniqueAlert = useCallback((rawItem: ResultAlertItem): boolean => {
+    const item = resolveAlertWithAnimalImage(
+      rawItem,
+      animalImagesRef.current,
+      gamesRef.current,
+    );
     if (sorteoAlertTracker.hasBeenAlerted(item)) {
       return false;
     }
@@ -200,23 +262,33 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     }
   };
 
+  const handleAutoRotateToggle = () => {
+    setAutoRotate((prev) => {
+      const next = !prev;
+      if (typeof window !== "undefined") {
+        localStorage.setItem("pizarra_auto_rotate_views", String(next));
+      }
+      return next;
+    });
+  };
+
   useEffect(() => {
-    if (settings.start_view === "weekly") setShowWeekly(true);
+    if (settings.start_view === "weekly") setShowTriples(true);
   }, [settings.start_view]);
 
   // Pause rotation while alert modal is showing so it doesn't unmount prematurely
+  const isRotationActive = autoRotate || settings.rotation_enabled;
   useEffect(() => {
-    if (!settings.rotation_enabled || alertQueue.length > 0) return;
-    const timer = setInterval(
-      () => setShowWeekly((current) => !current),
-      settings.rotation_interval_seconds * 1000,
-    );
+    if (!isRotationActive || alertQueue.length > 0) return;
+    const intervalSec = Math.max(5, settings.rotation_interval_seconds || 25);
+    const timer = setInterval(() => setShowTriples((current) => !current), intervalSec * 1000);
     return () => clearInterval(timer);
-  }, [settings.rotation_enabled, settings.rotation_interval_seconds, alertQueue.length]);
+  }, [isRotationActive, settings.rotation_interval_seconds, alertQueue.length]);
 
   const fetchAll = useCallback(async () => {
     // 1. Sync from server backend to get latest results, alerts, and custom animal videos/images
     let serverSyncedResults: Result[] = [];
+    let serverSyncedTriples: TripleResult[] = [];
     try {
       const syncRes = await fetch("/api/public/results/sync");
       if (syncRes.ok) {
@@ -235,6 +307,17 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
             } catch {
               // ignore
             }
+          }
+        }
+
+        // Sync triples results from server into client state & localStorage
+        if (Array.isArray(syncData?.tripleResults)) {
+          serverSyncedTriples = syncData.tripleResults;
+          setTripleResults(syncData.tripleResults);
+          try {
+            localStorage.setItem("pizarra_triple_results", JSON.stringify(syncData.tripleResults));
+          } catch {
+            // ignore
           }
         }
 
@@ -303,13 +386,45 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
 
     const map: Record<string, Result[]> = {};
     const imgMap: AnimalImageMap = {};
-    for (const img of (imagesData.data ?? []) as AnimalImage[]) {
+    const loadedGames = gamesData as Game[];
+    const combinedImages: AnimalImage[] = [...((imagesData.data ?? []) as AnimalImage[])];
+
+    if (typeof window !== "undefined") {
+      try {
+        const localRaw = localStorage.getItem("pizarra_custom_animal_images");
+        if (localRaw) {
+          const localImgs = JSON.parse(localRaw) as AnimalImage[];
+          if (Array.isArray(localImgs)) {
+            for (const li of localImgs) {
+              if (
+                !combinedImages.some(
+                  (ci) => ci.game_id === li.game_id && ci.animal_number === li.animal_number,
+                )
+              ) {
+                combinedImages.push(li);
+              }
+            }
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    for (const img of combinedImages) {
+      if (!img?.image_url) continue;
       imgMap[`${img.game_id}:${img.animal_number}`] = img.image_url;
+      const matchedGame = loadedGames.find((g) => g.id === img.game_id || g.slug === img.game_id);
+      if (matchedGame) {
+        imgMap[`${matchedGame.id}:${img.animal_number}`] = img.image_url;
+        imgMap[`${matchedGame.slug}:${img.animal_number}`] = img.image_url;
+      }
       // Also provide a fallback for this animal across all games
       if (!imgMap[`any:${img.animal_number}`]) {
         imgMap[`any:${img.animal_number}`] = img.image_url;
       }
     }
+    animalImagesRef.current = imgMap;
     setAnimalImages(imgMap);
 
     const nameMap: AnimalNameMap = {};
@@ -370,6 +485,31 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     }
     setResultsMap(map);
 
+    // Check newly synced Triples results for real-time alert and voice announcements
+    const todaysTriples = serverSyncedTriples.filter((tr) => tr.draw_date === today);
+    for (const tr of todaysTriples) {
+      const tripleKey = `triple:${tr.game_id}:${tr.draw_date}:${tr.draw_time}`;
+      const sig = `${tr.triple_a}|${tr.triple_b ?? ""}|${tr.triple_c ?? ""}|${tr.zodiac_sign ?? ""}`;
+      const prevSig = prevSignaturesRef.current.get(tripleKey);
+
+      if (!isInitialLoadRef.current) {
+        if (prevSig === undefined || prevSig !== sig) {
+          const tripleGame = TRIPLE_GAMES.find((g) => g.id === tr.game_id);
+          if (tripleGame) {
+            const candidate = {
+              gameId: tripleGame.id,
+              drawDate: tr.draw_date,
+              drawTime: tr.draw_time,
+            };
+            if (!sorteoAlertTracker.hasBeenAlerted(candidate)) {
+              newAlerts.push(buildTripleAlertItem(tr, tripleGame));
+            }
+          }
+        }
+      }
+      prevSignaturesRef.current.set(tripleKey, sig);
+    }
+
     if (isInitialLoadRef.current) {
       // Mark all pre-existing draws loaded on startup as already alerted
       const existingItems: { gameId: string; drawDate: string; drawTime: string }[] = [];
@@ -381,6 +521,13 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
             drawTime: res.draw_time,
           });
         }
+      }
+      for (const tr of todaysTriples) {
+        existingItems.push({
+          gameId: tr.game_id,
+          drawDate: tr.draw_date,
+          drawTime: tr.draw_time,
+        });
       }
       sorteoAlertTracker.markMultipleAsAlerted(existingItems);
       isInitialLoadRef.current = false;
@@ -442,13 +589,35 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     const onStorage = (e: StorageEvent) => {
       if (e.key === "pizarra_pending_result_alerts") {
         checkPendingAlerts();
+      } else if (e.key === "pizarra_custom_animal_images") {
+        fetchAll();
       }
     };
     window.addEventListener("storage", onStorage);
 
+    // Subscribe to Supabase Realtime changes on animal_images & animal_entries
+    const realtimeChannel = supabase
+      .channel("board-animal-media-sync")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "animal_images" },
+        () => {
+          fetchAll();
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "animal_entries" },
+        () => {
+          fetchAll();
+        },
+      )
+      .subscribe();
+
     return () => {
       bc?.close();
       window.removeEventListener("storage", onStorage);
+      supabase.removeChannel(realtimeChannel);
     };
   }, [enqueueUniqueAlert, fetchAll, scheduleHardReload]);
 
@@ -460,6 +629,14 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         if (Array.isArray(data?.results)) {
           const { mockStore } = await import("@/lib/mock-db");
           mockStore.results = data.results;
+        }
+        if (Array.isArray(data?.tripleResults)) {
+          setTripleResults(data.tripleResults);
+          try {
+            localStorage.setItem("pizarra_triple_results", JSON.stringify(data.tripleResults));
+          } catch {
+            // ignore
+          }
         }
       }
     } catch {
@@ -556,22 +733,10 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     latest_results: resultsMap[g.id] ?? [],
   }));
 
-  if (showWeekly) {
-    return (
-      <>
-        <WeeklyBoard onClose={() => setShowWeekly(false)} />
-        {alertQueue.length > 0 && (preferences.showAlertModal ?? true) && (
-          <ResultAlertModal
-            alerts={alertQueue}
-            autoCloseSeconds={preferences.alertDurationSeconds ?? 20}
-            voiceEnabled={voiceEnabled}
-            onToggleVoice={handleVoiceToggle}
-            onClose={handleAlertModalClose}
-          />
-        )}
-      </>
-    );
-  }
+  const enrichedAlertQueue = useMemo(
+    () => alertQueue.map((item) => resolveAlertWithAnimalImage(item, animalImages, games)),
+    [alertQueue, animalImages, games],
+  );
 
   return (
     <div
@@ -595,7 +760,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
             className="text-xl sm:text-2xl lg:text-3xl font-black tracking-tight font-sans"
             style={{ color: settings.text_color || "#ffffff" }}
           >
-            Pizarra Animaltec
+            {showTriples ? "Pizarra Animaltec · Resultados de Triples" : "Pizarra Animaltec"}
           </h1>
         </div>
 
@@ -644,13 +809,52 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
             >
               {voiceEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
             </button>
+
+            {/* Switch between Animalitos and Resultados de Triples */}
             <button
-              onClick={() => setShowWeekly(true)}
-              className="p-2 rounded-lg bg-slate-900 border border-slate-800 hover:bg-slate-800 transition text-slate-300"
-              title="Pizarra semanal"
+              onClick={() => setShowTriples((prev) => !prev)}
+              className={`px-2.5 py-2 rounded-lg border transition flex items-center gap-1.5 text-xs font-bold cursor-pointer whitespace-nowrap shrink-0 ${
+                showTriples
+                  ? "bg-amber-500/20 border-amber-500/60 text-amber-300 hover:bg-amber-500/30"
+                  : "bg-slate-900 border-slate-800 text-slate-200 hover:bg-slate-800"
+              }`}
+              title={
+                showTriples
+                  ? "Cambiar a Pizarra de Animalitos"
+                  : "Ver ventana de Resultados de Triples"
+              }
             >
-              <CalendarDays className="w-4 h-4" />
+              {showTriples ? (
+                <>
+                  <PawPrint className="w-4 h-4 text-emerald-400" />
+                  <span className="hidden sm:inline">Animalitos</span>
+                </>
+              ) : (
+                <>
+                  <Hash className="w-4 h-4 text-amber-400" />
+                  <span className="hidden sm:inline">Resultados de Triples</span>
+                </>
+              )}
             </button>
+
+            {/* Auto-Rotation toggle between Animalitos and Triples */}
+            <button
+              onClick={handleAutoRotateToggle}
+              className={`p-2 rounded-lg border transition flex items-center gap-1 text-xs font-semibold cursor-pointer whitespace-nowrap shrink-0 ${
+                isRotationActive
+                  ? "bg-emerald-950/70 border-emerald-600/70 text-emerald-300 hover:bg-emerald-900/70"
+                  : "bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-800"
+              }`}
+              title={
+                isRotationActive
+                  ? "Rotación automática activa (Animalitos / Triples)"
+                  : "Activar rotación automática entre Animalitos y Triples"
+              }
+            >
+              <Repeat className="w-4 h-4" />
+              <span className="hidden xl:inline">Auto</span>
+            </button>
+
             <button
               onClick={handleManualRefresh}
               className="p-2 rounded-lg bg-slate-900 border border-slate-800 hover:bg-slate-800 transition text-slate-300"
@@ -694,7 +898,12 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           className="board-fluid-main w-3/4 flex-1 min-h-0 min-w-0 h-full overflow-hidden"
           style={{ backgroundColor: settings.background_color || "#000000" }}
         >
-          {loading ? (
+          {showTriples ? (
+            <TriplesBoard
+              results={tripleResults.filter((r) => r.draw_date === lotteryDate())}
+              loading={loading}
+            />
+          ) : loading ? (
             <div className="flex items-center justify-center h-full">
               <div className="animate-pulse text-slate-400 font-medium">Cargando resultados...</div>
             </div>
@@ -736,9 +945,9 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       </footer>
 
       {/* Real-time result announcement modal */}
-      {alertQueue.length > 0 && (preferences.showAlertModal ?? true) && (
+      {enrichedAlertQueue.length > 0 && (preferences.showAlertModal ?? true) && (
         <ResultAlertModal
-          alerts={alertQueue}
+          alerts={enrichedAlertQueue}
           autoCloseSeconds={preferences.alertDurationSeconds ?? 20}
           voiceEnabled={voiceEnabled}
           onToggleVoice={handleVoiceToggle}

@@ -61,9 +61,14 @@ function createSupabaseClient() {
     import.meta.env["VITE_SUPABASE_PUBLISHABLE_KEY"] || process.env["SUPABASE_PUBLISHABLE_KEY"];
   const SUPABASE_SERVICE_ROLE_KEY = process.env["SUPABASE_SERVICE_ROLE_KEY"];
 
-  // When no service role key is configured, the server operates on the self-contained mock database.
-  // The client must use the matching client to preserve sync, authentication and realtime board viewing.
-  if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY || !SUPABASE_SERVICE_ROLE_KEY) {
+  // Connect to external Supabase when a .supabase.co URL or service role key is configured;
+  // otherwise use the self-contained mock database for preview/test environments.
+  const isExternalSupabase = Boolean(
+    SUPABASE_URL &&
+      SUPABASE_PUBLISHABLE_KEY &&
+      (SUPABASE_URL.includes(".supabase.co") || Boolean(SUPABASE_SERVICE_ROLE_KEY)),
+  );
+  if (!isExternalSupabase) {
     return createMockSupabaseClient() as unknown as ReturnType<typeof createClient<Database>>;
   }
 

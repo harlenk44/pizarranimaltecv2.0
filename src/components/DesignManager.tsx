@@ -211,7 +211,7 @@ export default function DesignManager() {
                 <Timer className="w-4 h-4 text-amber-400" /> Rotación de Vistas
               </h4>
               <label className="flex items-center justify-between text-xs text-slate-300">
-                <span>Cambio automático entre Pizarra Diaria y Semanal</span>
+                <span>Cambio automático entre Pizarra de Animalitos y Triples</span>
                 <input
                   type="checkbox"
                   checked={draft.rotation_enabled ?? false}

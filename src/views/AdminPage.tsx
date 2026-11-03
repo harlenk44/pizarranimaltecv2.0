@@ -19,6 +19,7 @@ import type {
 import DesignManager from "@/components/DesignManager";
 import LicensesManager from "@/components/LicensesManager";
 import AdsStudioManager from "@/components/AdsStudioManager";
+import TriplesAdminManager from "@/components/TriplesAdminManager";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -61,6 +62,7 @@ import {
   RefreshCw,
   Video,
   KeyRound,
+  Hash,
 } from "lucide-react";
 import AnimalMedia, { isVideoMedia } from "@/components/AnimalMedia";
 import { mockStore } from "@/lib/mock-db";
@@ -92,7 +94,7 @@ interface AdminPageProps {
   onBack: () => void;
 }
 
-type Tab = "results" | "games" | "animals" | "ads" | "design" | "licenses";
+type Tab = "results" | "triples" | "games" | "animals" | "ads" | "design" | "licenses";
 
 export default function AdminPage({ onBack }: AdminPageProps) {
   const [tab, setTab] = useState<Tab>("results");
@@ -155,7 +157,17 @@ export default function AdminPage({ onBack }: AdminPageProps) {
               : "bg-slate-800 text-slate-400 hover:text-white"
           }`}
         >
-          Resultados
+          Resultados Animalitos
+        </button>
+        <button
+          onClick={() => setTab("triples")}
+          className={`px-4 py-2 rounded-lg text-sm font-medium transition flex items-center gap-2 ${
+            tab === "triples"
+              ? "bg-amber-600 text-white"
+              : "bg-slate-800 text-slate-400 hover:text-white"
+          }`}
+        >
+          <Hash className="w-4 h-4" /> Resultados de Triples
         </button>
         <button
           onClick={() => setTab("games")}
@@ -204,6 +216,8 @@ export default function AdminPage({ onBack }: AdminPageProps) {
           </div>
         ) : tab === "results" ? (
           <ResultsManager games={games} />
+        ) : tab === "triples" ? (
+          <TriplesAdminManager />
         ) : tab === "games" ? (
           <GamesManager games={games} onRefresh={fetchGames} />
         ) : tab === "animals" ? (
@@ -308,7 +322,19 @@ function ResultsManager({ games }: { games: Game[] }) {
 
         if (imgData?.image_url) {
           animalImageUrl = imgData.image_url;
-        } else {
+        } else if (gameObj?.slug) {
+          const { data: slugImgData } = await supabase
+            .from("animal_images")
+            .select("image_url")
+            .eq("game_id", gameObj.slug)
+            .eq("animal_number", animalNumber)
+            .maybeSingle();
+          if (slugImgData?.image_url) {
+            animalImageUrl = slugImgData.image_url;
+          }
+        }
+
+        if (!animalImageUrl) {
           const { data: anyImgData } = await supabase
             .from("animal_images")
             .select("image_url")
@@ -1431,30 +1457,58 @@ function AnimalsManager({ games }: { games: Game[] }) {
     if (!bulkUploading) setUploadingFor(animalNumber);
     try {
       let finalUrl = "";
+      let storageUrl = "";
+
+      // 1. Primary: Upload directly to Supabase Storage permanent bucket 'animal-images'
       try {
-        const formData = new FormData();
-        formData.append("file", file);
-        const res = await fetch("/api/media", {
-          method: "POST",
-          body: formData,
-        });
-        if (res.ok) {
-          const resData = await res.json();
-          if (resData.url) {
-            finalUrl = resData.url;
+        const rawExt = file.name.split(".").pop() ?? "png";
+        const ext = rawExt.toLowerCase().replace(/[^a-z0-9]/g, "") || "png";
+        const storagePath = `animals/${selectedGame}/animal-${animalNumber}-${Date.now()}.${ext}`;
+        const { error: upErr } = await supabase.storage
+          .from("animal-images")
+          .upload(storagePath, file, { upsert: true, cacheControl: "31536000" });
+        if (!upErr) {
+          storageUrl = await getMediaUrl("animal-images", storagePath);
+          if (storageUrl.startsWith("http://") || storageUrl.startsWith("https://")) {
+            finalUrl = storageUrl;
           }
         }
       } catch (err) {
-        console.warn("Upload to /api/media error, using dataUrl fallback:", err);
+        console.warn("Supabase Storage upload warning, trying /api/media fallback:", err);
       }
 
+      // 2. Secondary: If not an external HTTP(S) Supabase Storage URL, upload to /api/media
       if (!finalUrl) {
-        finalUrl = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result as string);
-          reader.onerror = reject;
-          reader.readAsDataURL(file);
-        });
+        try {
+          const formData = new FormData();
+          formData.append("file", file);
+          const res = await fetch("/api/media", {
+            method: "POST",
+            body: formData,
+          });
+          if (res.ok) {
+            const resData = await res.json();
+            if (resData.url) {
+              finalUrl = resData.url;
+            }
+          }
+        } catch (err) {
+          console.warn("Upload to /api/media error, using dataUrl fallback:", err);
+        }
+      }
+
+      // 3. Fallback: Use storageUrl (data: URL from mock storage) or FileReader DataURL
+      if (!finalUrl) {
+        if (storageUrl.startsWith("data:")) {
+          finalUrl = storageUrl;
+        } else {
+          finalUrl = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+          });
+        }
       }
 
       await supabase.from("animal_images").upsert(
@@ -1465,6 +1519,31 @@ function AnimalsManager({ games }: { games: Game[] }) {
         },
         { onConflict: "game_id,animal_number" },
       );
+
+      // Persist in localStorage cache as well
+      if (typeof window !== "undefined") {
+        try {
+          const raw = localStorage.getItem("pizarra_custom_animal_images");
+          const list: AnimalImage[] = raw ? JSON.parse(raw) : [];
+          const idx = list.findIndex(
+            (img) => img.game_id === selectedGame && img.animal_number === animalNumber,
+          );
+          const updatedEntry: AnimalImage = {
+            id: `img-${selectedGame}-${animalNumber}`,
+            game_id: selectedGame,
+            animal_number: animalNumber,
+            image_url: finalUrl,
+          };
+          if (idx >= 0) {
+            list[idx] = updatedEntry;
+          } else {
+            list.push(updatedEntry);
+          }
+          localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(list));
+        } catch {
+          // ignore
+        }
+      }
 
       // Sync to server disk storage so all TVs and devices have it
       try {
@@ -1511,6 +1590,30 @@ function AnimalsManager({ games }: { games: Game[] }) {
       { onConflict: "game_id,animal_number" },
     );
 
+    if (typeof window !== "undefined") {
+      try {
+        const raw = localStorage.getItem("pizarra_custom_animal_images");
+        const list: AnimalImage[] = raw ? JSON.parse(raw) : [];
+        const idx = list.findIndex(
+          (img) => img.game_id === selectedGame && img.animal_number === animalNumber,
+        );
+        const updatedEntry: AnimalImage = {
+          id: `img-${selectedGame}-${animalNumber}`,
+          game_id: selectedGame,
+          animal_number: animalNumber,
+          image_url: finalUrl,
+        };
+        if (idx >= 0) {
+          list[idx] = updatedEntry;
+        } else {
+          list.push(updatedEntry);
+        }
+        localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(list));
+      } catch {
+        // ignore
+      }
+    }
+
     try {
       await fetch("/api/public/results/sync", {
         method: "PUT",
@@ -1540,14 +1643,57 @@ function AnimalsManager({ games }: { games: Game[] }) {
 
   async function handleDeleteImage(animalNumber: number) {
     if (!selectedGame) return;
-    const ext = "png";
-    const fileName = `${selectedGame}/animal-${animalNumber}.${ext}`;
-    await supabase.storage.from("animal-images").remove([fileName]);
+    const currentUrl = images[animalNumber];
+    const pathsToRemove = [`${selectedGame}/animal-${animalNumber}.png`];
+    if (currentUrl && currentUrl.includes("/animal-images/")) {
+      const extracted = currentUrl.split("/animal-images/")[1]?.split("?")[0];
+      if (extracted) pathsToRemove.push(extracted);
+    }
+    await supabase.storage.from("animal-images").remove(pathsToRemove);
     await supabase
       .from("animal_images")
       .delete()
       .eq("game_id", selectedGame)
       .eq("animal_number", animalNumber);
+
+    if (typeof window !== "undefined") {
+      try {
+        const raw = localStorage.getItem("pizarra_custom_animal_images");
+        if (raw) {
+          const list: AnimalImage[] = JSON.parse(raw);
+          const filtered = list.filter(
+            (img) => !(img.game_id === selectedGame && img.animal_number === animalNumber),
+          );
+          localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(filtered));
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    try {
+      await fetch("/api/public/results/sync", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          deleteAnimalImage: {
+            game_id: selectedGame,
+            animal_number: animalNumber,
+          },
+        }),
+      });
+      const bc = new BroadcastChannel("pizarra_lottery_channel");
+      bc.postMessage({
+        type: "ANIMAL_MEDIA_UPDATED",
+        gameId: selectedGame,
+        animalNumber,
+        imageUrl: null,
+      });
+      setTimeout(() => bc.close(), 1000);
+    } catch {
+      // ignore
+    }
+
     setImages((prev) => {
       const next = { ...prev };
       delete next[animalNumber];
