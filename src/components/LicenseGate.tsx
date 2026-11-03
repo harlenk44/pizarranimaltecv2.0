@@ -151,7 +151,9 @@ export default function LicenseGate({
     : false;
 
   const isMasterPin = activatedPin.trim() === "291007";
-  const isAuthorized = Boolean(isMasterPin || (matchedLicense && !isExpired && !isPaused && isDeviceAllowed));
+  const isAuthorized = Boolean(
+    isMasterPin || (matchedLicense && !isExpired && !isPaused && isDeviceAllowed),
+  );
 
   // If device has a valid saved PIN but isn't listed in bound_device_ids yet, register it automatically
   useEffect(() => {

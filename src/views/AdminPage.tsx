@@ -19,6 +19,7 @@ import type {
 import DesignManager from "@/components/DesignManager";
 import LicensesManager from "@/components/LicensesManager";
 import AdsStudioManager from "@/components/AdsStudioManager";
+import { deleteAdFromStore } from "@/lib/ads-service";
 import TriplesAdminManager from "@/components/TriplesAdminManager";
 import { Button } from "@/components/ui/button";
 import {
@@ -2162,7 +2163,19 @@ function AdsManager() {
   }
 
   async function handleDelete(ad: Ad) {
-    await supabase.from("ads").delete().eq("id", ad.id);
+    const { error: supaErr } = await supabase.from("ads").delete().eq("id", ad.id);
+    if (supaErr) {
+      console.error("Error al eliminar anuncio en Supabase:", supaErr);
+      setError(supaErr.message);
+      return;
+    }
+    if (ad.image_url && ad.image_url.includes("/ads/")) {
+      const storagePath = ad.image_url.split("/ads/")[1]?.split("?")[0] || "";
+      if (storagePath) {
+        await supabase.storage.from("ads").remove([storagePath]);
+      }
+    }
+    await deleteAdFromStore(ad);
     fetchAds();
   }
 

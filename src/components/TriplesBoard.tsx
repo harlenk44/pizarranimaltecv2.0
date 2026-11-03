@@ -21,7 +21,10 @@ function formatTime(timeStr: string): string {
   return `${displayHour}:${m || "00"} ${ampm}`;
 }
 
-function findTripleForTimeSlot(results: TripleResult[], timeSlot: string): TripleResult | undefined {
+function findTripleForTimeSlot(
+  results: TripleResult[],
+  timeSlot: string,
+): TripleResult | undefined {
   const normSlot = timeSlot.substring(0, 5).replace(/^0/, "");
   return results.find((r) => {
     const rShort = r.draw_time.substring(0, 5).replace(/^0/, "");
@@ -62,12 +65,7 @@ export default function TriplesBoard({ results, loading = false }: TriplesBoardP
           .sort((a, b) => a.draw_time.localeCompare(b.draw_time));
 
         return (
-          <TripleGameCard
-            key={game.id}
-            game={game}
-            results={gameResults}
-            settings={settings}
-          />
+          <TripleGameCard key={game.id} game={game} results={gameResults} settings={settings} />
         );
       })}
     </div>

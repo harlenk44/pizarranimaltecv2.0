@@ -237,10 +237,7 @@ async function triggerBackgroundSync(forceWait = false) {
     const hadPriorTriples = serverTripleResults.length > 0;
 
     const [{ synchronizeAutomaticResults }, { synchronizeAutomaticTriplesResults }] =
-      await Promise.all([
-        import("@/lib/result-sync.server"),
-        import("@/lib/triples-sync.server"),
-      ]);
+      await Promise.all([import("@/lib/result-sync.server"), import("@/lib/triples-sync.server")]);
 
     const [reports, triplesSync] = await Promise.all([
       synchronizeAutomaticResults(),
@@ -513,37 +510,37 @@ export const Route = createFileRoute("/api/public/results/sync")({
                     valid: false,
                     reason: "Código PIN inválido. Verifique los 6 dígitos con su proveedor.",
                   };
-              } else if (match.status === "paused") {
-                licenseActivation = {
-                  valid: false,
-                  reason: "Esta licencia se encuentra suspendida temporalmente.",
-                };
-              } else if (match.expires_at && new Date(match.expires_at) < new Date()) {
-                licenseActivation = {
-                  valid: false,
-                  reason: "Su suscripción ha vencido. Contacte al administrador para renovar.",
-                };
-              } else {
-                const alreadyBound = match.bound_device_ids.includes(devId);
-                if (!alreadyBound && match.bound_device_ids.length >= (match.max_devices || 1)) {
+                } else if (match.status === "paused") {
                   licenseActivation = {
                     valid: false,
-                    reason: `Este PIN ya está en uso en el máximo de pantallas permitidas (${match.max_devices}). Solicite liberar la pantalla anterior.`,
+                    reason: "Esta licencia se encuentra suspendida temporalmente.",
+                  };
+                } else if (match.expires_at && new Date(match.expires_at) < new Date()) {
+                  licenseActivation = {
+                    valid: false,
+                    reason: "Su suscripción ha vencido. Contacte al administrador para renovar.",
                   };
                 } else {
-                  if (!alreadyBound) {
-                    match.bound_device_ids.push(devId);
-                    saveServerLicenses();
+                  const alreadyBound = match.bound_device_ids.includes(devId);
+                  if (!alreadyBound && match.bound_device_ids.length >= (match.max_devices || 1)) {
+                    licenseActivation = {
+                      valid: false,
+                      reason: `Este PIN ya está en uso en el máximo de pantallas permitidas (${match.max_devices}). Solicite liberar la pantalla anterior.`,
+                    };
+                  } else {
+                    if (!alreadyBound) {
+                      match.bound_device_ids.push(devId);
+                      saveServerLicenses();
+                    }
+                    licenseActivation = {
+                      valid: true,
+                      license: match,
+                    };
                   }
-                  licenseActivation = {
-                    valid: true,
-                    license: match,
-                  };
                 }
               }
             }
           }
-        }
 
           if (result) {
             const conflictIndex = mockStore.results.findIndex(

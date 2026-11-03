@@ -168,7 +168,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       const saved = localStorage.getItem("pizarra_auto_rotate_views");
       if (saved !== null) return saved === "true";
     }
-    return false;
+    return true;
   });
   const [showVoiceSettings, setShowVoiceSettings] = useState(false);
   const [alertQueue, setAlertQueue] = useState<ResultAlertItem[]>([]);
@@ -235,11 +235,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
   );
 
   const enqueueUniqueAlert = useCallback((rawItem: ResultAlertItem): boolean => {
-    const item = resolveAlertWithAnimalImage(
-      rawItem,
-      animalImagesRef.current,
-      gamesRef.current,
-    );
+    const item = resolveAlertWithAnimalImage(rawItem, animalImagesRef.current, gamesRef.current);
     if (sorteoAlertTracker.hasBeenAlerted(item)) {
       return false;
     }
@@ -598,20 +594,12 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     // Subscribe to Supabase Realtime changes on animal_images & animal_entries
     const realtimeChannel = supabase
       .channel("board-animal-media-sync")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "animal_images" },
-        () => {
-          fetchAll();
-        },
-      )
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "animal_entries" },
-        () => {
-          fetchAll();
-        },
-      )
+      .on("postgres_changes", { event: "*", schema: "public", table: "animal_images" }, () => {
+        fetchAll();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "animal_entries" }, () => {
+        fetchAll();
+      })
       .subscribe();
 
     return () => {

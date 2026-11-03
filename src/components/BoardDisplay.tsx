@@ -101,26 +101,26 @@ function DisplayShell({ children }: { children: ReactNode }) {
         {controls && (
           <section
             id="display-controls"
-            className="display-controls bg-slate-900/95 text-slate-100 border border-slate-700/80 rounded-2xl shadow-2xl p-5 space-y-4 backdrop-blur-md"
+            className="display-controls bg-slate-900/95 text-slate-100 border border-slate-700/80 rounded-2xl shadow-2xl p-3.5 space-y-2 backdrop-blur-md"
             aria-label="Tamaños de la pizarra"
           >
-            <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
-              <h2 className="font-bold text-sm text-white flex items-center gap-2">
-                <SlidersHorizontal className="w-4 h-4 text-blue-400" /> Ajustes de Tamaño
+            <div className="sticky -top-3.5 -mx-3.5 px-3.5 py-2 -mt-3.5 mb-1 bg-slate-900 border-b border-slate-800/90 flex items-center justify-between z-10 rounded-t-2xl">
+              <h2 className="font-bold text-xs sm:text-sm text-white flex items-center gap-1.5">
+                <SlidersHorizontal className="w-3.5 h-3.5 text-blue-400" /> Ajustes de Tamaño
               </h2>
               <Button
                 variant="ghost"
                 size="icon"
                 aria-label="Cerrar ajustes"
                 onClick={() => setControls(false)}
-                className="h-7 w-7 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white"
+                className="h-6 w-6 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white"
               >
-                <X className="w-4 h-4" />
+                <X className="w-3.5 h-3.5" />
               </Button>
             </div>
 
             {/* 1. Tamaño de Logos */}
-            <div className="space-y-1.5">
+            <div className="space-y-1">
               <label
                 className="flex items-center justify-between text-xs font-semibold text-slate-200"
                 htmlFor="logo-size"
@@ -138,12 +138,12 @@ function DisplayShell({ children }: { children: ReactNode }) {
                 step="2"
                 value={logoSize}
                 onChange={(e) => updatePreferenceAndSetting({ logoSize: Number(e.target.value) })}
-                className="block w-full accent-blue-500 cursor-pointer h-2 bg-slate-950 rounded-lg border border-slate-800"
+                className="block w-full accent-blue-500 cursor-pointer h-1.5 bg-slate-950 rounded-lg border border-slate-800"
               />
             </div>
 
             {/* 2. Tamaño de las Letras (Texto) */}
-            <div className="space-y-1.5">
+            <div className="space-y-1">
               <label
                 className="flex items-center justify-between text-xs font-semibold text-slate-200"
                 htmlFor="font-size"
@@ -163,12 +163,12 @@ function DisplayShell({ children }: { children: ReactNode }) {
                 onChange={(e) =>
                   updatePreferenceAndSetting({ fontSizeScale: Number(e.target.value) })
                 }
-                className="block w-full accent-emerald-500 cursor-pointer h-2 bg-slate-950 rounded-lg border border-slate-800"
+                className="block w-full accent-emerald-500 cursor-pointer h-1.5 bg-slate-950 rounded-lg border border-slate-800"
               />
             </div>
 
             {/* 3. Cuadro del Último Resultado */}
-            <div className="space-y-1.5">
+            <div className="space-y-1">
               <label
                 className="flex items-center justify-between text-xs font-semibold text-slate-200"
                 htmlFor="hero-size"
@@ -188,12 +188,12 @@ function DisplayShell({ children }: { children: ReactNode }) {
                 onChange={(e) =>
                   updatePreferenceAndSetting({ heroCardScale: Number(e.target.value) })
                 }
-                className="block w-full accent-amber-500 cursor-pointer h-2 bg-slate-950 rounded-lg border border-slate-800"
+                className="block w-full accent-amber-500 cursor-pointer h-1.5 bg-slate-950 rounded-lg border border-slate-800"
               />
             </div>
 
             {/* 4. Tamaño de la Imagen del Animal */}
-            <div className="space-y-1.5">
+            <div className="space-y-1">
               <label
                 className="flex items-center justify-between text-xs font-semibold text-slate-200"
                 htmlFor="animal-size"
@@ -213,33 +213,12 @@ function DisplayShell({ children }: { children: ReactNode }) {
                 onChange={(e) =>
                   updatePreferenceAndSetting({ animalScale: Number(e.target.value) })
                 }
-                className="block w-full accent-purple-500 cursor-pointer h-2 bg-slate-950 rounded-lg border border-slate-800"
+                className="block w-full accent-purple-500 cursor-pointer h-1.5 bg-slate-950 rounded-lg border border-slate-800"
               />
             </div>
 
-            {/* 5. Escala General de Tarjetas */}
-            <div className="space-y-1.5 pt-2 border-t border-slate-800">
-              <label
-                className="flex items-center justify-between text-xs font-medium text-slate-400"
-                htmlFor="result-scale"
-              >
-                <span>Escala General de Tarjetas</span>
-                <output className="font-mono text-slate-400">{preferences.resultScale}%</output>
-              </label>
-              <input
-                id="result-scale"
-                type="range"
-                min="75"
-                max="250"
-                step="5"
-                value={preferences.resultScale}
-                onChange={(e) => update({ resultScale: Number(e.target.value) })}
-                className="block w-full accent-slate-500 cursor-pointer h-1.5 bg-slate-950 rounded-lg border border-slate-800"
-              />
-            </div>
-
-            {/* 6. Duración de la ventana de resultado */}
-            <div className="space-y-1.5 pt-2 border-t border-slate-800">
+            {/* 5. Duración de la ventana de resultado */}
+            <div className="space-y-1 pt-1.5 border-t border-slate-800">
               <label
                 className="flex items-center justify-between text-xs font-semibold text-slate-200"
                 htmlFor="alert-duration"
@@ -259,15 +238,15 @@ function DisplayShell({ children }: { children: ReactNode }) {
                 step="1"
                 value={preferences.alertDurationSeconds ?? 20}
                 onChange={(e) => update({ alertDurationSeconds: Number(e.target.value) })}
-                className="block w-full accent-yellow-500 cursor-pointer h-2 bg-slate-950 rounded-lg border border-slate-800"
+                className="block w-full accent-yellow-500 cursor-pointer h-1.5 bg-slate-950 rounded-lg border border-slate-800"
               />
-              <div className="flex items-center gap-1.5 pt-1">
+              <div className="flex items-center gap-1 pt-0.5">
                 {[8, 12, 16, 20, 30].map((sec) => (
                   <button
                     key={sec}
                     type="button"
                     onClick={() => update({ alertDurationSeconds: sec })}
-                    className={`flex-1 py-1 rounded text-[11px] font-mono font-semibold tabular-nums transition border ${
+                    className={`flex-1 py-0.5 rounded text-[10px] font-mono font-semibold tabular-nums transition border ${
                       (preferences.alertDurationSeconds ?? 20) === sec
                         ? "bg-yellow-500/20 text-yellow-300 border-yellow-500/50 shadow-sm"
                         : "bg-slate-950 text-slate-400 border-slate-800 hover:bg-slate-800 hover:text-slate-200"
@@ -277,14 +256,14 @@ function DisplayShell({ children }: { children: ReactNode }) {
                   </button>
                 ))}
               </div>
-              <p className="text-[10px] text-slate-400">
+              <p className="text-[9.5px] leading-tight text-slate-400">
                 Tiempo que se muestra el cuadro con el animal ganador antes de volver
                 automáticamente a la pizarra total (por defecto 20 segundos).
               </p>
             </div>
 
-            {/* 7. Activar/Desactivar ventana emergente */}
-            <div className="pt-2 border-t border-slate-800 space-y-1">
+            {/* 6. Activar/Desactivar ventana emergente */}
+            <div className="pt-1.5 border-t border-slate-800 space-y-0.5">
               <label
                 className="flex items-center justify-between text-xs font-semibold text-slate-200 cursor-pointer select-none"
                 htmlFor="show-alert-modal"
@@ -298,17 +277,17 @@ function DisplayShell({ children }: { children: ReactNode }) {
                   type="checkbox"
                   checked={preferences.showAlertModal ?? true}
                   onChange={(e) => update({ showAlertModal: e.target.checked })}
-                  className="w-4 h-4 accent-emerald-500 rounded cursor-pointer"
+                  className="w-3.5 h-3.5 accent-emerald-500 rounded cursor-pointer"
                 />
               </label>
-              <p className="text-[10px] text-slate-400">
+              <p className="text-[9.5px] leading-tight text-slate-400">
                 Si la desactivas, la pizarra se actualizará en vivo directamente sin mostrar la
                 ventana grande por encima.
               </p>
             </div>
 
-            {/* 8. Opción de recarga completa al llegar resultado */}
-            <div className="pt-2 border-t border-slate-800 space-y-1">
+            {/* 7. Opción de recarga completa al llegar resultado */}
+            <div className="pt-1.5 border-t border-slate-800 space-y-0.5">
               <label
                 className="flex items-center justify-between text-xs font-semibold text-slate-200 cursor-pointer select-none"
                 htmlFor="reload-on-new-result"
@@ -322,17 +301,17 @@ function DisplayShell({ children }: { children: ReactNode }) {
                   type="checkbox"
                   checked={preferences.reloadOnNewResult ?? false}
                   onChange={(e) => update({ reloadOnNewResult: e.target.checked })}
-                  className="w-4 h-4 accent-cyan-500 rounded cursor-pointer"
+                  className="w-3.5 h-3.5 accent-cyan-500 rounded cursor-pointer"
                 />
               </label>
-              <p className="text-[10px] text-slate-400">
+              <p className="text-[9.5px] leading-tight text-slate-400">
                 La pizarra siempre se actualiza de inmediato en vivo. Si activas esta casilla,
                 además recargará toda la página al detectar cada sorteo nuevo.
               </p>
             </div>
 
             {storageError && (
-              <p role="status" className="mt-2 text-xs text-amber-400">
+              <p role="status" className="mt-1 text-[10px] text-amber-400">
                 Este navegador no permite guardar los tamaños.
               </p>
             )}

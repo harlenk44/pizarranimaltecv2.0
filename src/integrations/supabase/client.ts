@@ -65,8 +65,8 @@ function createSupabaseClient() {
   // otherwise use the self-contained mock database for preview/test environments.
   const isExternalSupabase = Boolean(
     SUPABASE_URL &&
-      SUPABASE_PUBLISHABLE_KEY &&
-      (SUPABASE_URL.includes(".supabase.co") || Boolean(SUPABASE_SERVICE_ROLE_KEY)),
+    SUPABASE_PUBLISHABLE_KEY &&
+    (SUPABASE_URL.includes(".supabase.co") || Boolean(SUPABASE_SERVICE_ROLE_KEY)),
   );
   if (!isExternalSupabase) {
     return createMockSupabaseClient() as unknown as ReturnType<typeof createClient<Database>>;

@@ -22,18 +22,31 @@ function readAdsStore() {
     try {
       if (fs.existsSync(file)) {
         const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
-        if (parsed && Array.isArray(parsed.ads) && parsed.ads.length > 0) {
-          return parsed;
+        if (parsed && typeof parsed === "object" && Array.isArray(parsed.ads)) {
+          return {
+            ads: parsed.ads,
+            ticker:
+              parsed.ticker && typeof parsed.ticker === "object"
+                ? {
+                    enabled: Boolean(parsed.ticker.enabled),
+                    text:
+                      parsed.ticker.text ??
+                      "¡Bienvenidos! Consulta los resultados de animalitos en vivo · Pagos al instante",
+                    bgColor: parsed.ticker.bgColor ?? "#1e3a8a",
+                    textColor: parsed.ticker.textColor ?? "#ffffff",
+                    speedSeconds: Number(parsed.ticker.speedSeconds) || 25,
+                    carouselIntervalSeconds: Number(parsed.ticker.carouselIntervalSeconds) || 8,
+                  }
+                : {
+                    enabled: false,
+                    text: "¡Bienvenidos! Consulta los resultados de animalitos en vivo · Pagos al instante",
+                    bgColor: "#1e3a8a",
+                    textColor: "#ffffff",
+                    speedSeconds: 25,
+                    carouselIntervalSeconds: 8,
+                  },
+          };
         }
-      }
-    } catch {
-      // ignore
-    }
-  }
-  for (const file of [TMP_ADS_STORE_FILE, WORKSPACE_ADS_STORE_FILE]) {
-    try {
-      if (fs.existsSync(file)) {
-        return JSON.parse(fs.readFileSync(file, "utf-8"));
       }
     } catch {
       // ignore

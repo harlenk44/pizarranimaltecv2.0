@@ -197,10 +197,7 @@ export function formatTripleSummary(res: TripleResult): string {
   return parts.join(" · ");
 }
 
-export function buildTripleAlertItem(
-  res: TripleResult,
-  game?: TripleGameConfig,
-): ResultAlertItem {
+export function buildTripleAlertItem(res: TripleResult, game?: TripleGameConfig): ResultAlertItem {
   const resolvedGame =
     game ?? TRIPLE_GAMES.find((g) => g.id === res.game_id || g.slug === res.game_slug);
   const parsedNum = parseInt(res.triple_a.replace(/\D/g, ""), 10);

@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import type { Ad, AdPlacement, AdMediaType } from "@/lib/types";
+import { supabase } from "@/lib/supabase";
 import {
   fetchAdsStore,
   persistAdsStore,
+  deleteAdFromStore,
   uploadAdMediaFile,
   DEFAULT_AD_TICKER,
   type AdTickerConfig,
@@ -169,10 +171,45 @@ export default function AdsStudioManager() {
   }
 
   async function handleDelete(ad: Ad) {
-    const nextAds = ads.filter((item) => item.id !== ad.id);
-    const updated = await persistAdsStore({ ads: nextAds });
-    setAds(updated.ads);
-    notify("Anuncio eliminado");
+    setSaving(true);
+    setError(null);
+    try {
+      // 1. Borrado real y persistente en Supabase (y Storage si aplica) ANTES de dar por completada la acción
+      const { error: supaError } = await supabase.from("ads").delete().eq("id", ad.id);
+      if (supaError) {
+        console.error("Error al eliminar anuncio en Supabase:", supaError);
+        setError("Error al eliminar el anuncio en la base de datos: " + supaError.message);
+        return;
+      }
+
+      // 2. Limpieza de archivo en Supabase Storage si corresponde
+      if (ad.image_url) {
+        try {
+          let storagePath = "";
+          if (ad.image_url.includes("/ads/")) {
+            storagePath = ad.image_url.split("/ads/")[1]?.split("?")[0] || "";
+          } else if (!ad.image_url.startsWith("http") && !ad.image_url.startsWith("data:")) {
+            storagePath = ad.image_url;
+          }
+          if (storagePath) {
+            await supabase.storage.from("ads").remove([storagePath]);
+          }
+        } catch (stErr) {
+          console.warn("Advertencia al eliminar archivo de storage:", stErr);
+        }
+      }
+
+      // 3. Limpieza inmediata de localStorage, caché y notificación en tiempo real
+      const updated = await deleteAdFromStore(ad);
+      setAds(updated.ads);
+      notify("Anuncio eliminado permanentemente");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Error al eliminar el anuncio";
+      console.error("Error al eliminar anuncio:", err);
+      setError(msg);
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function handleReorder(ad: Ad, direction: "up" | "down") {

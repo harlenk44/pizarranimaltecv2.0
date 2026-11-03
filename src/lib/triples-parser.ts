@@ -121,9 +121,9 @@ export function parseTuazarTriplesHtml(html: string, drawDate: string): TripleRe
 
     const rowBlocks = sec.split(/<div\s+class=["']lc-row["']/i).slice(1);
     for (const rb of rowBlocks) {
-      const cells = [...rb.matchAll(/<div\s+class=["']lc-cell[^"']*["'][^>]*>([\s\S]*?)<\/div>/gi)].map(
-        (m) => (m[1] ?? "").replace(/<[^>]+>/g, "").trim(),
-      );
+      const cells = [
+        ...rb.matchAll(/<div\s+class=["']lc-cell[^"']*["'][^>]*>([\s\S]*?)<\/div>/gi),
+      ].map((m) => (m[1] ?? "").replace(/<[^>]+>/g, "").trim());
       if (cells.length < 2) continue;
 
       const normHr = normalizeHour(cells[0] ?? "");
@@ -161,7 +161,9 @@ export function parseTuazarTriplesHtml(html: string, drawDate: string): TripleRe
  */
 export function parseLoteriaDeHoyTriplesHtml(html: string, drawDate: string): TripleResult[] {
   const results: TripleResult[] = [];
-  const tables = [...html.matchAll(/<table[^>]*class=["'][^"']*resultados[^"']*["'][\s\S]*?<\/table>/gi)];
+  const tables = [
+    ...html.matchAll(/<table[^>]*class=["'][^"']*resultados[^"']*["'][\s\S]*?<\/table>/gi),
+  ];
 
   for (const tMatch of tables) {
     const tableHtml = tMatch[0] ?? "";

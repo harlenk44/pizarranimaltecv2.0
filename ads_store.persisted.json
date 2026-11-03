@@ -1,0 +1,11 @@
+{
+  "ads": [],
+  "ticker": {
+    "enabled": false,
+    "text": "¡Bienvenidos! Consulta los resultados de animalitos en vivo · Pagos al instante",
+    "bgColor": "#1e3a8a",
+    "textColor": "#ffffff",
+    "speedSeconds": 25,
+    "carouselIntervalSeconds": 8
+  }
+}

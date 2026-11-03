@@ -947,6 +947,13 @@ function createMockQueryBuilder(table: string) {
           // ignore
         }
       }
+      if (table === "ads" && typeof window !== "undefined") {
+        try {
+          localStorage.setItem("pizarra_persisted_ads_v1", JSON.stringify(storeList));
+        } catch {
+          // ignore
+        }
+      }
 
       return Promise.resolve({ data: rowOrRows, error: null });
     },
@@ -968,6 +975,15 @@ function createMockQueryBuilder(table: string) {
       if (isDelete) {
         const remaining = storeList.filter((item) => !filters.every((f) => f(item)));
         (mockStore as unknown as Record<string, unknown[]>)[table] = remaining;
+        if (table === "ads" && typeof window !== "undefined") {
+          try {
+            localStorage.setItem("pizarra_persisted_ads_v1", JSON.stringify(remaining));
+            localStorage.removeItem("pizarra_persisted_ads");
+            localStorage.removeItem("pizarra_ads");
+          } catch {
+            // ignore
+          }
+        }
         if (table === "games" && typeof window !== "undefined") {
           try {
             localStorage.setItem(GAMES_STORAGE_KEY, JSON.stringify(remaining));

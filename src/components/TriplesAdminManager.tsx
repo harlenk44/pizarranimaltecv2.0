@@ -30,7 +30,9 @@ export default function TriplesAdminManager() {
   const [feedback, setFeedback] = useState<string | null>(null);
 
   const [selectedDate, setSelectedDate] = useState<string>(() => lotteryDate());
-  const [selectedGameId, setSelectedGameId] = useState<string>(TRIPLE_GAMES[0]?.id ?? "triple-facil");
+  const [selectedGameId, setSelectedGameId] = useState<string>(
+    TRIPLE_GAMES[0]?.id ?? "triple-facil",
+  );
   const selectedGame = TRIPLE_GAMES.find((g) => g.id === selectedGameId) ?? TRIPLE_GAMES[0]!;
 
   const [drawTime, setDrawTime] = useState<string>(selectedGame.schedule_times[0] ?? "08:00:00");
@@ -456,7 +458,9 @@ export default function TriplesAdminManager() {
 
                         <div className="flex items-center gap-3 font-mono font-bold">
                           <span style={{ color: game.color }}>A: {row.triple_a}</span>
-                          {row.triple_b && <span className="text-slate-200">B: {row.triple_b}</span>}
+                          {row.triple_b && (
+                            <span className="text-slate-200">B: {row.triple_b}</span>
+                          )}
                           {(row.triple_c || row.zodiac_sign) && (
                             <span className="text-amber-300">
                               {row.triple_c ? `C: ${row.triple_c} ` : ""}

@@ -27,7 +27,8 @@ describe("Animal image storage and persistence", () => {
 
   it("persists per-product animal_images rows via upsert on game_id and animal_number", async () => {
     const gameId = "7d21a00b-0dfa-4bdc-9edf-8115802df1d6";
-    const customUrl = "https://example.supabase.co/storage/v1/object/public/animal-images/animals/lotto/12.png";
+    const customUrl =
+      "https://example.supabase.co/storage/v1/object/public/animal-images/animals/lotto/12.png";
 
     const { error: upsertErr } = await supabase.from("animal_images").upsert(
       {
