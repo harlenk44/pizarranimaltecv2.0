@@ -29,6 +29,13 @@
       "when": 1792986243820,
       "tag": "0003_dual_result_loading",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1793000000000,
+      "tag": "0004_client_licenses",
+      "breakpoints": true
     }
   ]
 }

@@ -8,13 +8,16 @@ import {
   normalizeScheduleTime,
 } from "@/lib/game-schedules";
 import fs from "fs";
+import path from "path";
+import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
 const RESULTS_FILE = "/tmp/lottery_results.json";
 const TRIPLE_RESULTS_FILE = "/tmp/lottery_triples_results.json";
 const LATEST_ALERT_FILE = "/tmp/lottery_latest_alert.json";
 const ANIMAL_IMAGES_FILE = "/tmp/lottery_animal_images.json";
 const GAMES_FILE = "/tmp/lottery_games.json";
-const CLIENT_LICENSES_FILE = "/tmp/lottery_client_licenses_v2.json";
+const TMP_CLIENT_LICENSES_FILE = "/tmp/lottery_client_licenses_v2.json";
+const WORKSPACE_CLIENT_LICENSES_FILE = path.join(process.cwd(), "client_licenses.persisted.json");
 
 let serverTripleResults: TripleResult[] = [];
 
@@ -63,13 +66,19 @@ let serverLicenseState: ServerLicenseState = {
 
 function loadServerLicenses() {
   try {
-    if (fs.existsSync(CLIENT_LICENSES_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(CLIENT_LICENSES_FILE, "utf-8"));
-      if (parsed && typeof parsed === "object") {
-        serverLicenseState = {
-          requireLicense: Boolean(parsed.requireLicense),
-          licenses: Array.isArray(parsed.licenses) ? parsed.licenses : serverLicenseState.licenses,
-        };
+    for (const file of [WORKSPACE_CLIENT_LICENSES_FILE, TMP_CLIENT_LICENSES_FILE]) {
+      if (fs.existsSync(file)) {
+        const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
+        if (parsed && typeof parsed === "object") {
+          serverLicenseState = {
+            requireLicense: Boolean(parsed.requireLicense),
+            licenses:
+              Array.isArray(parsed.licenses) && parsed.licenses.length > 0
+                ? parsed.licenses
+                : serverLicenseState.licenses,
+          };
+          break;
+        }
       }
     }
     // Guarantee that master PIN 291007 is always active and present
@@ -94,9 +103,76 @@ function loadServerLicenses() {
 
 function saveServerLicenses() {
   try {
-    fs.writeFileSync(CLIENT_LICENSES_FILE, JSON.stringify(serverLicenseState));
+    const serialized = JSON.stringify(serverLicenseState, null, 2);
+    // Persist to workspace project file so it survives container restarts
+    fs.writeFileSync(WORKSPACE_CLIENT_LICENSES_FILE, serialized);
   } catch {
     // ignore
+  }
+  try {
+    // Also keep in tmp for fast reading
+    fs.writeFileSync(TMP_CLIENT_LICENSES_FILE, JSON.stringify(serverLicenseState));
+  } catch {
+    // ignore
+  }
+}
+
+export async function syncLicensesWithSupabase() {
+  try {
+    const { data, error } = await supabaseAdmin.from("client_licenses").select("*");
+    if (!error && Array.isArray(data) && data.length > 0) {
+      const mapped: ClientLicense[] = data.map((d: Record<string, unknown>) => ({
+        id: String(d["id"]),
+        client_name: String(d["client_name"] || "Cliente"),
+        pin_code: String(d["pin_code"] || ""),
+        status: d["status"] === "paused" ? "paused" : "active",
+        expires_at: d["expires_at"] ? new Date(d["expires_at"] as string).toISOString() : null,
+        max_devices: Number(d["max_devices"]) || 1,
+        bound_device_ids: Array.isArray(d["bound_device_ids"])
+          ? (d["bound_device_ids"] as string[])
+          : [],
+        notes: typeof d["notes"] === "string" ? d["notes"] : "",
+        created_at: d["created_at"]
+          ? new Date(d["created_at"] as string).toISOString()
+          : new Date().toISOString(),
+      }));
+
+      if (!mapped.some((l) => l.pin_code === "291007")) {
+        mapped.unshift({
+          id: "lic-master-admin",
+          client_name: "Administrador Maestro",
+          pin_code: "291007",
+          status: "active",
+          expires_at: new Date(Date.now() + 3650 * 86400000).toISOString(),
+          max_devices: 999,
+          bound_device_ids: [],
+          notes: "PIN Maestro: 291007",
+          created_at: new Date().toISOString(),
+        });
+      }
+      serverLicenseState.licenses = mapped;
+      saveServerLicenses();
+    } else if (!error && Array.isArray(data) && data.length === 0) {
+      // Supabase table is empty: push our current local licenses to Supabase
+      for (const lic of serverLicenseState.licenses) {
+        await supabaseAdmin
+          .from("client_licenses")
+          .upsert({
+            id: lic.id,
+            client_name: lic.client_name,
+            pin_code: lic.pin_code,
+            status: lic.status,
+            expires_at: lic.expires_at,
+            max_devices: lic.max_devices,
+            bound_device_ids: lic.bound_device_ids,
+            notes: lic.notes ?? "",
+            created_at: lic.created_at,
+          })
+          .catch(() => {});
+      }
+    }
+  } catch {
+    // If Supabase table isn't created yet or network is offline, rely on persistent file
   }
 }
 
@@ -215,6 +291,7 @@ loadServerTripleResults();
 loadServerAnimalImages();
 loadServerGames();
 loadServerLicenses();
+syncLicensesWithSupabase().catch(() => {});
 
 let lastAutoSyncTimestamp = 0;
 let isAutoSyncing = false;
@@ -233,6 +310,7 @@ async function triggerBackgroundSync(forceWait = false) {
     loadServerResults();
     loadServerTripleResults();
     loadServerAnimalImages();
+    loadServerLicenses();
     const prevCount = mockStore.results.length;
     const hadPriorTriples = serverTripleResults.length > 0;
 
@@ -242,6 +320,7 @@ async function triggerBackgroundSync(forceWait = false) {
     const [reports, triplesSync] = await Promise.all([
       synchronizeAutomaticResults(),
       synchronizeAutomaticTriplesResults(serverTripleResults),
+      syncLicensesWithSupabase().catch(() => null),
     ]);
 
     saveServerResults();
@@ -449,6 +528,22 @@ export const Route = createFileRoute("/api/public/results/sync")({
               };
               serverLicenseState.licenses.unshift(newLic);
               saveServerLicenses();
+
+              // Persistent write in Supabase
+              supabaseAdmin
+                .from("client_licenses")
+                .upsert({
+                  id: newLic.id,
+                  client_name: newLic.client_name,
+                  pin_code: newLic.pin_code,
+                  status: newLic.status,
+                  expires_at: newLic.expires_at,
+                  max_devices: newLic.max_devices,
+                  bound_device_ids: newLic.bound_device_ids,
+                  notes: newLic.notes ?? "",
+                  created_at: newLic.created_at,
+                })
+                .catch((err: unknown) => console.warn("[supabase-create-license-warn]", err));
             } else if (act.type === "renew" && act.id) {
               const target = serverLicenseState.licenses.find((l) => l.id === act.id);
               if (target) {
@@ -466,24 +561,59 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 }
                 target.status = "active";
                 saveServerLicenses();
+
+                // Update in Supabase
+                supabaseAdmin
+                  .from("client_licenses")
+                  .update({
+                    expires_at: target.expires_at,
+                    status: target.status,
+                  })
+                  .eq("id", target.id)
+                  .catch((err: unknown) => console.warn("[supabase-renew-license-warn]", err));
               }
             } else if (act.type === "toggle_status" && act.id) {
               const target = serverLicenseState.licenses.find((l) => l.id === act.id);
               if (target) {
                 target.status = target.status === "active" ? "paused" : "active";
                 saveServerLicenses();
+
+                // Update in Supabase
+                supabaseAdmin
+                  .from("client_licenses")
+                  .update({
+                    status: target.status,
+                  })
+                  .eq("id", target.id)
+                  .catch((err: unknown) => console.warn("[supabase-toggle-status-warn]", err));
               }
             } else if (act.type === "reset_devices" && act.id) {
               const target = serverLicenseState.licenses.find((l) => l.id === act.id);
               if (target) {
                 target.bound_device_ids = [];
                 saveServerLicenses();
+
+                // Update in Supabase
+                supabaseAdmin
+                  .from("client_licenses")
+                  .update({
+                    bound_device_ids: target.bound_device_ids,
+                  })
+                  .eq("id", target.id)
+                  .catch((err: unknown) => console.warn("[supabase-reset-devices-warn]", err));
               }
             } else if (act.type === "delete" && act.id) {
               serverLicenseState.licenses = serverLicenseState.licenses.filter(
                 (l) => l.id !== act.id,
               );
               saveServerLicenses();
+
+              // Delete in Supabase
+              supabaseAdmin
+                .from("client_licenses")
+                .delete()
+                .eq("id", act.id)
+                .catch((err: unknown) => console.warn("[supabase-delete-license-warn]", err));
             } else if (act.type === "activate_pin") {
               const cleanPin = (act.pin_code || "").replace(/[^0-9]/g, "");
               const devId = (act.device_id || "TV-DEFAULT").trim();
@@ -531,6 +661,15 @@ export const Route = createFileRoute("/api/public/results/sync")({
                     if (!alreadyBound) {
                       match.bound_device_ids.push(devId);
                       saveServerLicenses();
+
+                      // Update device binding in Supabase
+                      supabaseAdmin
+                        .from("client_licenses")
+                        .update({
+                          bound_device_ids: match.bound_device_ids,
+                        })
+                        .eq("id", match.id)
+                        .catch((err: unknown) => console.warn("[supabase-bind-device-warn]", err));
                     }
                     licenseActivation = {
                       valid: true,

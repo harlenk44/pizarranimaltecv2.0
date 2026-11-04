@@ -50,6 +50,42 @@ export type Database = {
         };
         Relationships: [];
       };
+      client_licenses: {
+        Row: {
+          bound_device_ids: string[];
+          client_name: string;
+          created_at: string;
+          expires_at: string | null;
+          id: string;
+          max_devices: number;
+          notes: string | null;
+          pin_code: string;
+          status: string;
+        };
+        Insert: {
+          bound_device_ids?: string[];
+          client_name: string;
+          created_at?: string;
+          expires_at?: string | null;
+          id?: string;
+          max_devices?: number;
+          notes?: string | null;
+          pin_code: string;
+          status?: string;
+        };
+        Update: {
+          bound_device_ids?: string[];
+          client_name?: string;
+          created_at?: string;
+          expires_at?: string | null;
+          id?: string;
+          max_devices?: number;
+          notes?: string | null;
+          pin_code?: string;
+          status?: string;
+        };
+        Relationships: [];
+      };
       animal_entries: {
         Row: {
           created_at: string | null;

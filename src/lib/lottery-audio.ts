@@ -5,7 +5,7 @@
  * even on devices without local Spanish voice packages installed.
  */
 
-export type VoiceEngine = "online_hd" | "browser";
+export type VoiceEngine = "online_hd" | "agency_voice" | "browser";
 
 export interface VoiceSettings {
   engine: VoiceEngine;
@@ -18,10 +18,10 @@ export interface VoiceSettings {
 const STORAGE_KEY_VOICE = "lottery_voice_settings";
 
 export const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
-  engine: "online_hd", // Default to HD natural Spanish stream
+  engine: "agency_voice", // Default to Agency Voice with 4-note airport chime and repetition
   voiceUri: "",
-  rate: 0.95,
-  pitch: 1.0,
+  rate: 0.98,
+  pitch: 1.02,
   playChime: true,
 };
 
@@ -34,11 +34,19 @@ export function loadVoiceSettings(): VoiceSettings {
     const raw = localStorage.getItem(STORAGE_KEY_VOICE);
     if (raw) {
       const parsed = JSON.parse(raw);
+      let engine: VoiceEngine = DEFAULT_VOICE_SETTINGS.engine;
+      if (
+        parsed.engine === "browser" ||
+        parsed.engine === "online_hd" ||
+        parsed.engine === "agency_voice"
+      ) {
+        engine = parsed.engine;
+      }
       return {
-        engine: parsed.engine === "browser" ? "browser" : "online_hd",
+        engine,
         voiceUri: typeof parsed.voiceUri === "string" ? parsed.voiceUri : "",
-        rate: typeof parsed.rate === "number" ? Math.max(0.7, Math.min(1.3, parsed.rate)) : 0.95,
-        pitch: typeof parsed.pitch === "number" ? Math.max(0.7, Math.min(1.3, parsed.pitch)) : 1.0,
+        rate: typeof parsed.rate === "number" ? Math.max(0.7, Math.min(1.3, parsed.rate)) : 0.98,
+        pitch: typeof parsed.pitch === "number" ? Math.max(0.7, Math.min(1.3, parsed.pitch)) : 1.02,
         playChime: typeof parsed.playChime === "boolean" ? parsed.playChime : true,
       };
     }
@@ -89,27 +97,40 @@ function scoreVoice(voice: SpeechSynthesisVoice): number {
   if (name.includes("google")) score += 80;
   if (name.includes("enhanced") || name.includes("premium")) score += 75;
 
-  // Well known high quality Spanish voices
+  // High quality Latin American Spanish voices (Sabina, Dalia, Jorge, Paloma, Alonso, etc.)
   if (
     name.includes("sabina") ||
-    name.includes("helena") ||
-    name.includes("laura") ||
-    name.includes("salma") ||
-    name.includes("alvaro") ||
+    name.includes("dalia") ||
+    name.includes("paloma") ||
+    name.includes("alonso") ||
+    name.includes("raul") ||
+    name.includes("paulina") ||
     name.includes("jorge") ||
     name.includes("diego") ||
     name.includes("sofia") ||
-    name.includes("monica") ||
-    name.includes("paulina")
+    name.includes("salome") ||
+    name.includes("gonzalo") ||
+    name.includes("sebastian") ||
+    name.includes("elena")
   ) {
-    score += 40;
+    score += 45;
   }
 
-  // Dialect preferences
-  if (lang === "es-ve") score += 35;
-  if (lang === "es-419") score += 30;
-  if (lang === "es-mx" || lang === "es-us" || lang === "es-co") score += 25;
-  if (lang === "es-es") score += 15;
+  // Strong preference for Latin American Spanish dialects over Spain (es-ES)
+  if (lang === "es-ve") score += 60;
+  else if (lang === "es-419") score += 55;
+  else if (
+    lang === "es-mx" ||
+    lang === "es-us" ||
+    lang === "es-co" ||
+    lang === "es-ar" ||
+    lang === "es-cl" ||
+    lang === "es-pe"
+  ) {
+    score += 50;
+  } else if (lang === "es-es") {
+    score -= 20;
+  }
 
   // Penalize robotic synthesizers (eSpeak / generic robot engines)
   if (name.includes("espeak") || name.includes("compact") || name.includes("klatt")) {
@@ -120,8 +141,8 @@ function scoreVoice(voice: SpeechSynthesisVoice): number {
 }
 
 /**
- * Generates an authentic, pleasant two-tone chime via Web Audio API
- * to announce the lottery result before speaking.
+ * Reproduce el timbre de notificación tipo aeropuerto/agencia (Acorde Do Mayor: C5, E5, G5, C6)
+ * usando Web Audio API antes de cantar el resultado.
  */
 export function playLotteryChime(): Promise<void> {
   return new Promise((resolve) => {
@@ -144,31 +165,24 @@ export function playLotteryChime(): Promise<void> {
         ctx.resume().catch(() => {});
       }
 
-      const now = ctx.currentTime;
+      const notas = [523.25, 659.25, 783.99, 1046.5]; // Acorde Do Mayor (C5, E5, G5, C6)
 
-      // Note 1: E5 (659.25 Hz)
-      const osc1 = ctx.createOscillator();
-      const gain1 = ctx.createGain();
-      osc1.type = "sine";
-      osc1.frequency.setValueAtTime(659.25, now);
-      gain1.gain.setValueAtTime(0.08, now);
-      gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
-      osc1.connect(gain1);
-      gain1.connect(ctx.destination);
-      osc1.start(now);
-      osc1.stop(now + 0.45);
+      notas.forEach((frecuencia, idx) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
 
-      // Note 2: A5 (880 Hz) with soft bell resonance
-      const osc2 = ctx.createOscillator();
-      const gain2 = ctx.createGain();
-      osc2.type = "sine";
-      osc2.frequency.setValueAtTime(880, now + 0.18);
-      gain2.gain.setValueAtTime(0.12, now + 0.18);
-      gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
-      osc2.connect(gain2);
-      gain2.connect(ctx.destination);
-      osc2.start(now + 0.18);
-      osc2.stop(now + 0.7);
+        osc.type = "triangle";
+        osc.frequency.setValueAtTime(frecuencia, ctx.currentTime + idx * 0.11);
+
+        gain.gain.setValueAtTime(0.15, ctx.currentTime + idx * 0.11);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + idx * 0.11 + 0.35);
+
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+
+        osc.start(ctx.currentTime + idx * 0.11);
+        osc.stop(ctx.currentTime + idx * 0.11 + 0.35);
+      });
 
       setTimeout(() => {
         try {
@@ -177,11 +191,22 @@ export function playLotteryChime(): Promise<void> {
           // ignore
         }
         resolve();
-      }, 550);
+      }, 450);
     } catch {
       resolve();
     }
   });
+}
+
+// Precargar las voces del navegador al iniciar la página
+if (typeof window !== "undefined" && "speechSynthesis" in window) {
+  try {
+    window.speechSynthesis.onvoiceschanged = () => {
+      window.speechSynthesis.getVoices();
+    };
+  } catch {
+    // ignore
+  }
 }
 
 /** Formats 24h or HH:mm time string to a conversational Spanish phrase for voice synthesis */
@@ -208,14 +233,15 @@ export function formatTimeForSpeech(timeStr: string): string {
 }
 
 /**
- * Plays natural Spanish speech through the dedicated /api/tts streaming endpoint.
- * Bypasses all device/browser voice limitations.
+ * Plays natural Latin American Spanish speech through the dedicated /api/tts streaming endpoint.
+ * Bypasses all device/browser voice limitations and guarantees a Latin American Spanish accent.
  */
 export function playNaturalSpanishAudio(
   text: string,
   onStart?: () => void,
   onEnd?: () => void,
   token?: number,
+  rate = 0.98,
 ): Promise<void> {
   return new Promise((resolve) => {
     const myToken = token ?? ++activeSpeechToken;
@@ -240,8 +266,9 @@ export function playNaturalSpanishAudio(
     }
 
     const encodedText = encodeURIComponent(text);
-    const audioUrl = `/api/tts?text=${encodedText}&lang=es`;
+    const audioUrl = `/api/tts?text=${encodedText}&lang=es-US`;
     const audio = new Audio(audioUrl);
+    audio.playbackRate = Math.max(0.75, Math.min(1.25, rate || 0.98));
     currentAudio = audio;
 
     audio.onplay = () => {
@@ -313,8 +340,8 @@ export interface SpeakOptions {
 }
 
 /**
- * Speaks the lottery result with 100% natural Spanish pronunciation.
- * Uses HD Spanish audio stream by default, or browser Spanish voice if chosen and available.
+ * Speaks the lottery result with 100% natural Latin American Spanish pronunciation.
+ * Supports Agency Voice (with repetition in Latin American Spanish), Online HD Latin Spanish stream, or local Browser voice.
  */
 export async function speakLotteryResult({
   gameName,
@@ -331,69 +358,101 @@ export async function speakLotteryResult({
 
   const currentSettings = settings ?? loadVoiceSettings();
 
-  // Play pleasant lottery broadcast chime first if enabled
+  // Primero suena el timbre de alerta si está activo
   if (currentSettings.playChime) {
     await playLotteryChime();
     if (myToken !== activeSpeechToken) return;
   }
 
   const timePhrase = formatTimeForSpeech(drawTime);
+  const numeroTexto =
+    animalLabel === "00" ? "doble cero" : animalLabel === "0" ? "cero" : String(animalNumber);
   const numberPhrase =
     animalLabel === "00" ? "doble cero" : animalLabel === "0" ? "cero" : `número ${animalNumber}`;
 
-  // Natural radio broadcast phrasing for animalitos lottery
-  const speechText = `¡Atención! Resultado de ${gameName}, sorteo de ${timePhrase}. Ganador: ${numberPhrase}, ¡${animalName}!`;
+  // Frase según el tipo de voz elegido
+  const isAgencyStyle = currentSettings.engine === "agency_voice";
+  const speechText = isAgencyStyle
+    ? `Atención en la agencia. Nuevo resultado de ${gameName}. Ha salido el número ${numeroTexto}, ${animalName}. Repito: en ${gameName}, número ${numeroTexto}, ${animalName}. ¡Felicidades a los ganadores!`
+    : `¡Atención! Resultado de ${gameName}, sorteo de ${timePhrase}. Ganador: ${numberPhrase}, ¡${animalName}!`;
 
-  const availableSpanish = getAvailableSpanishVoices();
-  const shouldUseOnlineHd = currentSettings.engine === "online_hd" || availableSpanish.length === 0;
-
-  if (shouldUseOnlineHd) {
-    await playNaturalSpanishAudio(speechText, onStart, onEnd, myToken);
+  // Tanto "agency_voice" (Voz de Agencia con Repetición) como "online_hd" (Voz Corta de Radio)
+  // usan el motor de voz en Español Latino HD (es-US) para garantizar acento latino natural en cualquier TV o PC
+  if (currentSettings.engine === "agency_voice" || currentSettings.engine === "online_hd") {
+    await playNaturalSpanishAudio(
+      speechText,
+      onStart,
+      onEnd,
+      myToken,
+      isAgencyStyle ? currentSettings.rate || 0.98 : currentSettings.rate,
+    );
     return;
   }
 
-  // Otherwise, use browser Spanish synthesis
+  const availableSpanish = getAvailableSpanishVoices();
+
+  // Para "browser", usamos Web Speech API priorizando voces en Español Latino (y si no hay, respaldamos con audio HD Latino)
   if (
     typeof window === "undefined" ||
     !("speechSynthesis" in window) ||
-    typeof SpeechSynthesisUtterance === "undefined"
+    typeof SpeechSynthesisUtterance === "undefined" ||
+    availableSpanish.length === 0
   ) {
-    if (myToken === activeSpeechToken) onEnd?.();
+    await playNaturalSpanishAudio(speechText, onStart, onEnd, myToken, currentSettings.rate);
     return;
   }
 
   try {
-    const utterance = new SpeechSynthesisUtterance(speechText);
-    utterance.lang = "es-VE";
-    utterance.rate = currentSettings.rate;
-    utterance.pitch = currentSettings.pitch;
+    window.speechSynthesis.cancel();
 
+    const locucion = new SpeechSynthesisUtterance(speechText);
+    locucion.lang = "es-419";
+    locucion.rate = currentSettings.rate || 0.98;
+    locucion.pitch = currentSettings.pitch || 1.02;
+
+    // Buscar preferiblemente una voz en Español Latino (Venezuela, México, Latinoamérica, EE.UU., Colombia)
+    const voces = window.speechSynthesis.getVoices();
     let selectedVoice: SpeechSynthesisVoice | undefined;
+
     if (currentSettings.voiceUri) {
-      selectedVoice = availableSpanish.find((v) => v.voiceURI === currentSettings.voiceUri);
+      selectedVoice = voces.find((v) => v.voiceURI === currentSettings.voiceUri);
     }
-    if (!selectedVoice && availableSpanish.length > 0) {
-      selectedVoice = availableSpanish[0];
+
+    if (!selectedVoice) {
+      selectedVoice =
+        voces.find((v) => {
+          const l = v.lang.toLowerCase();
+          return (
+            l.startsWith("es-ve") ||
+            l.startsWith("es-419") ||
+            l.startsWith("es-mx") ||
+            l.startsWith("es-us") ||
+            l.startsWith("es-co") ||
+            l.startsWith("es-ar") ||
+            l.startsWith("es-cl") ||
+            l.startsWith("es-pe")
+          );
+        }) ?? availableSpanish[0];
     }
 
     if (selectedVoice) {
-      utterance.voice = selectedVoice;
-      utterance.lang = selectedVoice.lang;
+      locucion.voice = selectedVoice;
+      locucion.lang = selectedVoice.lang;
     }
 
-    utterance.onstart = () => {
+    locucion.onstart = () => {
       if (myToken === activeSpeechToken) onStart?.();
     };
-    utterance.onend = () => {
+    locucion.onend = () => {
       if (myToken === activeSpeechToken) onEnd?.();
     };
-    utterance.onerror = () => {
+    locucion.onerror = () => {
       if (myToken === activeSpeechToken) onEnd?.();
     };
 
-    window.speechSynthesis.speak(utterance);
+    window.speechSynthesis.speak(locucion);
   } catch (err) {
     console.warn("[speechSynthesis] Failed, falling back to natural Spanish audio:", err);
-    await playNaturalSpanishAudio(speechText, onStart, onEnd, myToken);
+    await playNaturalSpanishAudio(speechText, onStart, onEnd, myToken, currentSettings.rate);
   }
 }

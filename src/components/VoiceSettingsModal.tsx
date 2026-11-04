@@ -122,7 +122,50 @@ export default function VoiceSettingsModal({
             </label>
 
             <div className="space-y-2.5">
-              {/* Option 1: Online HD Natural Spanish */}
+              {/* Option 1: Agency Voice with Repetition and Airport Chime */}
+              <div
+                onClick={() => handleSave({ engine: "agency_voice", rate: 0.98, pitch: 1.02 })}
+                className={`p-3.5 rounded-xl border cursor-pointer transition flex flex-col gap-1.5 ${
+                  settings.engine === "agency_voice"
+                    ? "bg-emerald-600/20 border-emerald-500 ring-1 ring-emerald-500 text-white"
+                    : "bg-slate-950/60 border-slate-800 hover:bg-slate-850 text-slate-300"
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Radio
+                      className={`w-4 h-4 ${settings.engine === "agency_voice" ? "text-emerald-400" : "text-slate-500"}`}
+                    />
+                    <span className="font-bold text-sm text-white flex items-center gap-2">
+                      Voz de Agencia Comercial (Español Latino · Con Repetición)
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-semibold">
+                        Latino · Agencia
+                      </span>
+                    </span>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleSave({ engine: "agency_voice", rate: 0.98, pitch: 1.02 });
+                      handleTestVoice({ engine: "agency_voice", rate: 0.98, pitch: 1.02 });
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold flex items-center gap-1 transition"
+                  >
+                    <Play className="w-3 h-3 fill-current" /> Probar
+                  </button>
+                </div>
+                <p className="text-xs text-slate-400 pl-6">
+                  Timbre de 4 notas tipo aeropuerto y locución en Español Latino con repetición:{" "}
+                  <em>
+                    &ldquo;Atención en la agencia. Nuevo resultado... Repito... ¡Felicidades a los
+                    ganadores!&rdquo;
+                  </em>
+                </p>
+              </div>
+
+              {/* Option 2: Online HD Natural Spanish */}
               <div
                 onClick={() => handleSave({ engine: "online_hd" })}
                 className={`p-3.5 rounded-xl border cursor-pointer transition flex flex-col gap-1.5 ${
@@ -137,10 +180,7 @@ export default function VoiceSettingsModal({
                       className={`w-4 h-4 ${settings.engine === "online_hd" ? "text-blue-400" : "text-slate-500"}`}
                     />
                     <span className="font-bold text-sm text-white flex items-center gap-2">
-                      Voz Natural en Español (HD)
-                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-semibold">
-                        Recomendada
-                      </span>
+                      Voz Natural en Español Latino (HD Corta)
                     </span>
                   </div>
 
@@ -157,12 +197,12 @@ export default function VoiceSettingsModal({
                   </button>
                 </div>
                 <p className="text-xs text-slate-400 pl-6">
-                  Voz humana con acento y pronunciación auténtica en español. Funciona en cualquier
-                  dispositivo (incluso si tu Windows o navegador está en inglés).
+                  Locución directa de radio en Español Latino con hora del sorteo. Funciona en
+                  cualquier dispositivo (incluso si tu Windows o navegador está en inglés).
                 </p>
               </div>
 
-              {/* Option 2: Browser Local Voice */}
+              {/* Option 3: Browser Local Voice */}
               <div
                 onClick={() => handleSave({ engine: "browser" })}
                 className={`p-3.5 rounded-xl border cursor-pointer transition flex flex-col gap-1.5 ${
@@ -202,9 +242,8 @@ export default function VoiceSettingsModal({
                     <div>
                       <p className="font-semibold">Tu equipo solo tiene voces en inglés.</p>
                       <p className="text-[11px] text-amber-200/80 mt-0.5">
-                        Detectamos {allVoices.length} voces en tu sistema, todas en inglés. Por eso
-                        anteriormente se escuchaba con acento en inglés. Te recomendamos usar la{" "}
-                        <strong className="text-white">Voz Natural en Español (HD)</strong> arriba.
+                        Detectamos {allVoices.length} voces en tu sistema, todas en inglés. Te
+                        recomendamos usar las opciones de arriba que incluyen respaldo en español.
                       </p>
                     </div>
                   </div>
@@ -215,7 +254,7 @@ export default function VoiceSettingsModal({
                     </span>
                     <select
                       value={settings.voiceUri}
-                      onChange={(e) => handleSave({ voiceUri: e.target.value, engine: "browser" })}
+                      onChange={(e) => handleSave({ voiceUri: e.target.value })}
                       className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white"
                     >
                       {spanishVoices.map((v) => (

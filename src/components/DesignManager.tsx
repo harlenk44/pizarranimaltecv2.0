@@ -1,12 +1,21 @@
 import { useEffect, useState } from "react";
-import { Palette, Timer, Type, Save, Loader2, Check } from "lucide-react";
+import { Palette, Timer, Type, Save, Loader2, Check, Volume2, Play, Radio } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useBoardSettings } from "@/context/BoardSettingsContext";
+import {
+  type VoiceSettings,
+  loadVoiceSettings,
+  saveVoiceSettings,
+  speakLotteryResult,
+  stopAllAudio,
+} from "@/lib/lottery-audio";
 import type { AppSettings } from "@/lib/types";
 
 export default function DesignManager() {
   const { settings, refreshSettings, updateSettings } = useBoardSettings();
   const [draft, setDraft] = useState<AppSettings>(settings);
+  const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>(loadVoiceSettings());
+  const [testingVoice, setTestingVoice] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
 
@@ -235,6 +244,137 @@ export default function DesignManager() {
                   />
                 </label>
               )}
+            </div>
+
+            <div className="pt-3 border-t border-slate-800 space-y-3">
+              <h4 className="font-bold text-sm text-white flex items-center gap-2">
+                <Volume2 className="w-4 h-4 text-emerald-400" /> Selector de Voz para Sorteos
+              </h4>
+              <p className="text-xs text-slate-400">
+                Elige entre las dos voces disponibles para cantar los resultados en la pizarra:
+              </p>
+
+              <div className="space-y-2.5">
+                <div
+                  onClick={() => {
+                    const next: VoiceSettings = {
+                      ...voiceSettings,
+                      engine: "agency_voice",
+                      rate: 0.98,
+                      pitch: 1.02,
+                    };
+                    setVoiceSettings(next);
+                    saveVoiceSettings(next);
+                  }}
+                  className={`p-3 rounded-xl border cursor-pointer transition flex flex-col gap-1 ${
+                    voiceSettings.engine === "agency_voice"
+                      ? "bg-emerald-600/20 border-emerald-500 ring-1 ring-emerald-500 text-white"
+                      : "bg-slate-950/60 border-slate-800 hover:bg-slate-850 text-slate-300"
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Radio
+                        className={`w-4 h-4 ${voiceSettings.engine === "agency_voice" ? "text-emerald-400" : "text-slate-500"}`}
+                      />
+                      <span className="font-bold text-xs text-white">
+                        1. Voz de Agencia Comercial (Español Latino + Repetición)
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={testingVoice}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        stopAllAudio();
+                        const next: VoiceSettings = {
+                          ...voiceSettings,
+                          engine: "agency_voice",
+                          rate: 0.98,
+                          pitch: 1.02,
+                        };
+                        setVoiceSettings(next);
+                        saveVoiceSettings(next);
+                        setTestingVoice(true);
+                        speakLotteryResult({
+                          gameName: "Lotto Activo",
+                          drawTime: "10:00:00",
+                          animalNumber: 4,
+                          animalName: "Alacrán",
+                          animalLabel: "04",
+                          settings: next,
+                          onEnd: () => setTestingVoice(false),
+                        });
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold flex items-center gap-1 transition cursor-pointer"
+                    >
+                      <Play className="w-3 h-3 fill-current" /> Probar
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-slate-400 pl-6">
+                    Canta en Español Latino: &ldquo;Atención en la agencia. Nuevo resultado...
+                    Repito... ¡Felicidades a los ganadores!&rdquo;
+                  </p>
+                </div>
+
+                <div
+                  onClick={() => {
+                    const next: VoiceSettings = {
+                      ...voiceSettings,
+                      engine: "online_hd",
+                    };
+                    setVoiceSettings(next);
+                    saveVoiceSettings(next);
+                  }}
+                  className={`p-3 rounded-xl border cursor-pointer transition flex flex-col gap-1 ${
+                    voiceSettings.engine === "online_hd"
+                      ? "bg-blue-600/20 border-blue-500 ring-1 ring-blue-500 text-white"
+                      : "bg-slate-950/60 border-slate-800 hover:bg-slate-850 text-slate-300"
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Radio
+                        className={`w-4 h-4 ${voiceSettings.engine === "online_hd" ? "text-blue-400" : "text-slate-500"}`}
+                      />
+                      <span className="font-bold text-xs text-white">
+                        2. Voz Natural en Español Latino (HD Corta de Radio)
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={testingVoice}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        stopAllAudio();
+                        const next: VoiceSettings = {
+                          ...voiceSettings,
+                          engine: "online_hd",
+                        };
+                        setVoiceSettings(next);
+                        saveVoiceSettings(next);
+                        setTestingVoice(true);
+                        speakLotteryResult({
+                          gameName: "Lotto Activo",
+                          drawTime: "10:00:00",
+                          animalNumber: 4,
+                          animalName: "Alacrán",
+                          animalLabel: "04",
+                          settings: next,
+                          onEnd: () => setTestingVoice(false),
+                        });
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-bold flex items-center gap-1 transition cursor-pointer"
+                    >
+                      <Play className="w-3 h-3 fill-current" /> Probar
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-slate-400 pl-6">
+                    Canta: &ldquo;¡Atención! Resultado de Lotto Activo, sorteo de las 10... Ganador:
+                    número 4, ¡Alacrán!&rdquo;
+                  </p>
+                </div>
+              </div>
             </div>
           </div>
         </section>

@@ -7,6 +7,7 @@ import {
   type Result,
   type Profile,
   type LicenseInfo,
+  type ClientLicense,
 } from "@/lib/types";
 import { parseTuazarResults, normalizeName, hourTo24h } from "@/lib/tuazar-parser";
 import { TUAZAR_GAME_NAMES } from "@/lib/tuazar-provider.server";
@@ -42,6 +43,7 @@ export interface MockStore {
   profiles: Profile[];
   user_roles: Array<{ user_id: string; role: string }>;
   licenses: LicenseInfo[];
+  client_licenses: ClientLicense[];
 }
 
 const ADMIN_ID = "00000000-0000-0000-0000-000000000001";
@@ -365,6 +367,33 @@ function buildInitialLicenses(): LicenseInfo[] {
   ];
 }
 
+function buildInitialClientLicenses(): ClientLicense[] {
+  if (typeof window !== "undefined") {
+    try {
+      const saved = localStorage.getItem("pizarra_persisted_client_licenses");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed as ClientLicense[];
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return [
+    {
+      id: "lic-master-admin",
+      client_name: "Administrador Maestro",
+      pin_code: "291007",
+      status: "active",
+      expires_at: new Date(Date.now() + 3650 * 86400000).toISOString(),
+      max_devices: 999,
+      bound_device_ids: [],
+      notes: "PIN Maestro: 291007",
+      created_at: new Date().toISOString(),
+    },
+  ];
+}
+
 // Global persistent in-memory store
 declare global {
   var __APPLET_MOCK_STORE__: MockStore | undefined;
@@ -381,6 +410,7 @@ if (!globalThis.__APPLET_MOCK_STORE__) {
     profiles: buildInitialProfiles(),
     user_roles: buildInitialRoles(),
     licenses: buildInitialLicenses(),
+    client_licenses: buildInitialClientLicenses(),
   };
 }
 
@@ -882,6 +912,13 @@ function createMockQueryBuilder(table: string) {
           // ignore
         }
       }
+      if (table === "client_licenses" && typeof window !== "undefined") {
+        try {
+          localStorage.setItem("pizarra_persisted_client_licenses", JSON.stringify(storeList));
+        } catch {
+          // ignore
+        }
+      }
       if ((table === "profiles" || table === "user_roles") && typeof window !== "undefined") {
         saveProfilesToStorage();
       }
@@ -1008,6 +1045,13 @@ function createMockQueryBuilder(table: string) {
             // ignore
           }
         }
+        if (table === "client_licenses" && typeof window !== "undefined") {
+          try {
+            localStorage.setItem("pizarra_persisted_client_licenses", JSON.stringify(remaining));
+          } catch {
+            // ignore
+          }
+        }
         return Promise.resolve({ data: null, error: null }).then(onFulfilled, onRejected);
       }
 
@@ -1034,6 +1078,13 @@ function createMockQueryBuilder(table: string) {
         if (table === "app_settings" && typeof window !== "undefined" && storeList.length > 0) {
           try {
             localStorage.setItem("pizarra_app_settings", JSON.stringify(storeList[0]));
+          } catch {
+            // ignore
+          }
+        }
+        if (table === "client_licenses" && typeof window !== "undefined") {
+          try {
+            localStorage.setItem("pizarra_persisted_client_licenses", JSON.stringify(storeList));
           } catch {
             // ignore
           }

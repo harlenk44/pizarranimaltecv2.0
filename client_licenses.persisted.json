@@ -1,0 +1,16 @@
+{
+  "requireLicense": true,
+  "licenses": [
+    {
+      "id": "lic-master-admin",
+      "client_name": "Administrador Maestro",
+      "pin_code": "291007",
+      "status": "active",
+      "expires_at": "2036-11-01T21:43:28.140Z",
+      "max_devices": 999,
+      "bound_device_ids": [],
+      "notes": "PIN Maestro: 291007",
+      "created_at": "2026-11-04T21:43:28.140Z"
+    }
+  ]
+}
