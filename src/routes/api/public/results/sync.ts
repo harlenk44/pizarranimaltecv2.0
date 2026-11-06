@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { mockStore } from "@/lib/mock-db";
+import { mockStore, INITIAL_GAMES } from "@/lib/mock-db";
 import type { ClientLicense } from "@/lib/types";
 import { TRIPLE_GAMES, buildTripleAlertItem, type TripleResult } from "@/lib/triples";
 import {
@@ -45,11 +45,46 @@ function saveServerTripleResults() {
 interface ServerLicenseState {
   requireLicense: boolean;
   licenses: ClientLicense[];
+  deletedIds?: string[];
+  deletedPins?: string[];
 }
 
 let serverLicenseState: ServerLicenseState = {
   requireLicense: true,
   licenses: [
+    {
+      id: "lic-exito-carupano-310148",
+      client_name: "EXITO CARUPANO",
+      pin_code: "310148",
+      status: "active",
+      expires_at: "2026-12-05T01:38:00.000Z",
+      max_devices: 1,
+      bound_device_ids: [],
+      notes: "",
+      created_at: "2026-11-05T01:38:00.000Z",
+    },
+    {
+      id: "lic-mariana-108271",
+      client_name: "Mariana",
+      pin_code: "108271",
+      status: "active",
+      expires_at: "2026-12-05T01:38:00.000Z",
+      max_devices: 1,
+      bound_device_ids: [],
+      notes: "",
+      created_at: "2026-11-05T01:38:00.000Z",
+    },
+    {
+      id: "lic-jose-barreto-770595",
+      client_name: "José barreto",
+      pin_code: "770595",
+      status: "active",
+      expires_at: "2026-12-05T01:38:00.000Z",
+      max_devices: 1,
+      bound_device_ids: [],
+      notes: "",
+      created_at: "2026-11-05T01:38:00.000Z",
+    },
     {
       id: "lic-master-admin",
       client_name: "Administrador Maestro",
@@ -62,6 +97,8 @@ let serverLicenseState: ServerLicenseState = {
       created_at: new Date().toISOString(),
     },
   ],
+  deletedIds: [],
+  deletedPins: [],
 };
 
 function loadServerLicenses() {
@@ -76,6 +113,8 @@ function loadServerLicenses() {
               Array.isArray(parsed.licenses) && parsed.licenses.length > 0
                 ? parsed.licenses
                 : serverLicenseState.licenses,
+            deletedIds: Array.isArray(parsed.deletedIds) ? parsed.deletedIds : [],
+            deletedPins: Array.isArray(parsed.deletedPins) ? parsed.deletedPins : [],
           };
           break;
         }
@@ -83,7 +122,7 @@ function loadServerLicenses() {
     }
     // Guarantee that master PIN 291007 is always active and present
     if (!serverLicenseState.licenses.some((l) => l.pin_code === "291007")) {
-      serverLicenseState.licenses.unshift({
+      serverLicenseState.licenses.push({
         id: "lic-master-admin",
         client_name: "Administrador Maestro",
         pin_code: "291007",
@@ -120,7 +159,7 @@ function saveServerLicenses() {
 export async function syncLicensesWithSupabase() {
   try {
     const { data, error } = await supabaseAdmin.from("client_licenses").select("*");
-    if (!error && Array.isArray(data) && data.length > 0) {
+    if (!error && Array.isArray(data)) {
       const mapped: ClientLicense[] = data.map((d: Record<string, unknown>) => ({
         id: String(d["id"]),
         client_name: String(d["client_name"] || "Cliente"),
@@ -137,8 +176,46 @@ export async function syncLicensesWithSupabase() {
           : new Date().toISOString(),
       }));
 
-      if (!mapped.some((l) => l.pin_code === "291007")) {
-        mapped.unshift({
+      // Safe bidirectional merge: combine Supabase and local persistent licenses by ID or PIN
+      const deletedSet = new Set<string>(serverLicenseState.deletedIds || []);
+      const deletedPinSet = new Set<string>(serverLicenseState.deletedPins || []);
+      const mergedMap = new Map<string, ClientLicense>();
+      // 1. Retain all local persistent licenses (excluding deleted ones)
+      for (const lic of serverLicenseState.licenses) {
+        if (!deletedSet.has(lic.id) && !deletedPinSet.has(lic.pin_code)) {
+          mergedMap.set(lic.id, lic);
+        }
+      }
+      // 2. Merge records from Supabase
+      for (const sLic of mapped) {
+        if (deletedSet.has(sLic.id) || deletedPinSet.has(sLic.pin_code)) {
+          // Permanently cleanup deleted license from Supabase as well
+          supabaseAdmin
+            .from("client_licenses")
+            .delete()
+            .eq("id", sLic.id)
+            .catch(() => {});
+          continue;
+        }
+        const existing =
+          mergedMap.get(sLic.id) ||
+          Array.from(mergedMap.values()).find((l) => l.pin_code === sLic.pin_code);
+        if (existing) {
+          // Local server state (e.g. paused, renewed) has priority over Supabase's older status
+          mergedMap.set(existing.id, {
+            ...sLic,
+            ...existing,
+            bound_device_ids: Array.from(
+              new Set([...existing.bound_device_ids, ...sLic.bound_device_ids]),
+            ),
+          });
+        } else {
+          mergedMap.set(sLic.id, sLic);
+        }
+      }
+      // 3. Ensure master PIN is always present
+      if (!Array.from(mergedMap.values()).some((l) => l.pin_code === "291007")) {
+        mergedMap.set("lic-master-admin", {
           id: "lic-master-admin",
           client_name: "Administrador Maestro",
           pin_code: "291007",
@@ -150,10 +227,11 @@ export async function syncLicensesWithSupabase() {
           created_at: new Date().toISOString(),
         });
       }
-      serverLicenseState.licenses = mapped;
+
+      serverLicenseState.licenses = Array.from(mergedMap.values());
       saveServerLicenses();
-    } else if (!error && Array.isArray(data) && data.length === 0) {
-      // Supabase table is empty: push our current local licenses to Supabase
+
+      // 4. Ensure any local licenses not yet in Supabase are uploaded
       for (const lic of serverLicenseState.licenses) {
         await supabaseAdmin
           .from("client_licenses")
@@ -273,6 +351,12 @@ function loadServerGames() {
         }
       }
     }
+    // Ensure all catalog games from INITIAL_GAMES are present
+    for (const initGame of INITIAL_GAMES) {
+      if (!mockStore.games.some((g) => g.id === initGame.id || g.slug === initGame.slug)) {
+        mockStore.games.push({ ...initGame });
+      }
+    }
   } catch {
     // ignore
   }
@@ -314,21 +398,105 @@ async function triggerBackgroundSync(forceWait = false) {
     const prevCount = mockStore.results.length;
     const hadPriorTriples = serverTripleResults.length > 0;
 
-    const [{ synchronizeAutomaticResults }, { synchronizeAutomaticTriplesResults }] =
-      await Promise.all([import("@/lib/result-sync.server"), import("@/lib/triples-sync.server")]);
+    const [
+      { synchronizeAutomaticResults },
+      { synchronizeAutomaticTriplesResults },
+      { synchronizeMultiloteriasData, getCachedMultiloteriasItems },
+    ] = await Promise.all([
+      import("@/lib/result-sync.server"),
+      import("@/lib/triples-sync.server"),
+      import("@/lib/multiloterias-provider.server"),
+    ]);
 
-    const [reports, triplesSync] = await Promise.all([
+    const [reports, triplesSync, multiloteriasSync] = await Promise.all([
       synchronizeAutomaticResults(),
       synchronizeAutomaticTriplesResults(serverTripleResults),
+      synchronizeMultiloteriasData(mockStore.results, serverTripleResults),
       syncLicensesWithSupabase().catch(() => null),
     ]);
 
+    // Apply Multiloterias animal results if any
+    if (
+      multiloteriasSync.newAnimalCount > 0 ||
+      multiloteriasSync.animalResults.length > mockStore.results.length
+    ) {
+      mockStore.results = sanitizeResultsList(multiloteriasSync.animalResults);
+    }
     saveServerResults();
 
-    serverTripleResults = triplesSync.merged;
+    // Merge triples from both LoteriaDeHoy/TuAzar and Multiloterias
+    serverTripleResults = multiloteriasSync.tripleResults;
+    for (const t of triplesSync.merged) {
+      const exists = serverTripleResults.some(
+        (st) =>
+          st.game_id === t.game_id && st.draw_date === t.draw_date && st.draw_time === t.draw_time,
+      );
+      if (!exists) {
+        serverTripleResults.push(t);
+      }
+    }
     saveServerTripleResults();
 
-    const anyWritten = reports.some((r) => r.written > 0) || mockStore.results.length > prevCount;
+    // Ensure Multiloterias official images (including 37-48 for Lottopantera) are stored
+    try {
+      const [lotoItems, panteraItems] = await Promise.all([
+        getCachedMultiloteriasItems("lotoanimalito"),
+        getCachedMultiloteriasItems("lottopantera"),
+      ]);
+      let addedImgs = false;
+      for (const item of lotoItems) {
+        const num = item.number === "00" ? 0 : parseInt(item.number, 10);
+        if (Number.isFinite(num) && item.imageUrl) {
+          const gameId = "d953f80c-4335-4bc9-9f78-9b56193286fe";
+          if (
+            !mockStore.animal_images.some(
+              (img) =>
+                (img.game_id === gameId || img.game_id === "lotoanimalito") &&
+                img.animal_number === num,
+            )
+          ) {
+            mockStore.animal_images.push({
+              id: `img-lotoanimalito-${num}`,
+              game_id: gameId,
+              animal_number: num,
+              image_url: item.imageUrl,
+            });
+            addedImgs = true;
+          }
+        }
+      }
+      for (const item of panteraItems) {
+        const num = item.number === "00" ? 0 : parseInt(item.number, 10);
+        if (Number.isFinite(num) && item.imageUrl) {
+          const gameId = "61580ccf-5a2d-4d10-877e-4883515135e4";
+          if (
+            !mockStore.animal_images.some(
+              (img) =>
+                (img.game_id === gameId || img.game_id === "lottopantera") &&
+                img.animal_number === num,
+            )
+          ) {
+            mockStore.animal_images.push({
+              id: `img-lottopantera-${num}`,
+              game_id: gameId,
+              animal_number: num,
+              image_url: item.imageUrl,
+            });
+            addedImgs = true;
+          }
+        }
+      }
+      if (addedImgs) {
+        saveServerAnimalImages();
+      }
+    } catch {
+      // ignore
+    }
+
+    const anyWritten =
+      reports.some((r) => r.written > 0) ||
+      multiloteriasSync.newAnimalCount > 0 ||
+      mockStore.results.length > prevCount;
     if (anyWritten) {
       const latest = mockStore.results[mockStore.results.length - 1];
       if (latest) {
@@ -359,10 +527,17 @@ async function triggerBackgroundSync(forceWait = false) {
           // ignore
         }
       }
-    } else if (hadPriorTriples && triplesSync.newlyAdded.length > 0) {
-      const latestTriple = triplesSync.newlyAdded[triplesSync.newlyAdded.length - 1];
+    } else if (
+      (hadPriorTriples && triplesSync.newlyAdded.length > 0) ||
+      multiloteriasSync.newTripleCount > 0
+    ) {
+      const latestTriple =
+        triplesSync.newlyAdded[triplesSync.newlyAdded.length - 1] ||
+        serverTripleResults[serverTripleResults.length - 1];
       if (latestTriple) {
-        const tripleGame = TRIPLE_GAMES.find((g) => g.id === latestTriple.game_id);
+        const tripleGame = TRIPLE_GAMES.find(
+          (g) => g.id === latestTriple.game_id || g.slug === latestTriple.game_slug,
+        );
         if (tripleGame) {
           const alertPayload = buildTripleAlertItem(latestTriple, tripleGame);
           try {
@@ -431,6 +606,8 @@ export const Route = createFileRoute("/api/public/results/sync")({
           games: mockStore.games,
           requireLicense: serverLicenseState.requireLicense,
           clientLicenses: serverLicenseState.licenses,
+          deletedIds: serverLicenseState.deletedIds || [],
+          deletedPins: serverLicenseState.deletedPins || [],
         });
       },
       POST: async ({ request }) => {
@@ -502,18 +679,77 @@ export const Route = createFileRoute("/api/public/results/sync")({
               max_devices?: number;
               notes?: string;
               device_id?: string;
+              licenses?: ClientLicense[];
             };
 
             if (act.type === "toggle_enforcement") {
               serverLicenseState.requireLicense = Boolean(act.requireLicense);
               saveServerLicenses();
+            } else if (act.type === "restore_batch" && Array.isArray(act.licenses)) {
+              const deletedSet = new Set<string>(serverLicenseState.deletedIds || []);
+              const deletedPinSet = new Set<string>(serverLicenseState.deletedPins || []);
+              let addedAny = false;
+              for (const cachedLic of act.licenses) {
+                if (
+                  !cachedLic ||
+                  !cachedLic.pin_code ||
+                  cachedLic.pin_code === "291007" ||
+                  deletedSet.has(cachedLic.id) ||
+                  deletedPinSet.has(cachedLic.pin_code)
+                ) {
+                  continue;
+                }
+                const alreadyExists = serverLicenseState.licenses.some(
+                  (l) => l.id === cachedLic.id || l.pin_code === cachedLic.pin_code,
+                );
+                if (!alreadyExists) {
+                  const restored: ClientLicense = {
+                    id:
+                      cachedLic.id || `lic-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                    client_name: (cachedLic.client_name || "Cliente").trim(),
+                    pin_code: String(cachedLic.pin_code)
+                      .replace(/[^0-9]/g, "")
+                      .slice(0, 6),
+                    status: cachedLic.status === "paused" ? "paused" : "active",
+                    expires_at: cachedLic.expires_at || null,
+                    max_devices: Math.max(1, Number(cachedLic.max_devices) || 1),
+                    bound_device_ids: Array.isArray(cachedLic.bound_device_ids)
+                      ? cachedLic.bound_device_ids
+                      : [],
+                    notes: cachedLic.notes || "",
+                    created_at: cachedLic.created_at || new Date().toISOString(),
+                  };
+                  serverLicenseState.licenses.unshift(restored);
+                  addedAny = true;
+                  try {
+                    await supabaseAdmin.from("client_licenses").upsert({
+                      id: restored.id,
+                      client_name: restored.client_name,
+                      pin_code: restored.pin_code,
+                      status: restored.status,
+                      expires_at: restored.expires_at,
+                      max_devices: restored.max_devices,
+                      bound_device_ids: restored.bound_device_ids,
+                      notes: restored.notes ?? "",
+                      created_at: restored.created_at,
+                    });
+                  } catch {
+                    // ignore
+                  }
+                }
+              }
+              if (addedAny) {
+                saveServerLicenses();
+              }
             } else if (act.type === "create") {
               const cleanPin =
                 (act.pin_code || "").replace(/[^0-9]/g, "").slice(0, 6) ||
                 String(Math.floor(100000 + Math.random() * 900000));
+              const daysNum =
+                act.days === null ? null : Math.max(1, Math.min(365, Number(act.days) || 30));
               const expiresAt =
-                typeof act.days === "number" && act.days > 0
-                  ? new Date(Date.now() + act.days * 86400000).toISOString()
+                typeof daysNum === "number" && daysNum > 0
+                  ? new Date(Date.now() + daysNum * 86400000).toISOString()
                   : null;
               const newLic: ClientLicense = {
                 id: `lic-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -526,13 +762,22 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 notes: act.notes?.trim() || "",
                 created_at: new Date().toISOString(),
               };
+              if (serverLicenseState.deletedIds) {
+                serverLicenseState.deletedIds = serverLicenseState.deletedIds.filter(
+                  (id) => id !== newLic.id,
+                );
+              }
+              if (serverLicenseState.deletedPins) {
+                serverLicenseState.deletedPins = serverLicenseState.deletedPins.filter(
+                  (pin) => pin !== cleanPin,
+                );
+              }
               serverLicenseState.licenses.unshift(newLic);
               saveServerLicenses();
 
               // Persistent write in Supabase
-              supabaseAdmin
-                .from("client_licenses")
-                .upsert({
+              try {
+                await supabaseAdmin.from("client_licenses").upsert({
                   id: newLic.id,
                   client_name: newLic.client_name,
                   pin_code: newLic.pin_code,
@@ -542,19 +787,20 @@ export const Route = createFileRoute("/api/public/results/sync")({
                   bound_device_ids: newLic.bound_device_ids,
                   notes: newLic.notes ?? "",
                   created_at: newLic.created_at,
-                })
-                .catch((err: unknown) => console.warn("[supabase-create-license-warn]", err));
+                });
+              } catch (err: unknown) {
+                console.warn("[supabase-create-license-warn]", err);
+              }
             } else if (act.type === "renew" && act.id) {
               const target = serverLicenseState.licenses.find((l) => l.id === act.id);
               if (target) {
                 if (act.days === null) {
                   target.expires_at = null;
                 } else {
-                  const daysToAdd = Number(act.days) || 30;
-                  const baseDate =
-                    target.expires_at && new Date(target.expires_at) > new Date()
-                      ? new Date(target.expires_at)
-                      : new Date();
+                  const daysToAdd = Math.max(1, Math.min(365, Number(act.days) || 30));
+                  const isStillActive =
+                    target.expires_at && new Date(target.expires_at).getTime() > Date.now();
+                  const baseDate = isStillActive ? new Date(target.expires_at) : new Date();
                   target.expires_at = new Date(
                     baseDate.getTime() + daysToAdd * 86400000,
                   ).toISOString();
@@ -562,15 +808,18 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 target.status = "active";
                 saveServerLicenses();
 
-                // Update in Supabase
-                supabaseAdmin
-                  .from("client_licenses")
-                  .update({
-                    expires_at: target.expires_at,
-                    status: target.status,
-                  })
-                  .eq("id", target.id)
-                  .catch((err: unknown) => console.warn("[supabase-renew-license-warn]", err));
+                // Update only expires_at and status in Supabase (preserving PIN, name, bound devices)
+                try {
+                  await supabaseAdmin
+                    .from("client_licenses")
+                    .update({
+                      expires_at: target.expires_at,
+                      status: target.status,
+                    })
+                    .eq("id", target.id);
+                } catch (err: unknown) {
+                  console.warn("[supabase-renew-license-warn]", err);
+                }
               }
             } else if (act.type === "toggle_status" && act.id) {
               const target = serverLicenseState.licenses.find((l) => l.id === act.id);
@@ -579,13 +828,16 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 saveServerLicenses();
 
                 // Update in Supabase
-                supabaseAdmin
-                  .from("client_licenses")
-                  .update({
-                    status: target.status,
-                  })
-                  .eq("id", target.id)
-                  .catch((err: unknown) => console.warn("[supabase-toggle-status-warn]", err));
+                try {
+                  await supabaseAdmin
+                    .from("client_licenses")
+                    .update({
+                      status: target.status,
+                    })
+                    .eq("id", target.id);
+                } catch (err: unknown) {
+                  console.warn("[supabase-toggle-status-warn]", err);
+                }
               }
             } else if (act.type === "reset_devices" && act.id) {
               const target = serverLicenseState.licenses.find((l) => l.id === act.id);
@@ -594,26 +846,67 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 saveServerLicenses();
 
                 // Update in Supabase
-                supabaseAdmin
-                  .from("client_licenses")
-                  .update({
-                    bound_device_ids: target.bound_device_ids,
-                  })
-                  .eq("id", target.id)
-                  .catch((err: unknown) => console.warn("[supabase-reset-devices-warn]", err));
+                try {
+                  await supabaseAdmin
+                    .from("client_licenses")
+                    .update({
+                      bound_device_ids: target.bound_device_ids,
+                    })
+                    .eq("id", target.id);
+                } catch (err: unknown) {
+                  console.warn("[supabase-reset-devices-warn]", err);
+                }
+              }
+            } else if (
+              act.type === "update_lotteries" &&
+              act.id &&
+              typeof act.client_name === "string"
+            ) {
+              const target = serverLicenseState.licenses.find((l) => l.id === act.id);
+              if (target) {
+                target.client_name = act.client_name.trim();
+                saveServerLicenses();
+
+                // Persistent update of client_name in Supabase
+                try {
+                  await supabaseAdmin
+                    .from("client_licenses")
+                    .update({
+                      client_name: target.client_name,
+                    })
+                    .eq("id", target.id);
+                } catch (err: unknown) {
+                  console.warn("[supabase-update-lotteries-warn]", err);
+                }
               }
             } else if (act.type === "delete" && act.id) {
+              const targetToDelete = serverLicenseState.licenses.find((l) => l.id === act.id);
               serverLicenseState.licenses = serverLicenseState.licenses.filter(
                 (l) => l.id !== act.id,
               );
+              if (!serverLicenseState.deletedIds) {
+                serverLicenseState.deletedIds = [];
+              }
+              if (!serverLicenseState.deletedIds.includes(act.id)) {
+                serverLicenseState.deletedIds.push(act.id);
+              }
+              if (!serverLicenseState.deletedPins) {
+                serverLicenseState.deletedPins = [];
+              }
+              if (
+                targetToDelete?.pin_code &&
+                !serverLicenseState.deletedPins.includes(targetToDelete.pin_code)
+              ) {
+                serverLicenseState.deletedPins.push(targetToDelete.pin_code);
+              }
               saveServerLicenses();
 
               // Delete in Supabase
-              supabaseAdmin
-                .from("client_licenses")
-                .delete()
-                .eq("id", act.id)
-                .catch((err: unknown) => console.warn("[supabase-delete-license-warn]", err));
+              try {
+                await supabaseAdmin.from("client_licenses").delete().eq("id", act.id);
+              } catch (err: unknown) {
+                console.warn("[supabase-delete-license-warn]", err);
+              }
             } else if (act.type === "activate_pin") {
               const cleanPin = (act.pin_code || "").replace(/[^0-9]/g, "");
               const devId = (act.device_id || "TV-DEFAULT").trim();
@@ -798,6 +1091,8 @@ export const Route = createFileRoute("/api/public/results/sync")({
             games: mockStore.games,
             requireLicense: serverLicenseState.requireLicense,
             clientLicenses: serverLicenseState.licenses,
+            deletedIds: serverLicenseState.deletedIds || [],
+            deletedPins: serverLicenseState.deletedPins || [],
             licenseActivation,
           });
         } catch (err) {

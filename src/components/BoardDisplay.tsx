@@ -23,6 +23,8 @@ function DisplayShell({ children }: { children: ReactNode }) {
   const [expanded, setExpanded] = useState(false);
   const [controls, setControls] = useState(false);
   const [notice, setNotice] = useState("");
+  const [isToolsVisible, setIsToolsVisible] = useState(true);
+  const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const logoSize = preferences.logoSize ?? settings.logo_size ?? 72;
   const fontSizeScale = preferences.fontSizeScale ?? settings.font_size_scale ?? 100;
@@ -58,6 +60,48 @@ function DisplayShell({ children }: { children: ReactNode }) {
       document.removeEventListener("keydown", escape);
     };
   }, []);
+
+  useEffect(() => {
+    if (controls) {
+      if (hideTimerRef.current) {
+        clearTimeout(hideTimerRef.current);
+        hideTimerRef.current = null;
+      }
+      setIsToolsVisible(true);
+      return;
+    }
+
+    const startHideTimer = () => {
+      setIsToolsVisible(true);
+      if (hideTimerRef.current) {
+        clearTimeout(hideTimerRef.current);
+      }
+      hideTimerRef.current = setTimeout(() => {
+        setIsToolsVisible(false);
+      }, 3000);
+    };
+
+    startHideTimer();
+
+    const activityEvents = ["mousemove", "mousedown", "touchstart", "keydown"] as const;
+    const handleActivity = () => {
+      startHideTimer();
+    };
+
+    for (const evt of activityEvents) {
+      window.addEventListener(evt, handleActivity, { passive: true });
+    }
+
+    return () => {
+      if (hideTimerRef.current) {
+        clearTimeout(hideTimerRef.current);
+        hideTimerRef.current = null;
+      }
+      for (const evt of activityEvents) {
+        window.removeEventListener(evt, handleActivity);
+      }
+    };
+  }, [controls]);
 
   async function toggleFullscreen() {
     setNotice("");
@@ -317,36 +361,56 @@ function DisplayShell({ children }: { children: ReactNode }) {
             )}
           </section>
         )}
-        {notice && (
-          <p
-            role="status"
-            className="bg-slate-900 text-slate-200 p-3 rounded-xl border border-slate-800 max-w-xs text-xs shadow-xl"
-          >
-            {notice}
-          </p>
-        )}
-        <div className="flex justify-end gap-2">
-          <Button
-            variant="secondary"
-            size="icon"
-            title="Ajustar tamaños de logos, letras y cajas"
-            aria-label="Ajustar tamaños de logos, letras y cajas"
-            aria-expanded={controls}
-            aria-controls="display-controls"
-            onClick={() => setControls(!controls)}
-            className="bg-slate-900 border border-slate-700/80 hover:bg-slate-800 text-slate-200 shadow-xl"
-          >
-            <SlidersHorizontal className="w-4 h-4 text-blue-400" />
-          </Button>
-          <Button
-            variant="secondary"
-            onClick={toggleFullscreen}
-            title={expanded ? "Salir de pantalla completa" : "Pantalla Completa"}
-            className="bg-slate-900 border border-slate-700/80 hover:bg-slate-800 text-slate-200 shadow-xl font-semibold text-xs flex items-center gap-1.5"
-          >
-            {expanded ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
-            <span>{expanded ? "Salir" : "Pantalla Completa"}</span>
-          </Button>
+        <div
+          className="flex flex-col items-end gap-2"
+          style={{
+            opacity: isToolsVisible || controls ? 1 : 0,
+            pointerEvents: isToolsVisible || controls ? "auto" : "none",
+            transition: "opacity 0.3s ease",
+          }}
+        >
+          {notice && (
+            <p
+              role="status"
+              className="bg-slate-900/95 text-slate-200 p-2.5 rounded-xl border border-slate-800 max-w-xs text-xs shadow-xl backdrop-blur-sm"
+            >
+              {notice}
+            </p>
+          )}
+          <div className="flex justify-end gap-1.5 sm:gap-2">
+            <Button
+              variant="secondary"
+              size="icon"
+              title="Ajustar tamaños de logos, letras y cajas"
+              aria-label="Ajustar tamaños de logos, letras y cajas"
+              aria-expanded={controls}
+              aria-controls="display-controls"
+              onClick={() => setControls(!controls)}
+              className="h-8 w-8 bg-slate-900/85 border border-slate-700/80 hover:bg-slate-800 text-slate-200 shadow-xl backdrop-blur-sm"
+            >
+              <SlidersHorizontal className="w-3.5 h-3.5 text-blue-400" />
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={toggleFullscreen}
+              title={expanded ? "Salir de pantalla completa" : "Pantalla Completa"}
+              className={`h-8 px-2.5 bg-slate-900/85 border border-slate-700/80 hover:bg-slate-800 text-slate-200 shadow-xl font-medium text-xs flex items-center gap-1.5 backdrop-blur-sm transition-all ${
+                expanded ? "bg-slate-900/70" : ""
+              }`}
+            >
+              {expanded ? (
+                <>
+                  <Minimize className="w-3.5 h-3.5 text-slate-300" />
+                  <span className="text-[11px] sm:text-xs">Salir</span>
+                </>
+              ) : (
+                <>
+                  <Maximize className="w-3.5 h-3.5 text-slate-300" />
+                  <span className="text-[11px] sm:text-xs">Pantalla Completa</span>
+                </>
+              )}
+            </Button>
+          </div>
         </div>
       </div>
     </div>

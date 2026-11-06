@@ -145,6 +145,30 @@ export const INITIAL_GAMES: Game[] = [
     schedule_times: [...DEFAULT_GAME_SCHEDULES["lotto-activo-internacional"]],
     created_at: new Date().toISOString(),
   },
+  {
+    id: "d953f80c-4335-4bc9-9f78-9b56193286fe",
+    name: "LOTOANIMALITO",
+    slug: "lotoanimalito",
+    color: "#0284c7",
+    logo_url: "https://toteback.atilax.io/storage/bases/1/0.png",
+    display_order: 9,
+    is_active: true,
+    loading_mode: "automatic",
+    schedule_times: [...DEFAULT_GAME_SCHEDULES["lotoanimalito"]],
+    created_at: new Date().toISOString(),
+  },
+  {
+    id: "61580ccf-5a2d-4d10-877e-4883515135e4",
+    name: "LOTTOPANTERA",
+    slug: "lottopantera",
+    color: "#f97316",
+    logo_url: "https://toteback.atilax.io/storage/bases/2/40.png",
+    display_order: 10,
+    is_active: true,
+    loading_mode: "automatic",
+    schedule_times: [...DEFAULT_GAME_SCHEDULES["lottopantera"]],
+    created_at: new Date().toISOString(),
+  },
 ];
 
 function buildInitialEntries(): MockStore["animal_entries"] {
@@ -380,6 +404,39 @@ function buildInitialClientLicenses(): ClientLicense[] {
     }
   }
   return [
+    {
+      id: "lic-exito-carupano-310148",
+      client_name: "EXITO CARUPANO",
+      pin_code: "310148",
+      status: "active",
+      expires_at: "2026-12-05T01:38:00.000Z",
+      max_devices: 1,
+      bound_device_ids: [],
+      notes: "",
+      created_at: "2026-11-05T01:38:00.000Z",
+    },
+    {
+      id: "lic-mariana-108271",
+      client_name: "Mariana",
+      pin_code: "108271",
+      status: "active",
+      expires_at: "2026-12-05T01:38:00.000Z",
+      max_devices: 1,
+      bound_device_ids: [],
+      notes: "",
+      created_at: "2026-11-05T01:38:00.000Z",
+    },
+    {
+      id: "lic-jose-barreto-770595",
+      client_name: "José barreto",
+      pin_code: "770595",
+      status: "active",
+      expires_at: "2026-12-05T01:38:00.000Z",
+      max_devices: 1,
+      bound_device_ids: [],
+      notes: "",
+      created_at: "2026-11-05T01:38:00.000Z",
+    },
     {
       id: "lic-master-admin",
       client_name: "Administrador Maestro",

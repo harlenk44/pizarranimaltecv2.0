@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, type ReactNode } from "react";
+import { useState, useEffect, useCallback, createContext, useContext, type ReactNode } from "react";
 import {
   KeyRound,
   ShieldAlert,
@@ -10,6 +10,25 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import type { ClientLicense } from "@/lib/types";
+import { parseClientLicenseName, isLotteryPermitted } from "@/lib/license-lotteries";
+
+export interface LicenseContextValue {
+  matchedLicense?: ClientLicense;
+  isAuthorized: boolean;
+  allowedLotteries: string[] | null;
+  isGameAllowed: (gameIdOrSlug?: string | null) => boolean;
+}
+
+export const LicenseContext = createContext<LicenseContextValue>({
+  matchedLicense: undefined,
+  isAuthorized: false,
+  allowedLotteries: null,
+  isGameAllowed: () => true,
+});
+
+export function useLicenseContext() {
+  return useContext(LicenseContext);
+}
 
 export const DEVICE_ID_STORAGE_KEY = "pizarra_tv_device_id";
 export const ACTIVATED_PIN_STORAGE_KEY = "pizarra_activated_pin";
@@ -155,6 +174,26 @@ export default function LicenseGate({
     isMasterPin || (matchedLicense && !isExpired && !isPaused && isDeviceAllowed),
   );
 
+  const parsedLicenseInfo = matchedLicense
+    ? parseClientLicenseName(matchedLicense.client_name)
+    : null;
+  const allowedLotteries =
+    isMasterPin || !requireLicense ? null : (parsedLicenseInfo?.allowedLotteries ?? null);
+
+  const isGameAllowed = useCallback(
+    (gameIdOrSlug?: string | null) => {
+      return isLotteryPermitted(gameIdOrSlug, allowedLotteries);
+    },
+    [allowedLotteries],
+  );
+
+  const licenseContextValue: LicenseContextValue = {
+    matchedLicense,
+    isAuthorized,
+    allowedLotteries,
+    isGameAllowed,
+  };
+
   // If device has a valid saved PIN but isn't listed in bound_device_ids yet, register it automatically
   useEffect(() => {
     if (
@@ -202,7 +241,9 @@ export default function LicenseGate({
     !forceClientPreview &&
     (!requireLicense || isAuthorized || (isAdmin && adminBypass))
   ) {
-    return <>{children}</>;
+    return (
+      <LicenseContext.Provider value={licenseContextValue}>{children}</LicenseContext.Provider>
+    );
   }
 
   const handleActivate = async (e: React.FormEvent) => {

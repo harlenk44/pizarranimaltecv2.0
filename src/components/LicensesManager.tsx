@@ -15,9 +15,20 @@ import {
   Loader2,
   Share2,
   Eye,
+  ListFilter,
+  CheckSquare,
+  Square,
+  X,
 } from "lucide-react";
 import type { ClientLicense } from "@/lib/types";
 import LicenseGate from "@/components/LicenseGate";
+import {
+  parseClientLicenseName,
+  formatClientLicenseName,
+  ALL_AVAILABLE_LOTTERIES,
+  DEFAULT_ANIMAL_LOTTERIES,
+  ALL_TRIPLE_LOTTERIES,
+} from "@/lib/license-lotteries";
 
 function generateRandomPin(): string {
   return String(Math.floor(100000 + Math.random() * 900000));
@@ -56,6 +67,14 @@ export default function LicensesManager() {
   const [durationDays, setDurationDays] = useState<string>("30");
   const [maxDevices, setMaxDevices] = useState<number>(1);
   const [notes, setNotes] = useState<string>("");
+  const [extendDays, setExtendDays] = useState<Record<string, number>>({});
+  const [formLotteries, setFormLotteries] = useState<string[]>(() =>
+    ALL_AVAILABLE_LOTTERIES.map((l) => l.id),
+  );
+
+  // Edit lotteries modal state
+  const [editingLicense, setEditingLicense] = useState<ClientLicense | null>(null);
+  const [editingLotteries, setEditingLotteries] = useState<string[]>([]);
 
   // Copy feedback
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -77,7 +96,71 @@ export default function LicensesManager() {
           setRequireLicense(data.requireLicense);
         }
         if (Array.isArray(data.clientLicenses)) {
-          setLicenses(data.clientLicenses);
+          let finalLicenses: ClientLicense[] = data.clientLicenses;
+
+          try {
+            const localDeletedRaw = localStorage.getItem("pizarra_deleted_licenses_v2");
+            const localDeleted = localDeletedRaw
+              ? JSON.parse(localDeletedRaw)
+              : { ids: [], pins: [] };
+            const deletedIdSet = new Set<string>([
+              ...(Array.isArray(data.deletedIds) ? data.deletedIds : []),
+              ...(Array.isArray(localDeleted.ids) ? localDeleted.ids : []),
+            ]);
+            const deletedPinSet = new Set<string>([
+              ...(Array.isArray(data.deletedPins) ? data.deletedPins : []),
+              ...(Array.isArray(localDeleted.pins) ? localDeleted.pins : []),
+            ]);
+
+            const cachedRaw = localStorage.getItem("pizarra_client_licenses_cache_v2");
+            if (cachedRaw) {
+              const cached = JSON.parse(cachedRaw);
+              if (Array.isArray(cached.licenses)) {
+                const missing = cached.licenses.filter(
+                  (oldLic: ClientLicense) =>
+                    oldLic &&
+                    oldLic.pin_code &&
+                    oldLic.pin_code !== "291007" &&
+                    !deletedIdSet.has(oldLic.id) &&
+                    !deletedPinSet.has(oldLic.pin_code) &&
+                    !finalLicenses.some(
+                      (l: ClientLicense) => l.id === oldLic.id || l.pin_code === oldLic.pin_code,
+                    ),
+                );
+
+                if (missing.length > 0) {
+                  const restoreRes = await fetch("/api/public/results/sync", {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      licenseAction: {
+                        type: "restore_batch",
+                        licenses: missing,
+                      },
+                    }),
+                  });
+                  if (restoreRes.ok) {
+                    const restoreData = await restoreRes.json();
+                    if (Array.isArray(restoreData.clientLicenses)) {
+                      finalLicenses = restoreData.clientLicenses;
+                    }
+                  }
+                }
+              }
+            }
+
+            localStorage.setItem(
+              "pizarra_client_licenses_cache_v2",
+              JSON.stringify({
+                requireLicense: data.requireLicense,
+                licenses: finalLicenses,
+              }),
+            );
+          } catch {
+            // ignore
+          }
+
+          setLicenses(finalLicenses);
         }
       }
     } catch {
@@ -93,6 +176,51 @@ export default function LicensesManager() {
 
   const runLicenseAction = async (actionPayload: Record<string, unknown>, successText?: string) => {
     setSaving(true);
+    // Optimistic local update so UI reflects action immediately without flicker
+    if (actionPayload.type === "delete" && typeof actionPayload.id === "string") {
+      setLicenses((prev) => {
+        const targetToDelete = prev.find((l) => l.id === actionPayload.id);
+        const next = prev.filter((l) => l.id !== actionPayload.id);
+        try {
+          const localDeletedRaw = localStorage.getItem("pizarra_deleted_licenses_v2");
+          const localDeleted = localDeletedRaw
+            ? JSON.parse(localDeletedRaw)
+            : { ids: [], pins: [] };
+          const ids = Array.isArray(localDeleted.ids) ? localDeleted.ids : [];
+          const pins = Array.isArray(localDeleted.pins) ? localDeleted.pins : [];
+          if (!ids.includes(actionPayload.id)) ids.push(actionPayload.id);
+          if (targetToDelete?.pin_code && !pins.includes(targetToDelete.pin_code)) {
+            pins.push(targetToDelete.pin_code);
+          }
+          localStorage.setItem("pizarra_deleted_licenses_v2", JSON.stringify({ ids, pins }));
+          localStorage.setItem(
+            "pizarra_client_licenses_cache_v2",
+            JSON.stringify({ requireLicense, licenses: next }),
+          );
+        } catch {
+          // ignore
+        }
+        return next;
+      });
+    } else if (actionPayload.type === "toggle_status" && typeof actionPayload.id === "string") {
+      setLicenses((prev) => {
+        const next = prev.map((l) =>
+          l.id === actionPayload.id
+            ? { ...l, status: l.status === "active" ? ("paused" as const) : ("active" as const) }
+            : l,
+        );
+        try {
+          localStorage.setItem(
+            "pizarra_client_licenses_cache_v2",
+            JSON.stringify({ requireLicense, licenses: next }),
+          );
+        } catch {
+          // ignore
+        }
+        return next;
+      });
+    }
+
     try {
       const res = await fetch("/api/public/results/sync", {
         method: "PUT",
@@ -106,6 +234,17 @@ export default function LicensesManager() {
         }
         if (Array.isArray(data.clientLicenses)) {
           setLicenses(data.clientLicenses);
+          try {
+            localStorage.setItem(
+              "pizarra_client_licenses_cache_v2",
+              JSON.stringify({
+                requireLicense: data.requireLicense,
+                licenses: data.clientLicenses,
+              }),
+            );
+          } catch {
+            // ignore
+          }
         }
         if (successText) showToast(successText);
       }
@@ -116,24 +255,73 @@ export default function LicensesManager() {
     }
   };
 
+  const toggleFormLottery = (id: string) => {
+    setFormLotteries((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  const toggleEditingLottery = (id: string) => {
+    setEditingLotteries((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
+  };
+
+  const handleOpenEditLotteries = (lic: ClientLicense) => {
+    const { allowedLotteries } = parseClientLicenseName(lic.client_name);
+    setEditingLicense(lic);
+    setEditingLotteries(
+      allowedLotteries && allowedLotteries.length > 0
+        ? [...allowedLotteries]
+        : ALL_AVAILABLE_LOTTERIES.map((l) => l.id),
+    );
+  };
+
+  const handleSaveEditLotteries = async () => {
+    if (!editingLicense) return;
+    const { cleanName } = parseClientLicenseName(editingLicense.client_name);
+    const packedName = formatClientLicenseName(
+      cleanName,
+      editingLotteries,
+      ALL_AVAILABLE_LOTTERIES.length,
+    );
+    await runLicenseAction(
+      {
+        type: "update_lotteries",
+        id: editingLicense.id,
+        client_name: packedName,
+      },
+      `Loterías actualizadas para ${cleanName} (${editingLotteries.length}/${ALL_AVAILABLE_LOTTERIES.length} activas)`,
+    );
+    setEditingLicense(null);
+  };
+
   const handleCreateLicense = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!clientName.trim()) return;
-    const days = durationDays === "unlimited" ? null : Number(durationDays) || 30;
+    const days =
+      durationDays === "unlimited" ? null : Math.max(1, Math.min(30, Number(durationDays) || 30));
+
+    const packedName = formatClientLicenseName(
+      clientName.trim(),
+      formLotteries,
+      ALL_AVAILABLE_LOTTERIES.length,
+    );
+
     await runLicenseAction(
       {
         type: "create",
-        client_name: clientName.trim(),
+        client_name: packedName,
         pin_code: pinCode.replace(/[^0-9]/g, "").slice(0, 6) || generateRandomPin(),
         days,
         max_devices: maxDevices,
         notes: notes.trim(),
       },
-      `Licencia creada para ${clientName.trim()}`,
+      `Licencia creada para ${clientName.trim()} (${formLotteries.length}/${ALL_AVAILABLE_LOTTERIES.length} loterías · ${days ? `${days} ${days === 1 ? "día" : "días"}` : "Permanente"})`,
     );
     setClientName("");
     setPinCode(generateRandomPin());
     setNotes("");
+    setDurationDays("30");
+    setFormLotteries(ALL_AVAILABLE_LOTTERIES.map((l) => l.id));
     setShowForm(false);
   };
 
@@ -364,21 +552,67 @@ export default function LicensesManager() {
             </div>
 
             <div>
-              <label className="block text-xs text-slate-400 mb-1.5 font-medium">
-                Tiempo de Vigencia
-              </label>
-              <select
-                value={durationDays}
-                onChange={(e) => setDurationDays(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
-              >
-                <option value="7">7 Días (Prueba / Semanal)</option>
-                <option value="15">15 Días (Quincenal)</option>
-                <option value="30">30 Días (Mensual)</option>
-                <option value="90">90 Días (Trimestral)</option>
-                <option value="365">365 Días (1 Año)</option>
-                <option value="unlimited">Ilimitado / Permanente</option>
-              </select>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-xs text-slate-400 font-medium">
+                  Duración (1 a 30 Días)
+                </label>
+                <span className="text-[11px] font-mono font-bold text-emerald-400">
+                  {durationDays === "unlimited"
+                    ? "Permanente"
+                    : `${durationDays} ${durationDays === "1" ? "día" : "días"}`}
+                </span>
+              </div>
+              <div className="space-y-1.5">
+                <select
+                  value={durationDays}
+                  onChange={(e) => setDurationDays(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 font-mono"
+                >
+                  {Array.from({ length: 30 }, (_, i) => i + 1).map((d) => (
+                    <option key={d} value={String(d)}>
+                      {d} {d === 1 ? "Día" : "Días"}{" "}
+                      {d === 1
+                        ? "· (Prueba 24h)"
+                        : d === 7
+                          ? "· (1 Semana)"
+                          : d === 15
+                            ? "· (Quincenal)"
+                            : d === 30
+                              ? "· (1 Mes Completo)"
+                              : ""}
+                    </option>
+                  ))}
+                  <option value="unlimited">Ilimitado / Permanente</option>
+                </select>
+
+                <div className="flex items-center gap-1 flex-wrap">
+                  {[1, 3, 7, 15, 30].map((d) => (
+                    <button
+                      key={d}
+                      type="button"
+                      onClick={() => setDurationDays(String(d))}
+                      className={`px-2 py-0.5 rounded text-[10px] font-mono font-semibold transition cursor-pointer ${
+                        durationDays === String(d)
+                          ? "bg-blue-600 text-white"
+                          : "bg-slate-800 text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      {d}d
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => setDurationDays("unlimited")}
+                    className={`px-2 py-0.5 rounded text-[10px] font-semibold transition cursor-pointer ${
+                      durationDays === "unlimited"
+                        ? "bg-blue-600 text-white"
+                        : "bg-slate-800 text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    Ilim.
+                  </button>
+                </div>
+              </div>
             </div>
 
             <div>
@@ -396,6 +630,144 @@ export default function LicensesManager() {
                 <option value={5}>5 Pantallas (TVs)</option>
                 <option value={10}>10 Pantallas (TVs)</option>
               </select>
+            </div>
+          </div>
+
+          {/* Loterías Permitidas Selector */}
+          <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-4 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800/80 pb-2.5">
+              <div className="flex items-center gap-2">
+                <ListFilter className="w-4 h-4 text-blue-400" />
+                <span className="text-xs font-bold text-white uppercase tracking-wider">
+                  Loterías Permitidas para esta Agencia
+                </span>
+                <span className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-blue-950 border border-blue-700/60 text-blue-300 font-semibold">
+                  {formLotteries.length} de {ALL_AVAILABLE_LOTTERIES.length} activas
+                </span>
+              </div>
+
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => setFormLotteries(ALL_AVAILABLE_LOTTERIES.map((l) => l.id))}
+                  className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-semibold transition cursor-pointer"
+                >
+                  Marcar Todas
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFormLotteries([])}
+                  className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white text-[11px] font-semibold transition cursor-pointer"
+                >
+                  Desmarcar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFormLotteries(DEFAULT_ANIMAL_LOTTERIES.map((l) => l.id))}
+                  className="px-2 py-1 rounded bg-emerald-950/60 border border-emerald-800/60 hover:bg-emerald-900/60 text-emerald-300 text-[11px] font-semibold transition cursor-pointer"
+                >
+                  Solo Animalitos
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFormLotteries(ALL_TRIPLE_LOTTERIES.map((l) => l.id))}
+                  className="px-2 py-1 rounded bg-purple-950/60 border border-purple-800/60 hover:bg-purple-900/60 text-purple-300 text-[11px] font-semibold transition cursor-pointer"
+                >
+                  Solo Triples
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Animalitos Group */}
+              <div className="space-y-2">
+                <div className="text-[11px] font-bold text-emerald-400 uppercase tracking-wider flex items-center justify-between">
+                  <span>Animalitos ({DEFAULT_ANIMAL_LOTTERIES.length})</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const ids = DEFAULT_ANIMAL_LOTTERIES.map((l) => l.id);
+                      const allSelected = ids.every((id) => formLotteries.includes(id));
+                      setFormLotteries((prev) =>
+                        allSelected
+                          ? prev.filter((id) => !ids.includes(id))
+                          : Array.from(new Set([...prev, ...ids])),
+                      );
+                    }}
+                    className="text-[10px] text-slate-400 hover:text-emerald-300 underline font-normal"
+                  >
+                    Alternar grupo
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {DEFAULT_ANIMAL_LOTTERIES.map((lottery) => {
+                    const isChecked = formLotteries.includes(lottery.id);
+                    return (
+                      <label
+                        key={lottery.id}
+                        className={`flex items-center gap-2 p-2 rounded-lg border text-xs cursor-pointer select-none transition ${
+                          isChecked
+                            ? "bg-emerald-950/40 border-emerald-700/60 text-white font-medium"
+                            : "bg-slate-900/40 border-slate-800 text-slate-500 hover:text-slate-300"
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={() => toggleFormLottery(lottery.id)}
+                          className="w-3.5 h-3.5 accent-emerald-500 rounded cursor-pointer"
+                        />
+                        <span className="truncate">{lottery.name}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Triples Group */}
+              <div className="space-y-2">
+                <div className="text-[11px] font-bold text-amber-400 uppercase tracking-wider flex items-center justify-between">
+                  <span>Triples ({ALL_TRIPLE_LOTTERIES.length})</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const ids = ALL_TRIPLE_LOTTERIES.map((l) => l.id);
+                      const allSelected = ids.every((id) => formLotteries.includes(id));
+                      setFormLotteries((prev) =>
+                        allSelected
+                          ? prev.filter((id) => !ids.includes(id))
+                          : Array.from(new Set([...prev, ...ids])),
+                      );
+                    }}
+                    className="text-[10px] text-slate-400 hover:text-amber-300 underline font-normal"
+                  >
+                    Alternar grupo
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {ALL_TRIPLE_LOTTERIES.map((lottery) => {
+                    const isChecked = formLotteries.includes(lottery.id);
+                    return (
+                      <label
+                        key={lottery.id}
+                        className={`flex items-center gap-2 p-2 rounded-lg border text-xs cursor-pointer select-none transition ${
+                          isChecked
+                            ? "bg-amber-950/40 border-amber-700/60 text-white font-medium"
+                            : "bg-slate-900/40 border-slate-800 text-slate-500 hover:text-slate-300"
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={() => toggleFormLottery(lottery.id)}
+                          className="w-3.5 h-3.5 accent-amber-500 rounded cursor-pointer"
+                        />
+                        <span className="truncate">{lottery.name}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
           </div>
 
@@ -449,7 +821,9 @@ export default function LicensesManager() {
                   <th className="py-3.5 px-4">PIN de Activación</th>
                   <th className="py-3.5 px-4">Estado y Vencimiento</th>
                   <th className="py-3.5 px-4">Pantallas (TV)</th>
-                  <th className="py-3.5 px-4 text-right">Acciones Rápidas (1 Clic)</th>
+                  <th className="py-3.5 px-4 text-right">
+                    Ampliar Tiempo (1 a 30 Días) y Acciones
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/80 text-sm">
@@ -461,14 +835,47 @@ export default function LicensesManager() {
                     ? lic.bound_device_ids.length
                     : 0;
 
+                  const { cleanName, allowedLotteries } = parseClientLicenseName(lic.client_name);
+                  const isAll =
+                    !allowedLotteries || allowedLotteries.length >= ALL_AVAILABLE_LOTTERIES.length;
+                  const totalAllowedCount = allowedLotteries
+                    ? allowedLotteries.length
+                    : ALL_AVAILABLE_LOTTERIES.length;
+
                   return (
                     <tr key={lic.id} className="hover:bg-slate-800/30 transition">
                       {/* Client Name & Notes */}
                       <td className="py-3.5 px-4">
-                        <div className="font-bold text-white">{lic.client_name}</div>
+                        <div className="font-bold text-white">{cleanName}</div>
                         {lic.notes && (
                           <div className="text-xs text-slate-400 mt-0.5">{lic.notes}</div>
                         )}
+                        <div className="mt-1.5 flex items-center gap-2 flex-wrap">
+                          <span
+                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold border ${
+                              isAll
+                                ? "bg-emerald-950/60 text-emerald-300 border-emerald-700/50"
+                                : "bg-blue-950/60 text-blue-300 border-blue-700/50"
+                            }`}
+                            title={
+                              isAll
+                                ? "Tiene acceso a todas las loterías"
+                                : `Loterías activas: ${allowedLotteries.join(", ")}`
+                            }
+                          >
+                            <ListFilter className="w-3 h-3" />
+                            {isAll
+                              ? `Todas (${ALL_AVAILABLE_LOTTERIES.length} loterías)`
+                              : `${totalAllowedCount} de ${ALL_AVAILABLE_LOTTERIES.length} loterías`}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEditLotteries(lic)}
+                            className="text-[10px] text-blue-400 hover:text-blue-300 underline font-medium cursor-pointer"
+                          >
+                            Configurar
+                          </button>
+                        </div>
                       </td>
 
                       {/* PIN Code + Copy */}
@@ -557,38 +964,60 @@ export default function LicensesManager() {
                         )}
                       </td>
 
-                      {/* Quick Actions */}
+                      {/* Quick Actions & Extension */}
                       <td className="py-3.5 px-4 text-right">
-                        <div className="inline-flex items-center justify-end gap-1.5 flex-wrap">
-                          <button
-                            type="button"
-                            disabled={saving}
-                            onClick={() =>
-                              runLicenseAction(
-                                { type: "renew", id: lic.id, days: 30 },
-                                `+30 días agregados a ${lic.client_name}`,
-                              )
-                            }
-                            className="px-2.5 py-1.5 rounded-lg bg-emerald-950/60 hover:bg-emerald-900/70 border border-emerald-700/50 text-emerald-300 text-xs font-mono font-bold tabular-nums transition flex items-center gap-1 cursor-pointer"
-                            title="Renovar por 30 días más"
-                          >
-                            <CalendarPlus className="w-3.5 h-3.5" />
-                            <span>+30d</span>
-                          </button>
+                        <div className="inline-flex items-center justify-end gap-2 flex-wrap">
+                          {/* Selector de 1 a 30 días + Botón Ampliar / + Días */}
+                          <div className="inline-flex items-center gap-1 bg-slate-950 border border-emerald-600/60 rounded-lg p-1 shadow-sm">
+                            <select
+                              value={extendDays[lic.id] ?? 30}
+                              onChange={(e) =>
+                                setExtendDays((prev) => ({
+                                  ...prev,
+                                  [lic.id]: Number(e.target.value),
+                                }))
+                              }
+                              className="bg-transparent text-emerald-400 font-mono font-bold text-xs px-1.5 py-1 focus:outline-none cursor-pointer"
+                              title="Seleccionar días a sumar (1 a 30 días)"
+                            >
+                              {Array.from({ length: 30 }, (_, i) => i + 1).map((d) => (
+                                <option
+                                  key={d}
+                                  value={d}
+                                  className="bg-slate-900 text-white font-mono"
+                                >
+                                  +{d} {d === 1 ? "día" : "días"}
+                                </option>
+                              ))}
+                            </select>
+
+                            <button
+                              type="button"
+                              disabled={saving}
+                              onClick={() => {
+                                const daysToAdd = extendDays[lic.id] ?? 30;
+                                runLicenseAction(
+                                  { type: "renew", id: lic.id, days: daysToAdd },
+                                  `+${daysToAdd} ${daysToAdd === 1 ? "día sumado" : "días sumados"} a ${cleanName}`,
+                                );
+                              }}
+                              className="px-2.5 py-1 rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold transition flex items-center gap-1 cursor-pointer"
+                              title="Sumar días sin perder los días restantes de la licencia"
+                            >
+                              <CalendarPlus className="w-3.5 h-3.5" />
+                              <span>Ampliar / + Días</span>
+                            </button>
+                          </div>
 
                           <button
                             type="button"
                             disabled={saving}
-                            onClick={() =>
-                              runLicenseAction(
-                                { type: "renew", id: lic.id, days: 7 },
-                                `+7 días agregados a ${lic.client_name}`,
-                              )
-                            }
-                            className="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-mono font-bold tabular-nums transition cursor-pointer"
-                            title="Extender 7 días"
+                            onClick={() => handleOpenEditLotteries(lic)}
+                            className="px-2.5 py-1.5 rounded-lg bg-blue-950/60 border border-blue-700/60 hover:bg-blue-900/60 text-blue-300 text-xs font-semibold transition flex items-center gap-1 cursor-pointer"
+                            title="Configurar qué loterías puede ver esta agencia"
                           >
-                            +7d
+                            <ListFilter className="w-3.5 h-3.5" />
+                            <span>Loterías</span>
                           </button>
 
                           <button
@@ -662,6 +1091,196 @@ export default function LicensesManager() {
           </div>
         )}
       </div>
+
+      {/* Modal para Editar Loterías Permitidas */}
+      {editingLicense && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-2xl p-6 shadow-2xl space-y-4 my-8">
+            <div className="flex items-start justify-between border-b border-slate-800 pb-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <ListFilter className="w-5 h-5 text-blue-400" />
+                  <h3 className="text-base font-bold text-white">
+                    Loterías Permitidas para{" "}
+                    <span className="text-blue-400">
+                      {parseClientLicenseName(editingLicense.client_name).cleanName}
+                    </span>
+                  </h3>
+                </div>
+                <p className="text-xs text-slate-400 mt-1">
+                  PIN:{" "}
+                  <span className="font-mono text-emerald-400 font-bold tracking-widest">
+                    {editingLicense.pin_code}
+                  </span>{" "}
+                  · La pizarra y los anuncios de voz solo mostrarán las loterías marcadas aquí.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setEditingLicense(null)}
+                className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Quick buttons */}
+            <div className="flex items-center justify-between gap-2 flex-wrap bg-slate-950/60 p-2.5 rounded-xl border border-slate-800 text-xs">
+              <span className="font-mono text-[11px] text-blue-300 font-semibold">
+                {editingLotteries.length} de {ALL_AVAILABLE_LOTTERIES.length} loterías seleccionadas
+              </span>
+
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => setEditingLotteries(ALL_AVAILABLE_LOTTERIES.map((l) => l.id))}
+                  className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-semibold transition cursor-pointer"
+                >
+                  Marcar Todas
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditingLotteries([])}
+                  className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white text-[11px] font-semibold transition cursor-pointer"
+                >
+                  Desmarcar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditingLotteries(DEFAULT_ANIMAL_LOTTERIES.map((l) => l.id))}
+                  className="px-2 py-1 rounded bg-emerald-950/60 border border-emerald-800/60 hover:bg-emerald-900/60 text-emerald-300 text-[11px] font-semibold transition cursor-pointer"
+                >
+                  Solo Animalitos
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditingLotteries(ALL_TRIPLE_LOTTERIES.map((l) => l.id))}
+                  className="px-2 py-1 rounded bg-purple-950/60 border border-purple-800/60 hover:bg-purple-900/60 text-purple-300 text-[11px] font-semibold transition cursor-pointer"
+                >
+                  Solo Triples
+                </button>
+              </div>
+            </div>
+
+            {/* Checkbox columns */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-h-[50vh] overflow-y-auto p-1">
+              {/* Animalitos */}
+              <div className="space-y-2">
+                <div className="text-[11px] font-bold text-emerald-400 uppercase tracking-wider flex items-center justify-between">
+                  <span>Animalitos ({DEFAULT_ANIMAL_LOTTERIES.length})</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const ids = DEFAULT_ANIMAL_LOTTERIES.map((l) => l.id);
+                      const allSelected = ids.every((id) => editingLotteries.includes(id));
+                      setEditingLotteries((prev) =>
+                        allSelected
+                          ? prev.filter((id) => !ids.includes(id))
+                          : Array.from(new Set([...prev, ...ids])),
+                      );
+                    }}
+                    className="text-[10px] text-slate-400 hover:text-emerald-300 underline font-normal cursor-pointer"
+                  >
+                    Alternar grupo
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {DEFAULT_ANIMAL_LOTTERIES.map((lottery) => {
+                    const isChecked = editingLotteries.includes(lottery.id);
+                    return (
+                      <label
+                        key={lottery.id}
+                        className={`flex items-center gap-2 p-2 rounded-lg border text-xs cursor-pointer select-none transition ${
+                          isChecked
+                            ? "bg-emerald-950/40 border-emerald-700/60 text-white font-medium"
+                            : "bg-slate-950/40 border-slate-800 text-slate-500 hover:text-slate-300"
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={() => toggleEditingLottery(lottery.id)}
+                          className="w-3.5 h-3.5 accent-emerald-500 rounded cursor-pointer"
+                        />
+                        <span className="truncate">{lottery.name}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Triples */}
+              <div className="space-y-2">
+                <div className="text-[11px] font-bold text-amber-400 uppercase tracking-wider flex items-center justify-between">
+                  <span>Triples ({ALL_TRIPLE_LOTTERIES.length})</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const ids = ALL_TRIPLE_LOTTERIES.map((l) => l.id);
+                      const allSelected = ids.every((id) => editingLotteries.includes(id));
+                      setEditingLotteries((prev) =>
+                        allSelected
+                          ? prev.filter((id) => !ids.includes(id))
+                          : Array.from(new Set([...prev, ...ids])),
+                      );
+                    }}
+                    className="text-[10px] text-slate-400 hover:text-amber-300 underline font-normal cursor-pointer"
+                  >
+                    Alternar grupo
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {ALL_TRIPLE_LOTTERIES.map((lottery) => {
+                    const isChecked = editingLotteries.includes(lottery.id);
+                    return (
+                      <label
+                        key={lottery.id}
+                        className={`flex items-center gap-2 p-2 rounded-lg border text-xs cursor-pointer select-none transition ${
+                          isChecked
+                            ? "bg-amber-950/40 border-amber-700/60 text-white font-medium"
+                            : "bg-slate-950/40 border-slate-800 text-slate-500 hover:text-slate-300"
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={() => toggleEditingLottery(lottery.id)}
+                          className="w-3.5 h-3.5 accent-amber-500 rounded cursor-pointer"
+                        />
+                        <span className="truncate">{lottery.name}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setEditingLicense(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={saving}
+                onClick={handleSaveEditLotteries}
+                className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-bold transition flex items-center gap-1.5 shadow-lg cursor-pointer"
+              >
+                {saving ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Check className="w-4 h-4" />
+                )}
+                <span>Guardar Loterías Permitidas</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

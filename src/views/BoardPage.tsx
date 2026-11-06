@@ -15,11 +15,19 @@ import {
   Sliders,
   Target,
   KeyRound,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { useBoardSettings } from "@/context/BoardSettingsContext";
+import { useLicenseContext } from "@/components/LicenseGate";
 import TriplesBoard from "@/components/TriplesBoard";
-import { TRIPLE_GAMES, buildTripleAlertItem, type TripleResult } from "@/lib/triples";
+import {
+  TRIPLE_GAMES,
+  buildTripleAlertItem,
+  type TripleGameConfig,
+  type TripleResult,
+} from "@/lib/triples";
 import AdBanner, { AdTickerBar } from "@/components/AdBanner";
 import ResultAlertModal, { type ResultAlertItem } from "@/components/ResultAlertModal";
 import VoiceSettingsModal from "@/components/VoiceSettingsModal";
@@ -27,6 +35,7 @@ import AnimalMedia from "@/components/AnimalMedia";
 import { lotteryDate, LOTTERY_TIMEZONE } from "@/lib/lottery-date";
 import { useDisplay } from "@/context/DisplayContext";
 import { sorteoAlertTracker, getSorteoAlertKey } from "@/lib/sorteo-alert-tracker";
+import { getGameScheduleTimes } from "@/lib/game-schedules";
 
 interface BoardPageProps {
   onAdminClick: () => void;
@@ -85,8 +94,6 @@ function formatBoardDate(d: Date): string {
   return `${capitalize(weekday)}, ${day} De ${capitalize(month)}`;
 }
 
-import { getGameScheduleTimes, formatScheduleTime } from "@/lib/game-schedules";
-
 function buildFullSchedule(gameOrSlug: Game | string, _results: Result[]): string[] {
   return getGameScheduleTimes(gameOrSlug);
 }
@@ -114,21 +121,10 @@ function getDynamicGridStyle(count: number): React.CSSProperties {
   } else if (count <= 6) {
     cols = 3;
     rows = 2;
-  } else if (count <= 8) {
-    cols = 4;
-    rows = 2;
-  } else if (count <= 10) {
-    cols = 5;
-    rows = 2;
-  } else if (count <= 12) {
-    cols = 4;
-    rows = 3;
-  } else if (count <= 15) {
-    cols = 5;
-    rows = 3;
   } else {
+    // 7 or 8 items -> crisp 4 columns x 2 rows
     cols = 4;
-    rows = Math.ceil(count / 4);
+    rows = 2;
   }
 
   return {
@@ -137,9 +133,25 @@ function getDynamicGridStyle(count: number): React.CSSProperties {
   };
 }
 
+const MAX_PRODUCTS_PER_PAGE = 8;
+const DEFAULT_ROTATION_SECONDS = 25;
+
+interface BoardWindowPage {
+  id: string;
+  type: "animalitos" | "triples";
+  pageIndex: number;
+  totalPages: number;
+  title: string;
+  label: string;
+  shortLabel: string;
+  animalCards?: GameWithResults[];
+  tripleGames?: TripleGameConfig[];
+}
+
 export default function BoardPage({ onAdminClick }: BoardPageProps) {
   const { profile, signOut } = useAuth();
   const { settings } = useBoardSettings();
+  const { isGameAllowed } = useLicenseContext();
   const [games, setGames] = useState<Game[]>([]);
   const [resultsMap, setResultsMap] = useState<Record<string, Result[]>>({});
   const [animalImages, setAnimalImages] = useState<AnimalImageMap>({});
@@ -148,7 +160,9 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
   const [loading, setLoading] = useState(true);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [clock, setClock] = useState(new Date());
-  const [showTriples, setShowTriples] = useState(false);
+  const [activePageIndex, setActivePageIndex] = useState<number>(0);
+  const [rotationProgress, setRotationProgress] = useState<number>(0);
+  const [timerResetKey, setTimerResetKey] = useState<number>(() => Date.now());
   const [tripleResults, setTripleResults] = useState<TripleResult[]>(() => {
     if (typeof window !== "undefined") {
       try {
@@ -234,22 +248,28 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     [preferences?.showAlertModal],
   );
 
-  const enqueueUniqueAlert = useCallback((rawItem: ResultAlertItem): boolean => {
-    const item = resolveAlertWithAnimalImage(rawItem, animalImagesRef.current, gamesRef.current);
-    if (sorteoAlertTracker.hasBeenAlerted(item)) {
-      return false;
-    }
-    const key = getSorteoAlertKey(item);
-    sorteoAlertTracker.markAsAlerted(key);
-    if (!alertQueueRef.current.some((a) => getSorteoAlertKey(a) === key)) {
-      alertQueueRef.current = [...alertQueueRef.current, item];
-    }
-    setAlertQueue((prev) => {
-      if (prev.some((a) => getSorteoAlertKey(a) === key)) return prev;
-      return [...prev, item];
-    });
-    return true;
-  }, []);
+  const enqueueUniqueAlert = useCallback(
+    (rawItem: ResultAlertItem): boolean => {
+      if (rawItem.gameId && !isGameAllowed(rawItem.gameId)) {
+        return false;
+      }
+      const item = resolveAlertWithAnimalImage(rawItem, animalImagesRef.current, gamesRef.current);
+      if (sorteoAlertTracker.hasBeenAlerted(item)) {
+        return false;
+      }
+      const key = getSorteoAlertKey(item);
+      sorteoAlertTracker.markAsAlerted(key);
+      if (!alertQueueRef.current.some((a) => getSorteoAlertKey(a) === key)) {
+        alertQueueRef.current = [...alertQueueRef.current, item];
+      }
+      setAlertQueue((prev) => {
+        if (prev.some((a) => getSorteoAlertKey(a) === key)) return prev;
+        return [...prev, item];
+      });
+      return true;
+    },
+    [isGameAllowed],
+  );
 
   const handleVoiceToggle = (enabled: boolean) => {
     setVoiceEnabled(enabled);
@@ -266,20 +286,8 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       }
       return next;
     });
+    setTimerResetKey(Date.now());
   };
-
-  useEffect(() => {
-    if (settings.start_view === "weekly") setShowTriples(true);
-  }, [settings.start_view]);
-
-  // Pause rotation while alert modal is showing so it doesn't unmount prematurely
-  const isRotationActive = autoRotate || settings.rotation_enabled;
-  useEffect(() => {
-    if (!isRotationActive || alertQueue.length > 0) return;
-    const intervalSec = Math.max(5, settings.rotation_interval_seconds || 25);
-    const timer = setInterval(() => setShowTriples((current) => !current), intervalSec * 1000);
-    return () => clearInterval(timer);
-  }, [isRotationActive, settings.rotation_interval_seconds, alertQueue.length]);
 
   const fetchAll = useCallback(async () => {
     // 1. Sync from server backend to get latest results, alerts, and custom animal videos/images
@@ -716,14 +724,170 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     window.dispatchEvent(new CustomEvent("pizarra:open-license-screen"));
   };
 
-  const gameCards: GameWithResults[] = games.map((g) => ({
-    ...g,
-    latest_results: resultsMap[g.id] ?? [],
-  }));
+  // Paginación automática en bloques de máximo 8 productos por ventana
+  const boardWindows = useMemo<BoardWindowPage[]>(() => {
+    const list: BoardWindowPage[] = [];
+
+    // 1. Animalitos (loterías visibles divididas en páginas de máximo 8)
+    const visibleAnimals = games.filter((g) => isGameAllowed(g.slug || g.id));
+    const allAnimalCards: GameWithResults[] = visibleAnimals.map((g) => ({
+      ...g,
+      latest_results: resultsMap[g.id] ?? [],
+    }));
+
+    if (allAnimalCards.length > 0) {
+      const totalAnimalPages = Math.ceil(allAnimalCards.length / MAX_PRODUCTS_PER_PAGE);
+      for (let i = 0; i < totalAnimalPages; i++) {
+        const chunk = allAnimalCards.slice(
+          i * MAX_PRODUCTS_PER_PAGE,
+          (i + 1) * MAX_PRODUCTS_PER_PAGE,
+        );
+        const isMulti = totalAnimalPages > 1;
+        list.push({
+          id: `animalitos-${i + 1}`,
+          type: "animalitos",
+          pageIndex: i,
+          totalPages: totalAnimalPages,
+          title: isMulti
+            ? `Pizarra Animaltec · Animalitos (Parte ${i + 1} de ${totalAnimalPages})`
+            : "Pizarra Animaltec · Animalitos",
+          label: isMulti ? `Animalitos ${i + 1}/${totalAnimalPages}` : "Animalitos",
+          shortLabel: isMulti ? `${i + 1}/${totalAnimalPages}` : "Anim",
+          animalCards: chunk,
+        });
+      }
+    }
+
+    // 2. Triples (loterías visibles divididas en páginas de máximo 8)
+    const visibleTriples = TRIPLE_GAMES.filter((g) => isGameAllowed(g.id) || isGameAllowed(g.slug));
+    if (visibleTriples.length > 0) {
+      const totalTriplePages = Math.ceil(visibleTriples.length / MAX_PRODUCTS_PER_PAGE);
+      for (let i = 0; i < totalTriplePages; i++) {
+        const chunk = visibleTriples.slice(
+          i * MAX_PRODUCTS_PER_PAGE,
+          (i + 1) * MAX_PRODUCTS_PER_PAGE,
+        );
+        const isMulti = totalTriplePages > 1;
+        list.push({
+          id: `triples-${i + 1}`,
+          type: "triples",
+          pageIndex: i,
+          totalPages: totalTriplePages,
+          title: isMulti
+            ? `Pizarra Animaltec · Triples (Parte ${i + 1} de ${totalTriplePages})`
+            : "Pizarra Animaltec · Resultados de Triples",
+          label: isMulti ? `Triples ${i + 1}/${totalTriplePages}` : "Triples",
+          shortLabel: isMulti ? `${i + 1}/${totalTriplePages}` : "Trip",
+          tripleGames: chunk,
+        });
+      }
+    }
+
+    if (list.length === 0) {
+      list.push({
+        id: "empty-1",
+        type: "animalitos",
+        pageIndex: 0,
+        totalPages: 1,
+        title: "Pizarra Animaltec",
+        label: "Pizarra",
+        shortLabel: "1",
+        animalCards: [],
+      });
+    }
+
+    return list;
+  }, [games, resultsMap, isGameAllowed]);
+
+  const safePageIndex = activePageIndex < boardWindows.length ? activePageIndex : 0;
+  const currentWindow = boardWindows[safePageIndex] || boardWindows[0];
+  const showTriples = currentWindow.type === "triples";
+
+  const goToPage = useCallback(
+    (index: number) => {
+      setActivePageIndex((index + boardWindows.length) % boardWindows.length);
+      setTimerResetKey(Date.now());
+      setRotationProgress(0);
+    },
+    [boardWindows.length],
+  );
+
+  const goToNextPage = useCallback(() => {
+    goToPage(safePageIndex + 1);
+  }, [goToPage, safePageIndex]);
+
+  const goToPrevPage = useCallback(() => {
+    goToPage(safePageIndex - 1);
+  }, [goToPage, safePageIndex]);
+
+  // Soporte para control remoto TV y teclado
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+      if (
+        e.key === "ArrowRight" ||
+        e.key === "ArrowDown" ||
+        e.key === "PageDown" ||
+        e.key === " "
+      ) {
+        e.preventDefault();
+        goToNextPage();
+      } else if (e.key === "ArrowLeft" || e.key === "ArrowUp" || e.key === "PageUp") {
+        e.preventDefault();
+        goToPrevPage();
+      } else if (e.key >= "1" && e.key <= "9") {
+        const targetIdx = parseInt(e.key, 10) - 1;
+        if (targetIdx < boardWindows.length) {
+          goToPage(targetIdx);
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [goToNextPage, goToPrevPage, goToPage, boardWindows.length]);
+
+  // Rotación automática cada 25 segundos (con pausa durante anuncios emergentes y configuración)
+  const isRotationActive = autoRotate || settings.rotation_enabled;
+  useEffect(() => {
+    if (!isRotationActive) return;
+    if (alertQueue.length > 0) return; // Pausa mientras el popup de sorteo está activo
+    if (showVoiceSettings) return; // Pausa mientras el menú de voz está abierto
+    if (boardWindows.length <= 1) return;
+
+    const intervalSec = Math.max(5, settings.rotation_interval_seconds || DEFAULT_ROTATION_SECONDS);
+    const intervalMs = intervalSec * 1000;
+    const tickInterval = 500;
+    let elapsed = 0;
+
+    const timer = setInterval(() => {
+      elapsed += tickInterval;
+      setRotationProgress(Math.min(100, (elapsed / intervalMs) * 100));
+
+      if (elapsed >= intervalMs) {
+        elapsed = 0;
+        setRotationProgress(0);
+        setActivePageIndex((prev) => (prev + 1) % boardWindows.length);
+      }
+    }, tickInterval);
+
+    return () => clearInterval(timer);
+  }, [
+    isRotationActive,
+    alertQueue.length,
+    showVoiceSettings,
+    boardWindows.length,
+    settings.rotation_interval_seconds,
+    timerResetKey,
+  ]);
 
   const enrichedAlertQueue = useMemo(
-    () => alertQueue.map((item) => resolveAlertWithAnimalImage(item, animalImages, games)),
-    [alertQueue, animalImages, games],
+    () =>
+      alertQueue
+        .filter((item) => !item.gameId || isGameAllowed(item.gameId))
+        .map((item) => resolveAlertWithAnimalImage(item, animalImages, games)),
+    [alertQueue, animalImages, games, isGameAllowed],
   );
 
   return (
@@ -742,20 +906,89 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           backgroundColor: settings.surface_color || "transparent",
         }}
       >
-        {/* Left Title */}
-        <div className="flex items-center gap-3">
+        {/* Left Title & Window Tabs */}
+        <div className="flex items-center gap-3 lg:gap-4 flex-wrap">
           <h1
-            className="text-xl sm:text-2xl lg:text-3xl font-black tracking-tight font-sans"
+            className="text-lg sm:text-xl lg:text-2xl font-black tracking-tight font-sans truncate max-w-[280px] sm:max-w-none"
             style={{ color: settings.text_color || "#ffffff" }}
           >
-            {showTriples ? "Pizarra Animaltec · Resultados de Triples" : "Pizarra Animaltec"}
+            {currentWindow.title}
           </h1>
+
+          {/* Indicadores Visuales y Pestañas de Ventanas (Máx. 8 productos por ventana) */}
+          {boardWindows.length > 1 && (
+            <div className="flex items-center gap-1 p-1 bg-slate-900/90 border border-slate-800 rounded-xl overflow-x-auto select-none shadow-inner">
+              <button
+                type="button"
+                onClick={goToPrevPage}
+                className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition cursor-pointer"
+                title="Ventana anterior (o tecla Flecha Izquierda)"
+              >
+                <ChevronLeft className="w-3.5 h-3.5" />
+              </button>
+
+              {boardWindows.map((win, idx) => {
+                const isActive = idx === safePageIndex;
+                const isAnimal = win.type === "animalitos";
+
+                return (
+                  <button
+                    key={win.id}
+                    type="button"
+                    onClick={() => goToPage(idx)}
+                    className={`relative px-2.5 py-1 rounded-lg border text-xs font-bold transition flex items-center gap-1.5 cursor-pointer whitespace-nowrap overflow-hidden ${
+                      isActive
+                        ? isAnimal
+                          ? "bg-emerald-950/90 border-emerald-500/80 text-emerald-300 shadow-md ring-1 ring-emerald-500/40"
+                          : "bg-amber-950/90 border-amber-500/80 text-amber-300 shadow-md ring-1 ring-amber-500/40"
+                        : "bg-slate-950/50 border-slate-800/80 text-slate-400 hover:text-white hover:bg-slate-800/80"
+                    }`}
+                    title={`Ver ${win.title} (Rotación cada 25s)`}
+                  >
+                    {isAnimal ? (
+                      <PawPrint
+                        className={`w-3.5 h-3.5 ${isActive ? "text-emerald-400" : "text-slate-500"}`}
+                      />
+                    ) : (
+                      <Hash
+                        className={`w-3.5 h-3.5 ${isActive ? "text-amber-400" : "text-slate-500"}`}
+                      />
+                    )}
+                    <span>{win.label}</span>
+
+                    {/* Barra de progreso discreta de 25 segundos para la ventana activa */}
+                    {isActive &&
+                      isRotationActive &&
+                      boardWindows.length > 1 &&
+                      alertQueue.length === 0 &&
+                      !showVoiceSettings && (
+                        <span
+                          className={`absolute bottom-0 left-0 h-0.5 transition-all duration-300 ${
+                            isAnimal ? "bg-emerald-400" : "bg-amber-400"
+                          }`}
+                          style={{ width: `${rotationProgress}%` }}
+                        />
+                      )}
+                  </button>
+                );
+              })}
+
+              <button
+                type="button"
+                onClick={goToNextPage}
+                className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition cursor-pointer"
+                title="Siguiente ventana (o tecla Flecha Derecha)"
+              >
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Right Clock & Controls */}
-        <div className="flex items-center gap-4 sm:gap-6">
+        <div className="flex items-center gap-3 sm:gap-5">
           <div className="text-right">
-            <div className="text-xl sm:text-2xl lg:text-3xl font-mono font-black text-emerald-400 tracking-tight tabular-nums leading-none">
+            <div className="text-lg sm:text-2xl lg:text-3xl font-mono font-black text-emerald-400 tracking-tight tabular-nums leading-none">
               {clock.toLocaleTimeString("es-VE", {
                 timeZone: LOTTERY_TIMEZONE,
                 hour: "2-digit",
@@ -764,15 +997,15 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
                 hour12: false,
               })}
             </div>
-            <div className="text-[11px] sm:text-xs font-semibold opacity-90 mt-0.5">
+            <div className="text-[10px] sm:text-xs font-semibold opacity-90 mt-0.5">
               {formatBoardDate(clock)}
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 sm:gap-2">
             <button
               onClick={handleTestAlert}
-              className="p-2 rounded-lg bg-slate-900 border border-slate-800 hover:bg-slate-800 transition text-xs text-slate-300 hidden md:flex items-center gap-1.5"
+              className="p-2 rounded-lg bg-slate-900 border border-slate-800 hover:bg-slate-800 transition text-xs text-slate-300 hidden md:flex items-center gap-1.5 cursor-pointer"
               title="Probar voz"
             >
               <Volume2 className="w-4 h-4 text-emerald-400" />
@@ -780,7 +1013,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
             </button>
             <button
               onClick={() => setShowVoiceSettings(true)}
-              className="p-2 rounded-lg bg-slate-900 border border-slate-800 hover:bg-slate-800 transition text-xs text-slate-300 hidden lg:flex items-center gap-1.5"
+              className="p-2 rounded-lg bg-slate-900 border border-slate-800 hover:bg-slate-800 transition text-xs text-slate-300 hidden lg:flex items-center gap-1.5 cursor-pointer"
               title="Ajustar voz"
             >
               <Sliders className="w-4 h-4 text-amber-400" />
@@ -788,7 +1021,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
             </button>
             <button
               onClick={() => handleVoiceToggle(!voiceEnabled)}
-              className={`p-2 rounded-lg transition border border-slate-800 ${
+              className={`p-2 rounded-lg transition border border-slate-800 cursor-pointer ${
                 voiceEnabled
                   ? "bg-blue-950/60 text-blue-400 hover:bg-blue-900/60"
                   : "bg-slate-900 text-slate-500 hover:bg-slate-800"
@@ -798,49 +1031,22 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
               {voiceEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
             </button>
 
-            {/* Switch between Animalitos and Resultados de Triples */}
-            <button
-              onClick={() => setShowTriples((prev) => !prev)}
-              className={`px-2.5 py-2 rounded-lg border transition flex items-center gap-1.5 text-xs font-bold cursor-pointer whitespace-nowrap shrink-0 ${
-                showTriples
-                  ? "bg-amber-500/20 border-amber-500/60 text-amber-300 hover:bg-amber-500/30"
-                  : "bg-slate-900 border-slate-800 text-slate-200 hover:bg-slate-800"
-              }`}
-              title={
-                showTriples
-                  ? "Cambiar a Pizarra de Animalitos"
-                  : "Ver ventana de Resultados de Triples"
-              }
-            >
-              {showTriples ? (
-                <>
-                  <PawPrint className="w-4 h-4 text-emerald-400" />
-                  <span className="hidden sm:inline">Animalitos</span>
-                </>
-              ) : (
-                <>
-                  <Hash className="w-4 h-4 text-amber-400" />
-                  <span className="hidden sm:inline">Resultados de Triples</span>
-                </>
-              )}
-            </button>
-
-            {/* Auto-Rotation toggle between Animalitos and Triples */}
+            {/* Alternar rotación automática de 25 segundos */}
             <button
               onClick={handleAutoRotateToggle}
-              className={`p-2 rounded-lg border transition flex items-center gap-1 text-xs font-semibold cursor-pointer whitespace-nowrap shrink-0 ${
+              className={`px-2.5 py-2 rounded-lg border transition flex items-center gap-1.5 text-xs font-bold cursor-pointer whitespace-nowrap shrink-0 ${
                 isRotationActive
-                  ? "bg-emerald-950/70 border-emerald-600/70 text-emerald-300 hover:bg-emerald-900/70"
+                  ? "bg-emerald-950/80 border-emerald-600/80 text-emerald-300 hover:bg-emerald-900/80"
                   : "bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-800"
               }`}
               title={
                 isRotationActive
-                  ? "Rotación automática activa (Animalitos / Triples)"
-                  : "Activar rotación automática entre Animalitos y Triples"
+                  ? "Rotación automática activa (cada 25s) · Haz clic para pausar"
+                  : "Rotación pausada · Haz clic para activar rotación automática (cada 25s)"
               }
             >
               <Repeat className="w-4 h-4" />
-              <span className="hidden xl:inline">Auto</span>
+              <span className="hidden sm:inline">{isRotationActive ? "Auto 25s" : "Manual"}</span>
             </button>
 
             <button
@@ -886,25 +1092,26 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           className="board-fluid-main w-3/4 flex-1 min-h-0 min-w-0 h-full overflow-hidden"
           style={{ backgroundColor: settings.background_color || "#000000" }}
         >
-          {showTriples ? (
+          {currentWindow.type === "triples" ? (
             <TriplesBoard
               results={tripleResults.filter((r) => r.draw_date === lotteryDate())}
               loading={loading}
+              games={currentWindow.tripleGames}
             />
           ) : loading ? (
             <div className="flex items-center justify-center h-full">
               <div className="animate-pulse text-slate-400 font-medium">Cargando resultados...</div>
             </div>
-          ) : gameCards.length === 0 ? (
+          ) : !currentWindow.animalCards || currentWindow.animalCards.length === 0 ? (
             <div className="flex items-center justify-center h-full text-slate-400">
-              No hay juegos activos configurados.
+              No hay juegos activos configurados para esta ventana.
             </div>
           ) : (
             <div
               className="board-fluid-grid grid h-full w-full min-h-0 min-w-0 auto-rows-fr overflow-hidden"
-              style={getDynamicGridStyle(gameCards.length)}
+              style={getDynamicGridStyle(currentWindow.animalCards.length)}
             >
-              {gameCards.map((game) => (
+              {currentWindow.animalCards.map((game) => (
                 <GameCard
                   key={game.id}
                   game={game}

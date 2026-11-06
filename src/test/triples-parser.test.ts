@@ -9,7 +9,7 @@ import { TRIPLE_GAMES, formatTripleSummary, buildTripleAlertItem } from "@/lib/t
 describe("triples-parser", () => {
   const drawDate = "2026-04-20";
 
-  it("defines the exact 8 requested Triples lotteries", () => {
+  it("defines the configured Triples lotteries including Triple Pantera and Terminal Pantera", () => {
     expect(TRIPLE_GAMES.map((g) => g.slug)).toEqual([
       "triple-facil",
       "trio-activo",
@@ -17,8 +17,10 @@ describe("triples-parser", () => {
       "triple-zulia",
       "triple-caliente",
       "triple-caracas",
-      "triple-pantera",
+      "triple-ricachona",
       "arrejuntao",
+      "triple-pantera",
+      "terminal-pantera",
     ]);
   });
 
@@ -99,7 +101,7 @@ describe("triples-parser", () => {
         </tbody>
       </table>
       <table class="resultados">
-        <thead><tr><th colspan="5">Triple Pantera</th></tr></thead>
+        <thead><tr><th colspan="5">La Ricachona</th></tr></thead>
         <tbody>
           <tr>
             <td>10:00 AM</td>
@@ -137,9 +139,9 @@ describe("triples-parser", () => {
     expect(chance?.triple_a).toBe("999");
     expect(chance?.source).toBe("manual");
 
-    // Pantera was newly added
+    // Ricachona was newly added
     expect(newlyAdded).toHaveLength(1);
-    expect(newlyAdded[0]?.game_id).toBe("triple-pantera");
+    expect(newlyAdded[0]?.game_id).toBe("triple-ricachona");
     expect(newlyAdded[0]?.zodiac_sign).toBe("TAU");
 
     const summary = formatTripleSummary(newlyAdded[0]!);
@@ -147,7 +149,7 @@ describe("triples-parser", () => {
     expect(summary).toContain("Tauro");
 
     const alertItem = buildTripleAlertItem(newlyAdded[0]!);
-    expect(alertItem.gameName).toBe("Triple Pantera");
+    expect(alertItem.gameName).toBe("Triple Ricachona");
     expect(alertItem.animalNumber).toBe(305);
   });
 });

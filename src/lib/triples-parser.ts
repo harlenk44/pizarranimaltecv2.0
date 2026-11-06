@@ -112,9 +112,15 @@ export function parseTuazarTriplesHtml(html: string, drawDate: string): TripleRe
     } else if (normTitle.includes("CARACAS") && normTitle.includes("ZODIAC")) {
       targetGameId = "triple-caracas";
       mode = "CSIGN";
-    } else if (normTitle.includes("TRIPLE PANTERA") || normTitle === "PANTERA") {
-      targetGameId = "triple-pantera";
-      mode = "AB";
+    } else if (
+      normTitle.includes("RICACHONA") ||
+      normTitle.includes("TRIPLE RICACHONA") ||
+      normTitle.includes("LA RICACHONA") ||
+      normTitle.includes("TRIPLE PANTERA") ||
+      normTitle === "PANTERA"
+    ) {
+      targetGameId = "triple-ricachona";
+      mode = "SINGLE";
     }
 
     if (!targetGameId) continue;
@@ -184,8 +190,14 @@ export function parseLoteriaDeHoyTriplesHtml(html: string, drawDate: string): Tr
       targetGameId = "triple-caliente";
     } else if (normTitle.includes("TRIPLE CARACAS")) {
       targetGameId = "triple-caracas";
-    } else if (normTitle.includes("TRIPLE PANTERA") || normTitle === "PANTERA") {
-      targetGameId = "triple-pantera";
+    } else if (
+      normTitle.includes("RICACHONA") ||
+      normTitle.includes("TRIPLE RICACHONA") ||
+      normTitle.includes("LA RICACHONA") ||
+      normTitle.includes("TRIPLE PANTERA") ||
+      normTitle === "PANTERA"
+    ) {
+      targetGameId = "triple-ricachona";
     } else if (normTitle.includes("ARREJUNTAO")) {
       targetGameId = "arrejuntao";
     }

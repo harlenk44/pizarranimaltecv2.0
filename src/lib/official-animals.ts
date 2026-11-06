@@ -173,6 +173,23 @@ export const MONJE_MILLONARIO_ANIMALS: OfficialAnimal[] = [
   { number: 76, name: "Ballena" },
 ];
 
+// Lotto Pantera: 50 figures (0, 00 to 48)
+export const LOTTOPANTERA_ANIMALS: OfficialAnimal[] = [
+  ...BASE_ANIMALS.slice(0, 37), // 0 to 36
+  { number: 37, name: "Chigüire" },
+  { number: 38, name: "Turpial" },
+  { number: 39, name: "Araña" },
+  { number: 40, name: "Pantera" },
+  { number: 41, name: "Conejo" },
+  { number: 42, name: "Guacamaya" },
+  { number: 43, name: "Tortuga" },
+  { number: 44, name: "Búho" },
+  { number: 45, name: "Pato" },
+  { number: 46, name: "Tiburón" },
+  { number: 47, name: "Cangrejo" },
+  { number: 48, name: "Tucán" },
+];
+
 // Map game slug -> official animal list
 export const OFFICIAL_ANIMALS: Record<string, OfficialAnimal[]> = {
   guacharo: GUACHARO_ANIMALS,
@@ -183,4 +200,6 @@ export const OFFICIAL_ANIMALS: Record<string, OfficialAnimal[]> = {
   granjita: LOTTO_ACTIVO_ANIMALS,
   "monje-millonario": MONJE_MILLONARIO_ANIMALS,
   "lotto-activo-internacional": LOTTO_ACTIVO_ANIMALS,
+  lotoanimalito: LOTTO_ACTIVO_ANIMALS,
+  lottopantera: LOTTOPANTERA_ANIMALS,
 };
