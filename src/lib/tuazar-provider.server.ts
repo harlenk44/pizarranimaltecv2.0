@@ -11,6 +11,7 @@ import {
   type LoteriaDeHoyPage,
 } from "@/lib/loteriadehoy-parser";
 import { getGameScheduleTimes, normalizeScheduleTime } from "@/lib/game-schedules";
+import { resolveCanonicalAnimal } from "@/lib/official-animals";
 
 export const LOTERIADEHOY_PRIMARY_URL = "https://loteriadehoy.com/animalitos/resultados/";
 export const TUAZAR_PRIMARY_URL = "https://tuazar.com/loteria/animalitos/resultados/";
@@ -146,49 +147,32 @@ export function createTuazarProvider(tuazarGameName: string, gameSlug?: string):
               const normTime = normalizeScheduleTime(drawTime) ?? drawTime;
               if (!validScheduleSet.has(normTime)) continue;
 
+              const canonical = resolveCanonicalAnimal(
+                targetSlug ?? game.slug,
+                item.number,
+                item.animal,
+              );
               const normAnimal = normalizeName(item.animal);
-              const numVal = Number(item.number);
 
               let matchedEntry = catalogEntries.find((entry) => {
-                const nameMatches = normalizeName(entry.name) === normAnimal;
-                if (!nameMatches) return false;
-                const directNum = entry.number === numVal;
-                const labelMatch = entry.label === item.number;
-                const ballenaMatch =
-                  (item.number === "00" || item.number === "0") &&
-                  normalizeName(entry.name) === "BALLENA";
-                const delfinMatch =
-                  (item.number === "0" || item.number === "00") &&
-                  normalizeName(entry.name) === "DELFIN";
-                return directNum || labelMatch || ballenaMatch || delfinMatch;
-              });
-
-              if (!matchedEntry) {
                 if (item.number === "00" || normAnimal === "BALLENA") {
-                  matchedEntry = catalogEntries.find(
-                    (e) => e.label === "00" || normalizeName(e.name) === "BALLENA",
-                  );
-                } else if (item.number === "0" || normAnimal === "DELFIN") {
-                  matchedEntry = catalogEntries.find(
-                    (e) => e.number === 0 || normalizeName(e.name) === "DELFIN",
+                  return entry.label === "00" || normalizeName(entry.name) === "BALLENA";
+                }
+                if (item.number === "0" || normAnimal === "DELFIN") {
+                  return (
+                    (entry.number === 0 && entry.label !== "00") ||
+                    normalizeName(entry.name) === "DELFIN"
                   );
                 }
-              }
-
-              if (!matchedEntry && numVal > 0) {
-                matchedEntry = catalogEntries.find((e) => e.number === numVal);
-              }
+                return entry.number === canonical.number;
+              });
 
               if (!matchedEntry) {
                 matchedEntry = catalogEntries.find((e) => normalizeName(e.name) === normAnimal);
               }
 
-              const finalAnimalNumber = matchedEntry
-                ? matchedEntry.number
-                : !Number.isNaN(numVal)
-                  ? numVal
-                  : 0;
-              const finalAnimalName = matchedEntry ? matchedEntry.name : item.animal;
+              const finalAnimalNumber = matchedEntry ? matchedEntry.number : canonical.number;
+              const finalAnimalName = matchedEntry ? matchedEntry.name : canonical.name;
 
               draws.push({
                 draw_date: drawDate,
@@ -196,22 +180,6 @@ export function createTuazarProvider(tuazarGameName: string, gameSlug?: string):
                 animal_number: finalAnimalNumber,
                 animal_name: finalAnimalName,
               });
-
-              if (item.imageUrl) {
-                try {
-                  await supabaseAdmin.from("animal_images").upsert(
-                    {
-                      game_id: game.id,
-                      animal_number: finalAnimalNumber,
-                      image_url: item.imageUrl,
-                      updated_at: new Date().toISOString(),
-                    },
-                    { onConflict: "game_id,animal_number" },
-                  );
-                } catch {
-                  // ignore
-                }
-              }
             }
 
             if (draws.length > 0) {
@@ -238,38 +206,25 @@ export function createTuazarProvider(tuazarGameName: string, gameSlug?: string):
           const normTime = normalizeScheduleTime(drawTime) ?? drawTime;
           if (!validScheduleSet.has(normTime)) continue;
 
+          const canonical = resolveCanonicalAnimal(
+            targetSlug ?? game.slug,
+            result.number,
+            result.animal,
+          );
           const normalizedResultAnimal = normalizeName(result.animal);
-          const numVal = Number(result.number);
 
           let matchedEntry = catalogEntries.find((entry) => {
-            const nameMatches = normalizeName(entry.name) === normalizedResultAnimal;
-            if (!nameMatches) return false;
-            const directNum = entry.number === numVal;
-            const labelMatch = entry.label === result.number;
-            const ballenaMatch =
-              (result.number === "00" || result.number === "0") &&
-              normalizeName(entry.name) === "BALLENA";
-            const delfinMatch =
-              (result.number === "0" || result.number === "00") &&
-              normalizeName(entry.name) === "DELFIN";
-            return directNum || labelMatch || ballenaMatch || delfinMatch;
-          });
-
-          if (!matchedEntry) {
             if (result.number === "00" || normalizedResultAnimal === "BALLENA") {
-              matchedEntry = catalogEntries.find(
-                (e) => e.label === "00" || normalizeName(e.name) === "BALLENA",
-              );
-            } else if (result.number === "0" || normalizedResultAnimal === "DELFIN") {
-              matchedEntry = catalogEntries.find(
-                (e) => e.number === 0 || normalizeName(e.name) === "DELFIN",
+              return entry.label === "00" || normalizeName(entry.name) === "BALLENA";
+            }
+            if (result.number === "0" || normalizedResultAnimal === "DELFIN") {
+              return (
+                (entry.number === 0 && entry.label !== "00") ||
+                normalizeName(entry.name) === "DELFIN"
               );
             }
-          }
-
-          if (!matchedEntry && numVal > 0) {
-            matchedEntry = catalogEntries.find((e) => e.number === numVal);
-          }
+            return entry.number === canonical.number;
+          });
 
           if (!matchedEntry) {
             matchedEntry = catalogEntries.find(
@@ -277,12 +232,8 @@ export function createTuazarProvider(tuazarGameName: string, gameSlug?: string):
             );
           }
 
-          const finalAnimalNumber = matchedEntry
-            ? matchedEntry.number
-            : !Number.isNaN(numVal)
-              ? numVal
-              : 0;
-          const finalAnimalName = matchedEntry ? matchedEntry.name : result.animal;
+          const finalAnimalNumber = matchedEntry ? matchedEntry.number : canonical.number;
+          const finalAnimalName = matchedEntry ? matchedEntry.name : canonical.name;
 
           draws.push({
             draw_date: drawDate,
@@ -290,33 +241,6 @@ export function createTuazarProvider(tuazarGameName: string, gameSlug?: string):
             animal_number: finalAnimalNumber,
             animal_name: finalAnimalName,
           });
-
-          if (result.imageUrl) {
-            try {
-              await supabaseAdmin.from("animal_images").upsert(
-                {
-                  game_id: game.id,
-                  animal_number: finalAnimalNumber,
-                  image_url: result.imageUrl,
-                  updated_at: new Date().toISOString(),
-                },
-                { onConflict: "game_id,animal_number" },
-              );
-            } catch {
-              // ignore
-            }
-          }
-
-          if (result.gameLogoUrl) {
-            try {
-              await supabaseAdmin
-                .from("games")
-                .update({ logo_url: result.gameLogoUrl })
-                .eq("id", game.id);
-            } catch {
-              // ignore
-            }
-          }
         }
 
         return draws;

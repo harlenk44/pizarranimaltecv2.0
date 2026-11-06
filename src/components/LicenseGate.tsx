@@ -10,12 +10,19 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import type { ClientLicense } from "@/lib/types";
-import { parseClientLicenseName, isLotteryPermitted } from "@/lib/license-lotteries";
+import {
+  deserializarConfigCliente,
+  isLotteryPermitted,
+  DEFAULT_TARJETAS_POR_PANTALLA,
+  DEFAULT_TIEMPO_TRANSICION_SEGUNDOS,
+} from "@/lib/license-lotteries";
 
 export interface LicenseContextValue {
   matchedLicense?: ClientLicense;
   isAuthorized: boolean;
   allowedLotteries: string[] | null;
+  tarjetasPorPantalla: number | "TODAS";
+  tiempoTransicion: number;
   isGameAllowed: (gameIdOrSlug?: string | null) => boolean;
 }
 
@@ -23,6 +30,8 @@ export const LicenseContext = createContext<LicenseContextValue>({
   matchedLicense: undefined,
   isAuthorized: false,
   allowedLotteries: null,
+  tarjetasPorPantalla: DEFAULT_TARJETAS_POR_PANTALLA,
+  tiempoTransicion: DEFAULT_TIEMPO_TRANSICION_SEGUNDOS,
   isGameAllowed: () => true,
 });
 
@@ -175,10 +184,18 @@ export default function LicenseGate({
   );
 
   const parsedLicenseInfo = matchedLicense
-    ? parseClientLicenseName(matchedLicense.client_name)
+    ? deserializarConfigCliente(matchedLicense.client_name)
     : null;
   const allowedLotteries =
     isMasterPin || !requireLicense ? null : (parsedLicenseInfo?.allowedLotteries ?? null);
+  const tarjetasPorPantalla =
+    isMasterPin || !requireLicense
+      ? DEFAULT_TARJETAS_POR_PANTALLA
+      : (parsedLicenseInfo?.tarjetasPorPantalla ?? DEFAULT_TARJETAS_POR_PANTALLA);
+  const tiempoTransicion =
+    isMasterPin || !requireLicense
+      ? DEFAULT_TIEMPO_TRANSICION_SEGUNDOS
+      : (parsedLicenseInfo?.tiempoTransicion ?? DEFAULT_TIEMPO_TRANSICION_SEGUNDOS);
 
   const isGameAllowed = useCallback(
     (gameIdOrSlug?: string | null) => {
@@ -191,6 +208,8 @@ export default function LicenseGate({
     matchedLicense,
     isAuthorized,
     allowedLotteries,
+    tarjetasPorPantalla,
+    tiempoTransicion,
     isGameAllowed,
   };
 
@@ -328,12 +347,15 @@ export default function LicenseGate({
   let statusDescription =
     "Ingrese el código PIN de 6 dígitos asignado a su agencia para activar y mostrar la pizarra en vivo.";
 
+  const displayClientName =
+    parsedLicenseInfo?.cleanName || matchedLicense?.client_name || "Cliente";
+
   if (matchedLicense && isExpired) {
     statusHeading = "Suscripción Vencida";
-    statusDescription = `La licencia de "${matchedLicense.client_name}" ha vencido. Contacte al administrador para renovar su servicio.`;
+    statusDescription = `La licencia de "${displayClientName}" ha vencido. Contacte al administrador para renovar su servicio.`;
   } else if (matchedLicense && isPaused) {
     statusHeading = "Servicio Suspendido Temporalmente";
-    statusDescription = `La licencia de "${matchedLicense.client_name}" se encuentra en pausa. Comuníquese con administración para reactivarla.`;
+    statusDescription = `La licencia de "${displayClientName}" se encuentra en pausa. Comuníquese con administración para reactivarla.`;
   } else if (matchedLicense && !isDeviceAllowed) {
     statusHeading = "Límite de Pantallas Alcanzado";
     statusDescription = `Este PIN ya está vinculado a otra pantalla (${matchedLicense.max_devices} máx.). Solicite al administrador liberar el televisor.`;

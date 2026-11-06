@@ -23,11 +23,15 @@ import {
 import type { ClientLicense } from "@/lib/types";
 import LicenseGate from "@/components/LicenseGate";
 import {
-  parseClientLicenseName,
-  formatClientLicenseName,
+  serializarConfigCliente,
+  deserializarConfigCliente,
   ALL_AVAILABLE_LOTTERIES,
   DEFAULT_ANIMAL_LOTTERIES,
   ALL_TRIPLE_LOTTERIES,
+  OPCIONES_TARJETAS_POR_PANTALLA,
+  OPCIONES_TIEMPO_TRANSICION,
+  DEFAULT_TARJETAS_POR_PANTALLA,
+  DEFAULT_TIEMPO_TRANSICION_SEGUNDOS,
 } from "@/lib/license-lotteries";
 
 function generateRandomPin(): string {
@@ -71,10 +75,22 @@ export default function LicensesManager() {
   const [formLotteries, setFormLotteries] = useState<string[]>(() =>
     ALL_AVAILABLE_LOTTERIES.map((l) => l.id),
   );
+  const [formTarjetasPorPantalla, setFormTarjetasPorPantalla] = useState<number | "TODAS">(
+    DEFAULT_TARJETAS_POR_PANTALLA,
+  );
+  const [formTiempoTransicion, setFormTiempoTransicion] = useState<number>(
+    DEFAULT_TIEMPO_TRANSICION_SEGUNDOS,
+  );
 
-  // Edit lotteries modal state
+  // Edit lotteries & screen config modal state
   const [editingLicense, setEditingLicense] = useState<ClientLicense | null>(null);
   const [editingLotteries, setEditingLotteries] = useState<string[]>([]);
+  const [editingTarjetasPorPantalla, setEditingTarjetasPorPantalla] = useState<number | "TODAS">(
+    DEFAULT_TARJETAS_POR_PANTALLA,
+  );
+  const [editingTiempoTransicion, setEditingTiempoTransicion] = useState<number>(
+    DEFAULT_TIEMPO_TRANSICION_SEGUNDOS,
+  );
 
   // Copy feedback
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -266,30 +282,34 @@ export default function LicensesManager() {
   };
 
   const handleOpenEditLotteries = (lic: ClientLicense) => {
-    const { allowedLotteries } = parseClientLicenseName(lic.client_name);
+    const config = deserializarConfigCliente(lic.client_name);
     setEditingLicense(lic);
     setEditingLotteries(
-      allowedLotteries && allowedLotteries.length > 0
-        ? [...allowedLotteries]
+      config.allowedLotteries && config.allowedLotteries.length > 0
+        ? [...config.allowedLotteries]
         : ALL_AVAILABLE_LOTTERIES.map((l) => l.id),
     );
+    setEditingTarjetasPorPantalla(config.tarjetasPorPantalla);
+    setEditingTiempoTransicion(config.tiempoTransicion);
   };
 
   const handleSaveEditLotteries = async () => {
     if (!editingLicense) return;
-    const { cleanName } = parseClientLicenseName(editingLicense.client_name);
-    const packedName = formatClientLicenseName(
-      cleanName,
-      editingLotteries,
-      ALL_AVAILABLE_LOTTERIES.length,
-    );
+    const { cleanName } = deserializarConfigCliente(editingLicense.client_name);
+    const loteriasPayload =
+      editingLotteries.length >= ALL_AVAILABLE_LOTTERIES.length ? "TODAS" : editingLotteries;
+    const packedName = serializarConfigCliente(cleanName, {
+      loterias: loteriasPayload,
+      tarjetasPorPantalla: editingTarjetasPorPantalla,
+      tiempoTransicion: editingTiempoTransicion,
+    });
     await runLicenseAction(
       {
         type: "update_lotteries",
         id: editingLicense.id,
         client_name: packedName,
       },
-      `Loterías actualizadas para ${cleanName} (${editingLotteries.length}/${ALL_AVAILABLE_LOTTERIES.length} activas)`,
+      `Configuración actualizada para ${cleanName} (${editingLotteries.length}/${ALL_AVAILABLE_LOTTERIES.length} loterías · ${editingTarjetasPorPantalla} por pantalla · ${editingTiempoTransicion}s)`,
     );
     setEditingLicense(null);
   };
@@ -300,11 +320,13 @@ export default function LicensesManager() {
     const days =
       durationDays === "unlimited" ? null : Math.max(1, Math.min(30, Number(durationDays) || 30));
 
-    const packedName = formatClientLicenseName(
-      clientName.trim(),
-      formLotteries,
-      ALL_AVAILABLE_LOTTERIES.length,
-    );
+    const loteriasPayload =
+      formLotteries.length >= ALL_AVAILABLE_LOTTERIES.length ? "TODAS" : formLotteries;
+    const packedName = serializarConfigCliente(clientName.trim(), {
+      loterias: loteriasPayload,
+      tarjetasPorPantalla: formTarjetasPorPantalla,
+      tiempoTransicion: formTiempoTransicion,
+    });
 
     await runLicenseAction(
       {
@@ -315,13 +337,15 @@ export default function LicensesManager() {
         max_devices: maxDevices,
         notes: notes.trim(),
       },
-      `Licencia creada para ${clientName.trim()} (${formLotteries.length}/${ALL_AVAILABLE_LOTTERIES.length} loterías · ${days ? `${days} ${days === 1 ? "día" : "días"}` : "Permanente"})`,
+      `Licencia creada para ${clientName.trim()} (${formLotteries.length}/${ALL_AVAILABLE_LOTTERIES.length} loterías · ${formTarjetasPorPantalla} por pantalla · ${formTiempoTransicion}s · ${days ? `${days} ${days === 1 ? "día" : "días"}` : "Permanente"})`,
     );
     setClientName("");
     setPinCode(generateRandomPin());
     setNotes("");
     setDurationDays("30");
     setFormLotteries(ALL_AVAILABLE_LOTTERIES.map((l) => l.id));
+    setFormTarjetasPorPantalla(DEFAULT_TARJETAS_POR_PANTALLA);
+    setFormTiempoTransicion(DEFAULT_TIEMPO_TRANSICION_SEGUNDOS);
     setShowForm(false);
   };
 
@@ -334,10 +358,11 @@ export default function LicensesManager() {
   };
 
   const handleCopyWhatsAppMsg = (lic: ClientLicense) => {
+    const { cleanName } = deserializarConfigCliente(lic.client_name);
     const expStr = lic.expires_at
       ? `Vence: ${formatExpirationDate(lic.expires_at)}`
       : "Licencia Permanente";
-    const text = `Hola *${lic.client_name}*, tu código PIN de activación para *Pizarra Animaltec* es: *${lic.pin_code}* (${lic.max_devices} TV máx. · ${expStr}).`;
+    const text = `Hola *${cleanName}*, tu código PIN de activación para *Pizarra Animaltec* es: *${lic.pin_code}* (${lic.max_devices} TV máx. · ${expStr}).`;
     if (typeof navigator !== "undefined" && navigator.clipboard) {
       navigator.clipboard.writeText(text).catch(() => {});
     }
@@ -631,6 +656,43 @@ export default function LicensesManager() {
                 <option value={10}>10 Pantallas (TVs)</option>
               </select>
             </div>
+
+            <div>
+              <label className="block text-xs text-slate-400 mb-1.5 font-medium">
+                Productos por Pantalla (Grilla TV)
+              </label>
+              <select
+                value={String(formTarjetasPorPantalla)}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setFormTarjetasPorPantalla(val === "TODAS" ? "TODAS" : Number(val));
+                }}
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white font-mono focus:outline-none focus:border-blue-500"
+              >
+                {OPCIONES_TARJETAS_POR_PANTALLA.map((opt) => (
+                  <option key={String(opt.value)} value={String(opt.value)}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs text-slate-400 mb-1.5 font-medium">
+                Tiempo de Transición por Ventana
+              </label>
+              <select
+                value={formTiempoTransicion}
+                onChange={(e) => setFormTiempoTransicion(Number(e.target.value))}
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white font-mono tabular-nums focus:outline-none focus:border-blue-500"
+              >
+                {OPCIONES_TIEMPO_TRANSICION.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
 
           {/* Loterías Permitidas Selector */}
@@ -835,7 +897,8 @@ export default function LicensesManager() {
                     ? lic.bound_device_ids.length
                     : 0;
 
-                  const { cleanName, allowedLotteries } = parseClientLicenseName(lic.client_name);
+                  const { cleanName, allowedLotteries, tarjetasPorPantalla, tiempoTransicion } =
+                    deserializarConfigCliente(lic.client_name);
                   const isAll =
                     !allowedLotteries || allowedLotteries.length >= ALL_AVAILABLE_LOTTERIES.length;
                   const totalAllowedCount = allowedLotteries
@@ -867,6 +930,16 @@ export default function LicensesManager() {
                             {isAll
                               ? `Todas (${ALL_AVAILABLE_LOTTERIES.length} loterías)`
                               : `${totalAllowedCount} de ${ALL_AVAILABLE_LOTTERIES.length} loterías`}
+                          </span>
+                          <span
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-semibold border bg-slate-950/80 text-slate-300 border-slate-700/60"
+                            title="Productos por pantalla y tiempo de transición del carrusel"
+                          >
+                            <Tv className="w-3 h-3 text-amber-400" />
+                            {tarjetasPorPantalla === "TODAS"
+                              ? "Todas/pant."
+                              : `${tarjetasPorPantalla}/pant.`}{" "}
+                            · {tiempoTransicion}s
                           </span>
                           <button
                             type="button"
@@ -1092,7 +1165,7 @@ export default function LicensesManager() {
         )}
       </div>
 
-      {/* Modal para Editar Loterías Permitidas */}
+      {/* Modal para Editar Loterías y Parámetros de Pantalla */}
       {editingLicense && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
           <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-2xl p-6 shadow-2xl space-y-4 my-8">
@@ -1101,9 +1174,9 @@ export default function LicensesManager() {
                 <div className="flex items-center gap-2">
                   <ListFilter className="w-5 h-5 text-blue-400" />
                   <h3 className="text-base font-bold text-white">
-                    Loterías Permitidas para{" "}
+                    Configuración de Pizarra y Loterías para{" "}
                     <span className="text-blue-400">
-                      {parseClientLicenseName(editingLicense.client_name).cleanName}
+                      {deserializarConfigCliente(editingLicense.client_name).cleanName}
                     </span>
                   </h3>
                 </div>
@@ -1112,7 +1185,8 @@ export default function LicensesManager() {
                   <span className="font-mono text-emerald-400 font-bold tracking-widest">
                     {editingLicense.pin_code}
                   </span>{" "}
-                  · La pizarra y los anuncios de voz solo mostrarán las loterías marcadas aquí.
+                  · Personaliza cuántas tarjetas se ven por pantalla, la velocidad de transición y
+                  las loterías activas.
                 </p>
               </div>
 
@@ -1123,6 +1197,46 @@ export default function LicensesManager() {
               >
                 <X className="w-5 h-5" />
               </button>
+            </div>
+
+            {/* Selectores de Tarjetas por Pantalla y Tiempo de Transición */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-slate-950/70 p-3.5 rounded-xl border border-slate-800">
+              <div>
+                <label className="block text-xs text-slate-300 mb-1.5 font-semibold">
+                  Productos por Pantalla (Grilla TV)
+                </label>
+                <select
+                  value={String(editingTarjetasPorPantalla)}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setEditingTarjetasPorPantalla(val === "TODAS" ? "TODAS" : Number(val));
+                  }}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white font-mono focus:outline-none focus:border-blue-500"
+                >
+                  {OPCIONES_TARJETAS_POR_PANTALLA.map((opt) => (
+                    <option key={String(opt.value)} value={String(opt.value)}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs text-slate-300 mb-1.5 font-semibold">
+                  Tiempo de Transición (segundos)
+                </label>
+                <select
+                  value={editingTiempoTransicion}
+                  onChange={(e) => setEditingTiempoTransicion(Number(e.target.value))}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white font-mono tabular-nums focus:outline-none focus:border-blue-500"
+                >
+                  {OPCIONES_TIEMPO_TRANSICION.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             {/* Quick buttons */}

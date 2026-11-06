@@ -2,6 +2,7 @@ import { useState, useMemo } from "react";
 import { Hash } from "lucide-react";
 import { useBoardSettings } from "@/context/BoardSettingsContext";
 import { useLicenseContext } from "@/components/LicenseGate";
+import { calcularGrillaTV } from "@/lib/license-lotteries";
 import {
   TRIPLE_GAMES,
   formatZodiacSign,
@@ -34,43 +35,9 @@ function findTripleForTimeSlot(
   });
 }
 
-function getDynamicGridStyle(count: number): React.CSSProperties {
-  if (count <= 1) {
-    return {
-      gridTemplateColumns: "repeat(1, minmax(0, 1fr))",
-      gridTemplateRows: "repeat(1, minmax(0, 1fr))",
-    };
-  }
-  if (count <= 2) {
-    return {
-      gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-      gridTemplateRows: "repeat(1, minmax(0, 1fr))",
-    };
-  }
-  if (count <= 4) {
-    return {
-      gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-      gridTemplateRows: "repeat(2, minmax(0, 1fr))",
-    };
-  }
-  if (count <= 6) {
-    return {
-      gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-      gridTemplateRows: "repeat(2, minmax(0, 1fr))",
-    };
-  }
-  // Up to 8 items -> 4 columns x 2 rows
-  const cols = 4;
-  const rows = Math.ceil(count / cols);
-  return {
-    gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
-    gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
-  };
-}
-
 export default function TriplesBoard({ results, loading = false, games }: TriplesBoardProps) {
   const { settings } = useBoardSettings();
-  const { isGameAllowed } = useLicenseContext();
+  const { isGameAllowed, tarjetasPorPantalla } = useLicenseContext();
 
   const visibleTriples = useMemo(() => {
     if (games && games.length > 0) return games;
@@ -98,7 +65,7 @@ export default function TriplesBoard({ results, loading = false, games }: Triple
   return (
     <div
       className="board-fluid-grid grid h-full w-full min-h-0 min-w-0 auto-rows-fr overflow-hidden"
-      style={getDynamicGridStyle(visibleTriples.length)}
+      style={calcularGrillaTV(tarjetasPorPantalla, visibleTriples.length)}
     >
       {visibleTriples.map((game) => {
         const gameResults = results

@@ -10,6 +10,7 @@ import {
 import fs from "fs";
 import path from "path";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
+import { resolveCanonicalAnimal, parseCanonicalAnimalNumber } from "@/lib/official-animals";
 
 const RESULTS_FILE = "/tmp/lottery_results.json";
 const TRIPLE_RESULTS_FILE = "/tmp/lottery_triples_results.json";
@@ -445,7 +446,7 @@ async function triggerBackgroundSync(forceWait = false) {
       ]);
       let addedImgs = false;
       for (const item of lotoItems) {
-        const num = item.number === "00" ? 0 : parseInt(item.number, 10);
+        const num = parseCanonicalAnimalNumber("lotoanimalito", item.number, item.name);
         if (Number.isFinite(num) && item.imageUrl) {
           const gameId = "d953f80c-4335-4bc9-9f78-9b56193286fe";
           if (
@@ -466,7 +467,7 @@ async function triggerBackgroundSync(forceWait = false) {
         }
       }
       for (const item of panteraItems) {
-        const num = item.number === "00" ? 0 : parseInt(item.number, 10);
+        const num = parseCanonicalAnimalNumber("lottopantera", item.number, item.name);
         if (Number.isFinite(num) && item.imageUrl) {
           const gameId = "61580ccf-5a2d-4d10-877e-4883515135e4";
           if (
@@ -501,13 +502,15 @@ async function triggerBackgroundSync(forceWait = false) {
       const latest = mockStore.results[mockStore.results.length - 1];
       if (latest) {
         const gameObj = mockStore.games.find((g) => g.id === latest.game_id);
+        const canonical = resolveCanonicalAnimal(
+          gameObj?.slug ?? latest.game_id,
+          latest.animal_number,
+          latest.animal_name,
+        );
         const exactImg = mockStore.animal_images.find(
           (img) =>
             (img.game_id === latest.game_id || (gameObj && img.game_id === gameObj.slug)) &&
-            img.animal_number === latest.animal_number,
-        );
-        const fallbackImg = mockStore.animal_images.find(
-          (img) => img.animal_number === latest.animal_number,
+            img.animal_number === canonical.number,
         );
         const alertPayload = {
           id: `auto-${latest.id || `${latest.game_id}-${latest.draw_date}-${latest.draw_time}`}`,
@@ -517,9 +520,10 @@ async function triggerBackgroundSync(forceWait = false) {
           gameLogoUrl: gameObj?.logo_url,
           drawDate: latest.draw_date,
           drawTime: latest.draw_time,
-          animalNumber: latest.animal_number,
-          animalName: latest.animal_name,
-          animalImageUrl: exactImg?.image_url ?? fallbackImg?.image_url ?? null,
+          animalNumber: canonical.number,
+          animalLabel: canonical.label,
+          animalName: canonical.name,
+          animalImageUrl: exactImg?.image_url ?? canonical.imageUrl ?? null,
         };
         try {
           fs.writeFileSync(LATEST_ALERT_FILE, JSON.stringify(alertPayload));

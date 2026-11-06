@@ -1,6 +1,7 @@
 import type { Result } from "@/lib/types";
 import type { TripleResult } from "@/lib/triples";
 import { normalizeScheduleTime } from "@/lib/game-schedules";
+import { resolveCanonicalAnimal } from "@/lib/official-animals";
 import fs from "fs";
 
 export const MULTILOTERIAS_RESULTS_URL = "https://api.multiloterias.net/api/public/results/today";
@@ -210,9 +211,7 @@ export async function synchronizeMultiloteriasData(
       for (const sorteo of gameData.sorteos) {
         if (!sorteo.hora || !sorteo.numero) continue;
         const drawTime = formatMultiloteriasDrawTime(sorteo.hora);
-        const parsedNum = parseInt(sorteo.numero, 10);
-        const numVal = sorteo.numero === "00" ? 0 : Number.isFinite(parsedNum) ? parsedNum : 0;
-        const animalName = (sorteo.nombre || "").trim().toUpperCase();
+        const resolved = resolveCanonicalAnimal("lotoanimalito", sorteo.numero, sorteo.nombre);
 
         const existingIdx = mergedAnimals.findIndex(
           (r) =>
@@ -221,20 +220,15 @@ export async function synchronizeMultiloteriasData(
             (r.draw_time === drawTime || r.draw_time.startsWith(sorteo.hora)),
         );
 
-        if (existingIdx >= 0) {
-          mergedAnimals[existingIdx] = {
-            ...mergedAnimals[existingIdx],
-            animal_number: numVal,
-            animal_name: animalName,
-          };
-        } else {
+        if (existingIdx < 0) {
           mergedAnimals.push({
             id: `ml-lotoanimalito-${drawDate}-${drawTime}`,
             game_id: targetGameId,
             draw_date: drawDate,
             draw_time: drawTime,
-            animal_number: numVal,
-            animal_name: animalName,
+            animal_number: resolved.number,
+            animal_name: resolved.name,
+            source: "automatic",
             created_at: new Date().toISOString(),
           });
           newAnimalCount++;
@@ -248,9 +242,7 @@ export async function synchronizeMultiloteriasData(
       for (const sorteo of gameData.sorteos) {
         if (!sorteo.hora || !sorteo.numero) continue;
         const drawTime = formatMultiloteriasDrawTime(sorteo.hora);
-        const parsedNum = parseInt(sorteo.numero, 10);
-        const numVal = sorteo.numero === "00" ? 0 : Number.isFinite(parsedNum) ? parsedNum : 0;
-        const animalName = (sorteo.nombre || "").trim().toUpperCase();
+        const resolved = resolveCanonicalAnimal("lottopantera", sorteo.numero, sorteo.nombre);
 
         const existingIdx = mergedAnimals.findIndex(
           (r) =>
@@ -259,20 +251,15 @@ export async function synchronizeMultiloteriasData(
             (r.draw_time === drawTime || r.draw_time.startsWith(sorteo.hora)),
         );
 
-        if (existingIdx >= 0) {
-          mergedAnimals[existingIdx] = {
-            ...mergedAnimals[existingIdx],
-            animal_number: numVal,
-            animal_name: animalName,
-          };
-        } else {
+        if (existingIdx < 0) {
           mergedAnimals.push({
             id: `ml-lottopantera-${drawDate}-${drawTime}`,
             game_id: targetGameId,
             draw_date: drawDate,
             draw_time: drawTime,
-            animal_number: numVal,
-            animal_name: animalName,
+            animal_number: resolved.number,
+            animal_name: resolved.name,
+            source: "automatic",
             created_at: new Date().toISOString(),
           });
           newAnimalCount++;

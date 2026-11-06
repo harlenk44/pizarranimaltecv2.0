@@ -1,5 +1,5 @@
 // Mock in-memory & browser storage database for preview when external Supabase is not provisioned.
-import { OFFICIAL_ANIMALS } from "@/lib/official-animals";
+import { OFFICIAL_ANIMALS, resolveCanonicalAnimal } from "@/lib/official-animals";
 import {
   DEFAULT_APP_SETTINGS,
   type AppSettings,
@@ -559,67 +559,38 @@ export async function syncTuazarDirectly(): Promise<number> {
         catalog: typeof mockStore.animal_entries,
         gameSlug?: string,
       ) => {
-        const numVal = Number(drawNumber);
+        const canonical = resolveCanonicalAnimal(gameSlug, drawNumber, drawAnimal);
         const normAnimal = normalizeName(drawAnimal);
 
-        // 1. Direct name + number match
-        let matched = catalog.find((entry) => {
-          const nameMatches = normalizeName(entry.name) === normAnimal;
-          if (!nameMatches) return false;
-          const directNum = entry.number === numVal;
-          const labelMatch = entry.label === drawNumber;
-          const ballenaMatch =
-            (drawNumber === "00" || drawNumber === "0") && normalizeName(entry.name) === "BALLENA";
-          const delfinMatch =
-            (drawNumber === "0" || drawNumber === "00") && normalizeName(entry.name) === "DELFIN";
-          return directNum || labelMatch || ballenaMatch || delfinMatch;
-        });
-        if (matched) return matched;
-
-        // 2. Special match for 00 Ballena or 0 Delfín
+        // 1. Strict 00 (Ballena) vs 0 (Delfín) check
         if (drawNumber === "00" || normAnimal === "BALLENA") {
-          matched = catalog.find((e) => e.label === "00" || normalizeName(e.name) === "BALLENA");
-          if (matched) return matched;
+          const matchedBallena = catalog.find(
+            (e) => e.label === "00" || normalizeName(e.name) === "BALLENA",
+          );
+          if (matchedBallena) return matchedBallena;
         }
         if (drawNumber === "0" || normAnimal === "DELFIN") {
-          matched = catalog.find((e) => e.number === 0 || normalizeName(e.name) === "DELFIN");
-          if (matched) return matched;
-        }
-
-        // 3. Match by number if > 0
-        if (numVal > 0) {
-          matched = catalog.find((e) => e.number === numVal);
-          if (matched) return matched;
-        }
-
-        // 4. Match by animal name
-        matched = catalog.find((e) => normalizeName(e.name) === normAnimal);
-        if (matched) return matched;
-
-        // 5. Official animal fallback
-        const officialCatalog = gameSlug ? OFFICIAL_ANIMALS[gameSlug] : undefined;
-        if (officialCatalog) {
-          const off = officialCatalog.find(
-            (a) => a.number === numVal || normalizeName(a.name) === normAnimal,
+          const matchedDelfin = catalog.find(
+            (e) => (e.number === 0 && e.label !== "00") || normalizeName(e.name) === "DELFIN",
           );
-          if (off) {
-            return {
-              id: `fallback-${numVal}`,
-              game_id: "",
-              number: off.number,
-              name: off.name,
-              label: drawNumber,
-            };
-          }
+          if (matchedDelfin) return matchedDelfin;
         }
 
-        // 6. Non-dropping fallback
+        // 2. Match by canonical number
+        const matchedByNum = catalog.find((e) => e.number === canonical.number);
+        if (matchedByNum) return matchedByNum;
+
+        // 3. Match by animal name
+        const matchedByName = catalog.find((e) => normalizeName(e.name) === normAnimal);
+        if (matchedByName) return matchedByName;
+
+        // 4. Deterministic canonical fallback
         return {
-          id: `raw-${numVal}`,
+          id: `canonical-${canonical.number}`,
           game_id: "",
-          number: Number.isNaN(numVal) ? 0 : numVal,
-          name: drawAnimal,
-          label: drawNumber,
+          number: canonical.number,
+          name: canonical.name,
+          label: canonical.label,
         };
       };
 
@@ -666,13 +637,7 @@ export async function syncTuazarDirectly(): Promise<number> {
                 (r) =>
                   r.game_id === game.id && r.draw_date === drawDate && r.draw_time === drawTime,
               );
-              if (existing) {
-                if (existing.source !== "manual") {
-                  existing.animal_number = matched.number;
-                  existing.animal_name = matched.name;
-                  existing.source = "automatic";
-                }
-              } else {
+              if (!existing) {
                 mockStore.results.push({
                   id: `res-${game.id}-${drawDate}-${drawTime}`,
                   game_id: game.id,
@@ -684,22 +649,6 @@ export async function syncTuazarDirectly(): Promise<number> {
                   created_at: new Date().toISOString(),
                 });
                 added++;
-              }
-
-              if (draw.imageUrl) {
-                const existingImg = mockStore.animal_images.find(
-                  (img) => img.game_id === game.id && img.animal_number === matched.number,
-                );
-                if (existingImg) {
-                  existingImg.image_url = draw.imageUrl;
-                } else {
-                  mockStore.animal_images.push({
-                    id: `img-${game.id}-${matched.number}`,
-                    game_id: game.id,
-                    animal_number: matched.number,
-                    image_url: draw.imageUrl,
-                  });
-                }
               }
             }
           }
@@ -749,13 +698,7 @@ export async function syncTuazarDirectly(): Promise<number> {
                   (r) =>
                     r.game_id === game.id && r.draw_date === drawDate && r.draw_time === drawTime,
                 );
-                if (existing) {
-                  if (existing.source !== "manual") {
-                    existing.animal_number = matched.number;
-                    existing.animal_name = matched.name;
-                    existing.source = "automatic";
-                  }
-                } else {
+                if (!existing) {
                   mockStore.results.push({
                     id: `res-${game.id}-${drawDate}-${drawTime}`,
                     game_id: game.id,
@@ -769,21 +712,6 @@ export async function syncTuazarDirectly(): Promise<number> {
                   added++;
                 }
 
-                if (draw.imageUrl) {
-                  const existingImg = mockStore.animal_images.find(
-                    (img) => img.game_id === game.id && img.animal_number === matched.number,
-                  );
-                  if (existingImg) {
-                    existingImg.image_url = draw.imageUrl;
-                  } else {
-                    mockStore.animal_images.push({
-                      id: `img-${game.id}-${matched.number}`,
-                      game_id: game.id,
-                      animal_number: matched.number,
-                      image_url: draw.imageUrl,
-                    });
-                  }
-                }
                 if (draw.gameLogoUrl && !game.logo_url) {
                   game.logo_url = draw.gameLogoUrl;
                 }
@@ -1543,10 +1471,7 @@ export function createMockSupabaseClient() {
             r.game_id === p_game_id && r.draw_date === p_draw_date && r.draw_time === p_draw_time,
         );
         if (existing) {
-          if (existing.source === "manual") return Promise.resolve({ data: false, error: null });
-          existing.animal_number = p_animal_number as number;
-          existing.animal_name = p_animal_name as string;
-          return Promise.resolve({ data: true, error: null });
+          return Promise.resolve({ data: false, error: null });
         }
         mockStore.results.push({
           id: `res-${p_game_id}-${p_draw_date}-${p_draw_time}`,

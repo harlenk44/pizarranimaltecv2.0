@@ -36,6 +36,13 @@ import { lotteryDate, LOTTERY_TIMEZONE } from "@/lib/lottery-date";
 import { useDisplay } from "@/context/DisplayContext";
 import { sorteoAlertTracker, getSorteoAlertKey } from "@/lib/sorteo-alert-tracker";
 import { getGameScheduleTimes } from "@/lib/game-schedules";
+import { resolveCanonicalAnimal } from "@/lib/official-animals";
+import {
+  calcularGrillaTV,
+  dividirEnVentanas,
+  iniciarCarruselVentanas,
+  DEFAULT_TIEMPO_TRANSICION_SEGUNDOS,
+} from "@/lib/license-lotteries";
 
 interface BoardPageProps {
   onAdminClick: () => void;
@@ -59,16 +66,26 @@ function resolveAlertWithAnimalImage(
       g.slug === item.gameId ||
       (item.gameName && g.name.toLowerCase() === item.gameName.toLowerCase()),
   );
+  const gameKey = gameObj?.slug || gameObj?.id || item.gameId;
+  const canonical = resolveCanonicalAnimal(
+    gameKey,
+    item.animalLabel ?? item.animalNumber,
+    item.animalName,
+    imgMap,
+  );
   const resolvedUrl =
-    imgMap[`${item.gameId}:${item.animalNumber}`] ??
-    (gameObj ? imgMap[`${gameObj.id}:${item.animalNumber}`] : undefined) ??
-    (gameObj ? imgMap[`${gameObj.slug}:${item.animalNumber}`] : undefined) ??
+    imgMap[`${item.gameId}:${canonical.number}`] ??
+    (gameObj ? imgMap[`${gameObj.id}:${canonical.number}`] : undefined) ??
+    (gameObj ? imgMap[`${gameObj.slug}:${canonical.number}`] : undefined) ??
+    canonical.imageUrl ??
     item.animalImageUrl ??
-    imgMap[`any:${item.animalNumber}`] ??
     null;
 
   return {
     ...item,
+    animalNumber: canonical.number,
+    animalName: canonical.name,
+    animalLabel: canonical.label,
     animalImageUrl: resolvedUrl,
     gameLogoUrl: item.gameLogoUrl ?? gameObj?.logo_url ?? null,
   };
@@ -106,36 +123,6 @@ function findResultForTimeSlot(results: Result[], timeSlot: string): Result | un
   });
 }
 
-function getDynamicGridStyle(count: number): React.CSSProperties {
-  let cols = 4;
-  let rows = 2;
-  if (count <= 1) {
-    cols = 1;
-    rows = 1;
-  } else if (count <= 2) {
-    cols = 2;
-    rows = 1;
-  } else if (count <= 4) {
-    cols = 2;
-    rows = 2;
-  } else if (count <= 6) {
-    cols = 3;
-    rows = 2;
-  } else {
-    // 7 or 8 items -> crisp 4 columns x 2 rows
-    cols = 4;
-    rows = 2;
-  }
-
-  return {
-    gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
-    gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
-  };
-}
-
-const MAX_PRODUCTS_PER_PAGE = 8;
-const DEFAULT_ROTATION_SECONDS = 25;
-
 interface BoardWindowPage {
   id: string;
   type: "animalitos" | "triples";
@@ -151,7 +138,7 @@ interface BoardWindowPage {
 export default function BoardPage({ onAdminClick }: BoardPageProps) {
   const { profile, signOut } = useAuth();
   const { settings } = useBoardSettings();
-  const { isGameAllowed } = useLicenseContext();
+  const { isGameAllowed, tarjetasPorPantalla, tiempoTransicion } = useLicenseContext();
   const [games, setGames] = useState<Game[]>([]);
   const [resultsMap, setResultsMap] = useState<Record<string, Result[]>>({});
   const [animalImages, setAnimalImages] = useState<AnimalImageMap>({});
@@ -211,6 +198,8 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
   animalImagesRef.current = animalImages;
   const gamesRef = useRef<Game[]>(games);
   gamesRef.current = games;
+  const resultsMapRef = useRef<Record<string, Result[]>>(resultsMap);
+  resultsMapRef.current = resultsMap;
 
   useEffect(() => {
     reloadOnNewResultRef.current = preferences?.reloadOnNewResult ?? false;
@@ -423,10 +412,6 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         imgMap[`${matchedGame.id}:${img.animal_number}`] = img.image_url;
         imgMap[`${matchedGame.slug}:${img.animal_number}`] = img.image_url;
       }
-      // Also provide a fallback for this animal across all games
-      if (!imgMap[`any:${img.animal_number}`]) {
-        imgMap[`any:${img.animal_number}`] = img.image_url;
-      }
     }
     animalImagesRef.current = imgMap;
     setAnimalImages(imgMap);
@@ -436,57 +421,112 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     for (const entry of (entriesData.data ?? []) as AnimalEntry[]) {
       nameMap[`${entry.game_id}:${entry.number}`] = entry.name;
       if (entry.label) labelMap[`${entry.game_id}:${entry.number}`] = entry.label;
+      const matchedGame = loadedGames.find(
+        (g) => g.id === entry.game_id || g.slug === entry.game_id,
+      );
+      if (matchedGame) {
+        nameMap[`${matchedGame.id}:${entry.number}`] = entry.name;
+        nameMap[`${matchedGame.slug}:${entry.number}`] = entry.name;
+        if (entry.label) {
+          labelMap[`${matchedGame.id}:${entry.number}`] = entry.label;
+          labelMap[`${matchedGame.slug}:${entry.number}`] = entry.label;
+        }
+      }
     }
     setAnimalNames(nameMap);
     setAnimalLabels(labelMap);
 
     const newAlerts: ResultAlertItem[] = [];
+    const prevResultsByGame = resultsMapRef.current;
 
     for (const r of resultsPromises) {
-      map[r.gameId] = r.results;
       const gameObj = (gamesData as Game[]).find((g) => g.id === r.gameId);
-      if (!gameObj) continue;
+      if (!gameObj) {
+        map[r.gameId] = r.results;
+        continue;
+      }
 
-      for (const res of r.results) {
-        const sig = `${res.animal_number}:${res.animal_name}:${res.draw_time}`;
-        const prevSig = prevSignaturesRef.current.get(res.id);
+      const prevGameResults = prevResultsByGame[r.gameId] ?? [];
+      const frozenGameResults: Result[] = [];
+
+      for (const rawRes of r.results) {
+        const slotKey = rawRes.draw_time.substring(0, 5).replace(/^0/, "");
+        const existingInSlot = prevGameResults.find(
+          (pr) =>
+            pr.draw_date === rawRes.draw_date &&
+            pr.draw_time.substring(0, 5).replace(/^0/, "") === slotKey,
+        );
+
+        const canonical = resolveCanonicalAnimal(
+          gameObj.slug || gameObj.id,
+          rawRes.animal_number,
+          rawRes.animal_name,
+          imgMap,
+          nameMap,
+          labelMap,
+        );
+
+        let effectiveRes: Result;
+        if (
+          existingInSlot &&
+          (rawRes.source !== "manual" || existingInSlot.animal_number === canonical.number)
+        ) {
+          // Freeze already-loaded draw slot during polling unless manually edited with a new number
+          effectiveRes = existingInSlot;
+        } else {
+          effectiveRes = {
+            ...rawRes,
+            animal_number: canonical.number,
+            animal_name: canonical.name,
+          };
+        }
+
+        frozenGameResults.push(effectiveRes);
+
+        const sig = `${effectiveRes.animal_number}:${effectiveRes.animal_name}:${effectiveRes.draw_time}`;
+        const prevSig = prevSignaturesRef.current.get(effectiveRes.id);
 
         if (!isInitialLoadRef.current) {
           if (prevSig === undefined || prevSig !== sig) {
             const candidate = {
               gameId: gameObj.id,
-              drawDate: res.draw_date,
-              drawTime: res.draw_time,
+              drawDate: effectiveRes.draw_date,
+              drawTime: effectiveRes.draw_time,
             };
 
             if (!sorteoAlertTracker.hasBeenAlerted(candidate)) {
-              const displayName = nameMap[`${res.game_id}:${res.animal_number}`] ?? res.animal_name;
-              const displayLabel =
-                labelMap[`${res.game_id}:${res.animal_number}`] ??
-                String(res.animal_number).padStart(2, "0");
-              const imgUrl =
-                imgMap[`${res.game_id}:${res.animal_number}`] ?? imgMap[`any:${res.animal_number}`];
+              const resolvedForAlert = resolveCanonicalAnimal(
+                gameObj.slug || gameObj.id,
+                effectiveRes.animal_number,
+                effectiveRes.animal_name,
+                imgMap,
+                nameMap,
+                labelMap,
+              );
 
               newAlerts.push({
-                id: `draw-${res.id}-${res.draw_date}-${res.draw_time}`,
+                id: `draw-${effectiveRes.id}-${effectiveRes.draw_date}-${effectiveRes.draw_time}`,
                 gameId: gameObj.id,
                 gameName: gameObj.name,
                 gameColor: gameObj.color,
                 gameLogoUrl: gameObj.logo_url,
-                drawDate: res.draw_date,
-                drawTime: res.draw_time,
-                animalNumber: res.animal_number,
-                animalName: displayName,
-                animalLabel: displayLabel,
-                animalImageUrl: imgUrl,
-                animalEmoji: getAnimalEmoji(res.animal_number, displayName),
+                drawDate: effectiveRes.draw_date,
+                drawTime: effectiveRes.draw_time,
+                animalNumber: resolvedForAlert.number,
+                animalName: resolvedForAlert.name,
+                animalLabel: resolvedForAlert.label,
+                animalImageUrl: resolvedForAlert.imageUrl,
+                animalEmoji: getAnimalEmoji(resolvedForAlert.number, resolvedForAlert.name),
               });
             }
           }
         }
-        prevSignaturesRef.current.set(res.id, sig);
+        prevSignaturesRef.current.set(effectiveRes.id, sig);
       }
+
+      map[r.gameId] = frozenGameResults;
     }
+    resultsMapRef.current = map;
     setResultsMap(map);
 
     // Check newly synced Triples results for real-time alert and voice announcements
@@ -724,24 +764,21 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     window.dispatchEvent(new CustomEvent("pizarra:open-license-screen"));
   };
 
-  // Paginación automática en bloques de máximo 8 productos por ventana
+  // Paginación automática usando la función auxiliar dividirEnVentanas
   const boardWindows = useMemo<BoardWindowPage[]>(() => {
     const list: BoardWindowPage[] = [];
 
-    // 1. Animalitos (loterías visibles divididas en páginas de máximo 8)
+    // 1. Animalitos (divididos en páginas según tarjetasPorPantalla de la licencia)
     const visibleAnimals = games.filter((g) => isGameAllowed(g.slug || g.id));
     const allAnimalCards: GameWithResults[] = visibleAnimals.map((g) => ({
       ...g,
       latest_results: resultsMap[g.id] ?? [],
     }));
 
-    if (allAnimalCards.length > 0) {
-      const totalAnimalPages = Math.ceil(allAnimalCards.length / MAX_PRODUCTS_PER_PAGE);
-      for (let i = 0; i < totalAnimalPages; i++) {
-        const chunk = allAnimalCards.slice(
-          i * MAX_PRODUCTS_PER_PAGE,
-          (i + 1) * MAX_PRODUCTS_PER_PAGE,
-        );
+    const animalPages = dividirEnVentanas(allAnimalCards, tarjetasPorPantalla);
+    if (animalPages.length > 0) {
+      const totalAnimalPages = animalPages.length;
+      animalPages.forEach((chunk, i) => {
         const isMulti = totalAnimalPages > 1;
         list.push({
           id: `animalitos-${i + 1}`,
@@ -755,18 +792,15 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           shortLabel: isMulti ? `${i + 1}/${totalAnimalPages}` : "Anim",
           animalCards: chunk,
         });
-      }
+      });
     }
 
-    // 2. Triples (loterías visibles divididas en páginas de máximo 8)
+    // 2. Triples (divididos en páginas según tarjetasPorPantalla de la licencia)
     const visibleTriples = TRIPLE_GAMES.filter((g) => isGameAllowed(g.id) || isGameAllowed(g.slug));
-    if (visibleTriples.length > 0) {
-      const totalTriplePages = Math.ceil(visibleTriples.length / MAX_PRODUCTS_PER_PAGE);
-      for (let i = 0; i < totalTriplePages; i++) {
-        const chunk = visibleTriples.slice(
-          i * MAX_PRODUCTS_PER_PAGE,
-          (i + 1) * MAX_PRODUCTS_PER_PAGE,
-        );
+    const triplePages = dividirEnVentanas(visibleTriples, tarjetasPorPantalla);
+    if (triplePages.length > 0) {
+      const totalTriplePages = triplePages.length;
+      triplePages.forEach((chunk, i) => {
         const isMulti = totalTriplePages > 1;
         list.push({
           id: `triples-${i + 1}`,
@@ -780,7 +814,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           shortLabel: isMulti ? `${i + 1}/${totalTriplePages}` : "Trip",
           tripleGames: chunk,
         });
-      }
+      });
     }
 
     if (list.length === 0) {
@@ -797,11 +831,10 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     }
 
     return list;
-  }, [games, resultsMap, isGameAllowed]);
+  }, [games, resultsMap, isGameAllowed, tarjetasPorPantalla]);
 
   const safePageIndex = activePageIndex < boardWindows.length ? activePageIndex : 0;
   const currentWindow = boardWindows[safePageIndex] || boardWindows[0];
-  const showTriples = currentWindow.type === "triples";
 
   const goToPage = useCallback(
     (index: number) => {
@@ -848,37 +881,37 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [goToNextPage, goToPrevPage, goToPage, boardWindows.length]);
 
-  // Rotación automática cada 25 segundos (con pausa durante anuncios emergentes y configuración)
+  // Rotación automática usando iniciarCarruselVentanas (con pausa durante anuncios emergentes y configuración)
   const isRotationActive = autoRotate || settings.rotation_enabled;
+  const effectiveRotationSeconds = Math.max(
+    5,
+    tiempoTransicion || settings.rotation_interval_seconds || DEFAULT_TIEMPO_TRANSICION_SEGUNDOS,
+  );
   useEffect(() => {
     if (!isRotationActive) return;
     if (alertQueue.length > 0) return; // Pausa mientras el popup de sorteo está activo
     if (showVoiceSettings) return; // Pausa mientras el menú de voz está abierto
     if (boardWindows.length <= 1) return;
 
-    const intervalSec = Math.max(5, settings.rotation_interval_seconds || DEFAULT_ROTATION_SECONDS);
-    const intervalMs = intervalSec * 1000;
-    const tickInterval = 500;
-    let elapsed = 0;
-
-    const timer = setInterval(() => {
-      elapsed += tickInterval;
-      setRotationProgress(Math.min(100, (elapsed / intervalMs) * 100));
-
-      if (elapsed >= intervalMs) {
-        elapsed = 0;
-        setRotationProgress(0);
+    const cleanupCarousel = iniciarCarruselVentanas(
+      effectiveRotationSeconds,
+      () => {
         setActivePageIndex((prev) => (prev + 1) % boardWindows.length);
-      }
-    }, tickInterval);
+      },
+      (progressPct) => {
+        setRotationProgress(progressPct);
+      },
+    );
 
-    return () => clearInterval(timer);
+    return () => {
+      cleanupCarousel();
+    };
   }, [
     isRotationActive,
     alertQueue.length,
     showVoiceSettings,
     boardWindows.length,
-    settings.rotation_interval_seconds,
+    effectiveRotationSeconds,
     timerResetKey,
   ]);
 
@@ -1031,7 +1064,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
               {voiceEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
             </button>
 
-            {/* Alternar rotación automática de 25 segundos */}
+            {/* Alternar rotación automática */}
             <button
               onClick={handleAutoRotateToggle}
               className={`px-2.5 py-2 rounded-lg border transition flex items-center gap-1.5 text-xs font-bold cursor-pointer whitespace-nowrap shrink-0 ${
@@ -1041,12 +1074,14 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
               }`}
               title={
                 isRotationActive
-                  ? "Rotación automática activa (cada 25s) · Haz clic para pausar"
-                  : "Rotación pausada · Haz clic para activar rotación automática (cada 25s)"
+                  ? `Rotación automática activa (cada ${effectiveRotationSeconds}s) · Haz clic para pausar`
+                  : `Rotación pausada · Haz clic para activar rotación automática (cada ${effectiveRotationSeconds}s)`
               }
             >
               <Repeat className="w-4 h-4" />
-              <span className="hidden sm:inline">{isRotationActive ? "Auto 25s" : "Manual"}</span>
+              <span className="hidden sm:inline">
+                {isRotationActive ? `Auto ${effectiveRotationSeconds}s` : "Manual"}
+              </span>
             </button>
 
             <button
@@ -1109,7 +1144,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           ) : (
             <div
               className="board-fluid-grid grid h-full w-full min-h-0 min-w-0 auto-rows-fr overflow-hidden"
-              style={getDynamicGridStyle(currentWindow.animalCards.length)}
+              style={calcularGrillaTV(tarjetasPorPantalla, currentWindow.animalCards.length)}
             >
               {currentWindow.animalCards.map((game) => (
                 <GameCard
@@ -1201,17 +1236,20 @@ function GameCard({
     .sort((a, b) => a.draw_time.localeCompare(b.draw_time));
   const latestResult = validResults.length > 0 ? validResults[validResults.length - 1] : null;
 
-  const latestImgUrl = latestResult
-    ? (animalImages[`${game.id}:${latestResult.animal_number}`] ??
-      animalImages[`any:${latestResult.animal_number}`])
-    : undefined;
-  const latestDisplayName = latestResult
-    ? (animalNames[`${game.id}:${latestResult.animal_number}`] ?? latestResult.animal_name)
-    : "";
-  const latestLabel = latestResult
-    ? (animalLabels[`${game.id}:${latestResult.animal_number}`] ??
-      String(latestResult.animal_number).padStart(2, "0"))
-    : "";
+  const latestCanonical = latestResult
+    ? resolveCanonicalAnimal(
+        game.slug || game.id,
+        latestResult.animal_number,
+        latestResult.animal_name,
+        animalImages,
+        animalNames,
+        animalLabels,
+      )
+    : null;
+
+  const latestImgUrl = latestCanonical?.imageUrl;
+  const latestDisplayName = latestCanonical?.name ?? "";
+  const latestLabel = latestCanonical?.label ?? "";
 
   return (
     <div
@@ -1274,11 +1312,11 @@ function GameCard({
             height: "calc(clamp(2.2rem, min(5.5vh, 4vw), 4.8rem) * var(--display-animal-scale, 1))",
           }}
         >
-          {latestResult ? (
+          {latestResult && latestCanonical ? (
             <AnimalAvatar
               imageUrl={latestImgUrl}
               name={latestDisplayName}
-              number={latestResult.animal_number}
+              number={latestCanonical.number}
               className="w-full h-full object-contain max-h-full max-w-full p-0.5 drop-shadow-md rounded-lg"
             />
           ) : (
@@ -1312,10 +1350,17 @@ function GameCard({
       <div className="fluid-schedule-matrix grid flex-1 h-full w-full min-h-0 min-w-0 grid-cols-4 auto-rows-fr overflow-hidden">
         {scheduleTimes.map((timeSlot) => {
           const res = findResultForTimeSlot(validResults, timeSlot);
-          const displayNum = res
-            ? (animalLabels[`${game.id}:${res.animal_number}`] ??
-              String(res.animal_number).padStart(2, "0"))
+          const cellCanonical = res
+            ? resolveCanonicalAnimal(
+                game.slug || game.id,
+                res.animal_number,
+                res.animal_name,
+                animalImages,
+                animalNames,
+                animalLabels,
+              )
             : null;
+          const displayNum = cellCanonical ? cellCanonical.label : null;
 
           return (
             <div

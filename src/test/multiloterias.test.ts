@@ -9,6 +9,7 @@ import {
   chunkProducts,
 } from "@/lib/master-products";
 import { getEmojiForNumber } from "@/lib/animals";
+import { resolveCanonicalAnimal, parseCanonicalAnimalNumber } from "@/lib/official-animals";
 
 describe("Multiloterias Integration and Catalog", () => {
   it("converts 24h draw times from HH:mm to HH:mm:00", () => {
@@ -62,5 +63,48 @@ describe("Multiloterias Integration and Catalog", () => {
     expect(getEmojiForNumber(41, "CONEJO")).toBe("🐰");
     expect(getEmojiForNumber(43, "TORTUGA")).toBe("🐢");
     expect(getEmojiForNumber(48, "TUCÁN")).toBe("🦜");
+  });
+
+  it("strictly distinguishes 0 (Delfín) from 00 (Ballena) across all lotteries", () => {
+    const lotto0 = resolveCanonicalAnimal("lotto-activo", "0", "DELFIN");
+    const lotto00 = resolveCanonicalAnimal("lotto-activo", "00", "BALLENA");
+    expect(lotto0.label).toBe("0");
+    expect(lotto0.name).toBe("Delfín");
+    expect(lotto0.number).toBe(0);
+    expect(lotto00.label).toBe("00");
+    expect(lotto00.name).toBe("Ballena");
+    expect(lotto00.number).toBe(37);
+    expect(lotto0.imageUrl).not.toBe(lotto00.imageUrl);
+
+    const pantera00 = resolveCanonicalAnimal("lottopantera", "00", "BALLENA");
+    const pantera37 = resolveCanonicalAnimal("lottopantera", "37", "CHIGÜIRE");
+    expect(pantera00.label).toBe("00");
+    expect(pantera00.name).toBe("Ballena");
+    expect(pantera00.number).toBe(49);
+    expect(pantera37.label).toBe("37");
+    expect(pantera37.name).toBe("Chigüire");
+    expect(pantera37.number).toBe(37);
+
+    const guacharo00 = resolveCanonicalAnimal("guacharo", "00", "BALLENA");
+    expect(guacharo00.label).toBe("00");
+    expect(guacharo00.name).toBe("Ballena");
+    expect(guacharo00.number).toBe(76);
+
+    const guacharito00 = resolveCanonicalAnimal("guacharito", "00", "BALLENA");
+    expect(guacharito00.label).toBe("00");
+    expect(guacharito00.name).toBe("Ballena");
+    expect(guacharito00.number).toBe(100);
+    expect(parseCanonicalAnimalNumber("guacharito", "00")).toBe(100);
+  });
+
+  it("prioritizes custom admin images first and then deterministic fixed catalog images per lottery", () => {
+    const defaultImg = resolveCanonicalAnimal("granjita", 12, "Caballo");
+    expect(defaultImg.name).toBe("Caballo");
+    expect(defaultImg.label).toBe("12");
+    expect(defaultImg.imageUrl).toBe("https://tuazar.com/in/animalitos/la_granjita/12.png");
+
+    const customMap = { "granjita:12": "/custom/caballo.png" };
+    const customImg = resolveCanonicalAnimal("granjita", 12, "Caballo", customMap);
+    expect(customImg.imageUrl).toBe("/custom/caballo.png");
   });
 });
