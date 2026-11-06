@@ -1,5 +1,9 @@
 // Mock in-memory & browser storage database for preview when external Supabase is not provisioned.
-import { OFFICIAL_ANIMALS, resolveCanonicalAnimal } from "@/lib/official-animals";
+import {
+  OFFICIAL_ANIMALS,
+  resolveCanonicalAnimal,
+  getFixedAnimalImageUrl,
+} from "@/lib/official-animals";
 import {
   DEFAULT_APP_SETTINGS,
   type AppSettings,
@@ -192,56 +196,210 @@ function buildInitialEntries(): MockStore["animal_entries"] {
   return entries;
 }
 
-function buildInitialImages(): MockStore["animal_images"] {
-  if (typeof window !== "undefined") {
-    try {
-      const saved = localStorage.getItem("pizarra_custom_animal_images");
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
+export function isDefaultCatalogImageUrl(url?: string | null): boolean {
+  if (!url) return true;
+  return (
+    url.includes("tuazar.com/in/animalitos/") || url.includes("toteback.atilax.io/storage/bases/")
+  );
+}
+
+/**
+ * Escanea localStorage buscando imágenes subidas por el usuario en el bucket simulado
+ * ("pizarra_storage_animal-images_animals/<gameId>/animal-<number>-<timestamp>.<ext>")
+ * y en el respaldo de imágenes personalizadas para recuperar cualquier imagen que haya
+ * sido sobrescrita accidentalmente por una sincronización del servidor.
+ */
+export function recoverCustomAnimalImagesFromLocalStorage(): MockStore["animal_images"] {
+  if (typeof window === "undefined") return [];
+  const recoveredMap = new Map<
+    string,
+    { id: string; game_id: string; animal_number: number; image_url: string; ts: number }
+  >();
+
+  try {
+    // 1. Recuperar desde llaves individuales de subida de archivos (pizarra_storage_animal-images_animals/...)
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key || !key.startsWith("pizarra_storage_animal-images_animals/")) continue;
+
+      const match = key.match(
+        /^pizarra_storage_animal-images_animals\/([^/]+)\/animal-(\d+)-(\d+)/,
+      );
+      if (!match) continue;
+
+      const gameId = match[1]!;
+      const animalNumber = parseInt(match[2]!, 10);
+      const ts = parseInt(match[3]!, 10) || 0;
+      const dataUrl = localStorage.getItem(key);
+      if (!dataUrl) continue;
+
+      const mapKey = `${gameId}:${animalNumber}`;
+      const existing = recoveredMap.get(mapKey);
+      if (!existing || ts >= existing.ts) {
+        recoveredMap.set(mapKey, {
+          id: `img-${gameId}-${animalNumber}`,
+          game_id: gameId,
+          animal_number: animalNumber,
+          image_url: dataUrl,
+          ts,
+        });
+      }
+    }
+
+    // 2. Recuperar desde respaldo dedicado de personalizadas (pizarra_user_custom_animal_images_v2)
+    const backupRaw = localStorage.getItem("pizarra_user_custom_animal_images_v2");
+    if (backupRaw) {
+      const backupList = JSON.parse(backupRaw);
+      if (Array.isArray(backupList)) {
+        for (const item of backupList) {
+          if (item?.game_id && typeof item?.animal_number === "number" && item?.image_url) {
+            const mapKey = `${item.game_id}:${item.animal_number}`;
+            recoveredMap.set(mapKey, {
+              id: item.id ?? `img-${item.game_id}-${item.animal_number}`,
+              game_id: item.game_id,
+              animal_number: item.animal_number,
+              image_url: item.image_url,
+              ts: Date.now(),
+            });
+          }
         }
       }
-    } catch {
-      // ignore
     }
+
+    // 3. Recuperar entradas personalizadas de pizarra_custom_animal_images
+    const savedRaw = localStorage.getItem("pizarra_custom_animal_images");
+    if (savedRaw) {
+      const savedList = JSON.parse(savedRaw);
+      if (Array.isArray(savedList)) {
+        for (const item of savedList) {
+          if (
+            item?.game_id &&
+            typeof item?.animal_number === "number" &&
+            item?.image_url &&
+            !isDefaultCatalogImageUrl(item.image_url)
+          ) {
+            const mapKey = `${item.game_id}:${item.animal_number}`;
+            if (!recoveredMap.has(mapKey)) {
+              recoveredMap.set(mapKey, {
+                id: item.id ?? `img-${item.game_id}-${item.animal_number}`,
+                game_id: item.game_id,
+                animal_number: item.animal_number,
+                image_url: item.image_url,
+                ts: 1,
+              });
+            }
+          }
+        }
+      }
+    }
+  } catch {
+    // ignore storage read errors
   }
 
+  return Array.from(recoveredMap.values()).map(({ id, game_id, animal_number, image_url }) => ({
+    id,
+    game_id,
+    animal_number,
+    image_url,
+  }));
+}
+
+export function buildDefaultCatalogImagesForAllGames(): MockStore["animal_images"] {
   const images: MockStore["animal_images"] = [];
-  const lottoGame = INITIAL_GAMES.find((g) => g.slug === "lotto-activo");
-  if (lottoGame) {
-    for (let i = 0; i <= 36; i++) {
-      images.push({
-        id: `img-lotto-${i}`,
-        game_id: lottoGame.id,
-        animal_number: i,
-        image_url: `https://tuazar.com/in/animalitos/lotto_activo/${i}.png`,
-      });
-    }
-  }
-  const granjitaGame = INITIAL_GAMES.find((g) => g.slug === "granjita");
-  if (granjitaGame) {
-    for (let i = 0; i <= 36; i++) {
-      images.push({
-        id: `img-granjita-${i}`,
-        game_id: granjitaGame.id,
-        animal_number: i,
-        image_url: `https://tuazar.com/in/animalitos/la_granjita/${i}.png`,
-      });
-    }
-  }
-  const monjeGame = INITIAL_GAMES.find((g) => g.slug === "monje-millonario");
-  if (monjeGame) {
-    for (let i = 0; i <= 76; i++) {
-      images.push({
-        id: `img-monje-${i}`,
-        game_id: monjeGame.id,
-        animal_number: i,
-        image_url: `https://tuazar.com/in/animalitos/monje_millonario/${i}.webp`,
-      });
+  for (const game of INITIAL_GAMES) {
+    const list = OFFICIAL_ANIMALS[game.slug];
+    if (!list) continue;
+    for (const animal of list) {
+      const label = animal.label ?? String(animal.number).padStart(2, "0");
+      const url = getFixedAnimalImageUrl(game.slug, animal.number, label);
+      if (url) {
+        images.push({
+          id: `img-${game.id}-${animal.number}`,
+          game_id: game.id,
+          animal_number: animal.number,
+          image_url: url,
+        });
+      }
     }
   }
   return images;
+}
+
+/**
+ * Combina listas de animal_images dando SIEMPRE máxima prioridad a las imágenes
+ * personalizadas subidas por el usuario por encima de las imágenes por defecto del catálogo.
+ */
+export function mergeAnimalImagesPreserveCustom(
+  ...lists: Array<MockStore["animal_images"] | undefined | null>
+): MockStore["animal_images"] {
+  const map = new Map<string, MockStore["animal_images"][number]>();
+
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    for (const item of list) {
+      if (!item || !item.game_id || typeof item.animal_number !== "number" || !item.image_url) {
+        continue;
+      }
+      const key = `${item.game_id}:${item.animal_number}`;
+      const existing = map.get(key);
+      if (!existing) {
+        map.set(key, {
+          id: item.id ?? `img-${item.game_id}-${item.animal_number}`,
+          game_id: item.game_id,
+          animal_number: item.animal_number,
+          image_url: item.image_url,
+        });
+      } else {
+        const existingIsCustom = !isDefaultCatalogImageUrl(existing.image_url);
+        const incomingIsCustom = !isDefaultCatalogImageUrl(item.image_url);
+        // Si la entrante es personalizada, o si ninguna de las dos es personalizada, actualiza
+        if (incomingIsCustom || !existingIsCustom) {
+          map.set(key, {
+            id: item.id ?? existing.id ?? `img-${item.game_id}-${item.animal_number}`,
+            game_id: item.game_id,
+            animal_number: item.animal_number,
+            image_url: item.image_url,
+          });
+        }
+      }
+    }
+  }
+
+  return Array.from(map.values());
+}
+
+function buildInitialImages(): MockStore["animal_images"] {
+  const defaultCatalogImages = buildDefaultCatalogImagesForAllGames();
+  if (typeof window === "undefined") {
+    return defaultCatalogImages;
+  }
+
+  let savedList: MockStore["animal_images"] = [];
+  try {
+    const saved = localStorage.getItem("pizarra_custom_animal_images");
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed)) {
+        savedList = parsed;
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  const recoveredCustom = recoverCustomAnimalImagesFromLocalStorage();
+  const merged = mergeAnimalImagesPreserveCustom(defaultCatalogImages, savedList, recoveredCustom);
+
+  try {
+    if (recoveredCustom.length > 0) {
+      localStorage.setItem("pizarra_user_custom_animal_images_v2", JSON.stringify(recoveredCustom));
+    }
+    localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(merged));
+  } catch {
+    // ignore
+  }
+
+  return merged;
 }
 
 const SUPER_ADMIN_EMAILS = ["m4rl0nh3rn4nd3z@gmail.com", "admin@pizarra.com"];
@@ -524,6 +682,13 @@ export async function syncTuazarDirectly(): Promise<number> {
   if (syncPromise) return syncPromise;
   syncPromise = (async () => {
     try {
+      const todayCaracas = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "America/Caracas",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(new Date());
+
       // If running in browser, fetch through our TanStack server endpoint to avoid CORS
       if (
         typeof window !== "undefined" &&
@@ -537,20 +702,20 @@ export async function syncTuazarDirectly(): Promise<number> {
         if (res.ok) {
           const data = await res.json();
           if (Array.isArray(data?.results)) {
-            mockStore.results = data.results;
-            return data.results.length;
+            const serverDate =
+              data.serverLotteryDate || data.results[data.results.length - 1]?.draw_date;
+            mockStore.results = (data.results as Result[]).map((r) =>
+              serverDate && r.draw_date === serverDate && serverDate !== todayCaracas
+                ? { ...r, draw_date: todayCaracas }
+                : r,
+            );
+            return mockStore.results.length;
           }
         }
         return 0;
       }
 
       let added = 0;
-      const todayCaracas = new Intl.DateTimeFormat("en-CA", {
-        timeZone: "America/Caracas",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-      }).format(new Date());
 
       // Helper to match draw with catalog with fallback
       const matchDrawWithCatalog = (
@@ -958,6 +1123,10 @@ function createMockQueryBuilder(table: string) {
       if (table === "animal_images" && typeof window !== "undefined") {
         try {
           localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(storeList));
+          const customOnly = (storeList as unknown as MockStore["animal_images"]).filter(
+            (img) => img && img.image_url && !isDefaultCatalogImageUrl(img.image_url),
+          );
+          localStorage.setItem("pizarra_user_custom_animal_images_v2", JSON.stringify(customOnly));
         } catch {
           // ignore
         }
@@ -1016,6 +1185,13 @@ function createMockQueryBuilder(table: string) {
         if (table === "animal_images" && typeof window !== "undefined") {
           try {
             localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(remaining));
+            const customOnly = (remaining as unknown as MockStore["animal_images"]).filter(
+              (img) => img && img.image_url && !isDefaultCatalogImageUrl(img.image_url),
+            );
+            localStorage.setItem(
+              "pizarra_user_custom_animal_images_v2",
+              JSON.stringify(customOnly),
+            );
           } catch {
             // ignore
           }

@@ -8,7 +8,13 @@ interface BoardSettingsContextType {
   updateSettings: (newSettings: Partial<AppSettings>) => void;
 }
 
-const SettingsContext = createContext<BoardSettingsContextType | undefined>(undefined);
+const DEFAULT_SETTINGS_CONTEXT: BoardSettingsContextType = {
+  settings: DEFAULT_APP_SETTINGS,
+  refreshSettings: async () => {},
+  updateSettings: () => {},
+};
+
+const SettingsContext = createContext<BoardSettingsContextType>(DEFAULT_SETTINGS_CONTEXT);
 
 function getInitialSettings(): AppSettings {
   if (typeof window !== "undefined") {
@@ -93,6 +99,5 @@ export function BoardSettingsProvider({ children }: { children: ReactNode }) {
 // eslint-disable-next-line react-refresh/only-export-components
 export function useBoardSettings() {
   const context = useContext(SettingsContext);
-  if (!context) throw new Error("useBoardSettings must be used within BoardSettingsProvider");
-  return context;
+  return context ?? DEFAULT_SETTINGS_CONTEXT;
 }

@@ -15,7 +15,18 @@ interface AuthContextValue {
   signOut: () => Promise<void>;
 }
 
-const AuthContext = createContext<AuthContextValue | undefined>(undefined);
+const DEFAULT_AUTH_CONTEXT: AuthContextValue = {
+  session: null,
+  user: null,
+  profile: null,
+  loading: false,
+  subscriptionActive: false,
+  signIn: async () => ({ error: null }),
+  signUp: async () => ({ error: null }),
+  signOut: async () => {},
+};
+
+const AuthContext = createContext<AuthContextValue>(DEFAULT_AUTH_CONTEXT);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
@@ -131,6 +142,5 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 // eslint-disable-next-line react-refresh/only-export-components
 export function useAuth() {
   const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error("useAuth must be used within AuthProvider");
-  return ctx;
+  return ctx ?? DEFAULT_AUTH_CONTEXT;
 }

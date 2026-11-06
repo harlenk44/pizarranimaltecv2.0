@@ -16,6 +16,7 @@ import {
   Share2,
   Eye,
   ListFilter,
+  LayoutGrid,
   CheckSquare,
   Square,
   X,
@@ -23,15 +24,14 @@ import {
 import type { ClientLicense } from "@/lib/types";
 import LicenseGate from "@/components/LicenseGate";
 import {
-  serializarConfigCliente,
-  deserializarConfigCliente,
+  parseClientLicenseName,
+  formatClientLicenseName,
   ALL_AVAILABLE_LOTTERIES,
   DEFAULT_ANIMAL_LOTTERIES,
   ALL_TRIPLE_LOTTERIES,
-  OPCIONES_TARJETAS_POR_PANTALLA,
-  OPCIONES_TIEMPO_TRANSICION,
-  DEFAULT_TARJETAS_POR_PANTALLA,
-  DEFAULT_TIEMPO_TRANSICION_SEGUNDOS,
+  DEFAULT_CARDS_PER_SCREEN,
+  PRODUCTS_PER_SCREEN_OPTIONS,
+  type CardsPerScreenOption,
 } from "@/lib/license-lotteries";
 
 function generateRandomPin(): string {
@@ -75,22 +75,14 @@ export default function LicensesManager() {
   const [formLotteries, setFormLotteries] = useState<string[]>(() =>
     ALL_AVAILABLE_LOTTERIES.map((l) => l.id),
   );
-  const [formTarjetasPorPantalla, setFormTarjetasPorPantalla] = useState<number | "TODAS">(
-    DEFAULT_TARJETAS_POR_PANTALLA,
-  );
-  const [formTiempoTransicion, setFormTiempoTransicion] = useState<number>(
-    DEFAULT_TIEMPO_TRANSICION_SEGUNDOS,
-  );
+  const [formCardsPerScreen, setFormCardsPerScreen] =
+    useState<CardsPerScreenOption>(DEFAULT_CARDS_PER_SCREEN);
 
-  // Edit lotteries & screen config modal state
+  // Edit lotteries & cards per screen modal state
   const [editingLicense, setEditingLicense] = useState<ClientLicense | null>(null);
   const [editingLotteries, setEditingLotteries] = useState<string[]>([]);
-  const [editingTarjetasPorPantalla, setEditingTarjetasPorPantalla] = useState<number | "TODAS">(
-    DEFAULT_TARJETAS_POR_PANTALLA,
-  );
-  const [editingTiempoTransicion, setEditingTiempoTransicion] = useState<number>(
-    DEFAULT_TIEMPO_TRANSICION_SEGUNDOS,
-  );
+  const [editingCardsPerScreen, setEditingCardsPerScreen] =
+    useState<CardsPerScreenOption>(DEFAULT_CARDS_PER_SCREEN);
 
   // Copy feedback
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -282,36 +274,58 @@ export default function LicensesManager() {
   };
 
   const handleOpenEditLotteries = (lic: ClientLicense) => {
-    const config = deserializarConfigCliente(lic.client_name);
+    const { allowedLotteries, cardsPerScreen } = parseClientLicenseName(lic.client_name);
     setEditingLicense(lic);
     setEditingLotteries(
-      config.allowedLotteries && config.allowedLotteries.length > 0
-        ? [...config.allowedLotteries]
+      allowedLotteries && allowedLotteries.length > 0
+        ? [...allowedLotteries]
         : ALL_AVAILABLE_LOTTERIES.map((l) => l.id),
     );
-    setEditingTarjetasPorPantalla(config.tarjetasPorPantalla);
-    setEditingTiempoTransicion(config.tiempoTransicion);
+    setEditingCardsPerScreen(cardsPerScreen ?? DEFAULT_CARDS_PER_SCREEN);
   };
 
   const handleSaveEditLotteries = async () => {
     if (!editingLicense) return;
-    const { cleanName } = deserializarConfigCliente(editingLicense.client_name);
-    const loteriasPayload =
-      editingLotteries.length >= ALL_AVAILABLE_LOTTERIES.length ? "TODAS" : editingLotteries;
-    const packedName = serializarConfigCliente(cleanName, {
-      loterias: loteriasPayload,
-      tarjetasPorPantalla: editingTarjetasPorPantalla,
-      tiempoTransicion: editingTiempoTransicion,
-    });
+    const { cleanName } = parseClientLicenseName(editingLicense.client_name);
+    const packedName = formatClientLicenseName(
+      cleanName,
+      editingLotteries,
+      ALL_AVAILABLE_LOTTERIES.length,
+      editingCardsPerScreen,
+    );
+    const cardsLabel =
+      editingCardsPerScreen === "TODAS" ? "Todas" : `${editingCardsPerScreen} por pantalla`;
     await runLicenseAction(
       {
         type: "update_lotteries",
         id: editingLicense.id,
         client_name: packedName,
       },
-      `Configuración actualizada para ${cleanName} (${editingLotteries.length}/${ALL_AVAILABLE_LOTTERIES.length} loterías · ${editingTarjetasPorPantalla} por pantalla · ${editingTiempoTransicion}s)`,
+      `Configuración actualizada para ${cleanName} (${editingLotteries.length}/${ALL_AVAILABLE_LOTTERIES.length} loterías · ${cardsLabel})`,
     );
     setEditingLicense(null);
+  };
+
+  const handleQuickChangeCardsPerScreen = async (
+    lic: ClientLicense,
+    newCards: CardsPerScreenOption,
+  ) => {
+    const { cleanName, allowedLotteries } = parseClientLicenseName(lic.client_name);
+    const packedName = formatClientLicenseName(
+      cleanName,
+      allowedLotteries,
+      ALL_AVAILABLE_LOTTERIES.length,
+      newCards,
+    );
+    const cardsLabel = newCards === "TODAS" ? "Todas" : `${newCards} productos por pantalla`;
+    await runLicenseAction(
+      {
+        type: "update_lotteries",
+        id: lic.id,
+        client_name: packedName,
+      },
+      `${cleanName}: configurado a ${cardsLabel}`,
+    );
   };
 
   const handleCreateLicense = async (e: React.FormEvent) => {
@@ -320,13 +334,15 @@ export default function LicensesManager() {
     const days =
       durationDays === "unlimited" ? null : Math.max(1, Math.min(30, Number(durationDays) || 30));
 
-    const loteriasPayload =
-      formLotteries.length >= ALL_AVAILABLE_LOTTERIES.length ? "TODAS" : formLotteries;
-    const packedName = serializarConfigCliente(clientName.trim(), {
-      loterias: loteriasPayload,
-      tarjetasPorPantalla: formTarjetasPorPantalla,
-      tiempoTransicion: formTiempoTransicion,
-    });
+    const packedName = formatClientLicenseName(
+      clientName.trim(),
+      formLotteries,
+      ALL_AVAILABLE_LOTTERIES.length,
+      formCardsPerScreen,
+    );
+
+    const cardsLabel =
+      formCardsPerScreen === "TODAS" ? "Todas" : `${formCardsPerScreen} por pantalla`;
 
     await runLicenseAction(
       {
@@ -337,15 +353,14 @@ export default function LicensesManager() {
         max_devices: maxDevices,
         notes: notes.trim(),
       },
-      `Licencia creada para ${clientName.trim()} (${formLotteries.length}/${ALL_AVAILABLE_LOTTERIES.length} loterías · ${formTarjetasPorPantalla} por pantalla · ${formTiempoTransicion}s · ${days ? `${days} ${days === 1 ? "día" : "días"}` : "Permanente"})`,
+      `Licencia creada para ${clientName.trim()} (${formLotteries.length}/${ALL_AVAILABLE_LOTTERIES.length} loterías · ${cardsLabel} · ${days ? `${days} ${days === 1 ? "día" : "días"}` : "Permanente"})`,
     );
     setClientName("");
     setPinCode(generateRandomPin());
     setNotes("");
     setDurationDays("30");
     setFormLotteries(ALL_AVAILABLE_LOTTERIES.map((l) => l.id));
-    setFormTarjetasPorPantalla(DEFAULT_TARJETAS_POR_PANTALLA);
-    setFormTiempoTransicion(DEFAULT_TIEMPO_TRANSICION_SEGUNDOS);
+    setFormCardsPerScreen(DEFAULT_CARDS_PER_SCREEN);
     setShowForm(false);
   };
 
@@ -358,11 +373,10 @@ export default function LicensesManager() {
   };
 
   const handleCopyWhatsAppMsg = (lic: ClientLicense) => {
-    const { cleanName } = deserializarConfigCliente(lic.client_name);
     const expStr = lic.expires_at
       ? `Vence: ${formatExpirationDate(lic.expires_at)}`
       : "Licencia Permanente";
-    const text = `Hola *${cleanName}*, tu código PIN de activación para *Pizarra Animaltec* es: *${lic.pin_code}* (${lic.max_devices} TV máx. · ${expStr}).`;
+    const text = `Hola *${lic.client_name}*, tu código PIN de activación para *Pizarra Animaltec* es: *${lic.pin_code}* (${lic.max_devices} TV máx. · ${expStr}).`;
     if (typeof navigator !== "undefined" && navigator.clipboard) {
       navigator.clipboard.writeText(text).catch(() => {});
     }
@@ -656,38 +670,35 @@ export default function LicensesManager() {
                 <option value={10}>10 Pantallas (TVs)</option>
               </select>
             </div>
+          </div>
 
-            <div>
-              <label className="block text-xs text-slate-400 mb-1.5 font-medium">
-                Productos por Pantalla (Grilla TV)
-              </label>
-              <select
-                value={String(formTarjetasPorPantalla)}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  setFormTarjetasPorPantalla(val === "TODAS" ? "TODAS" : Number(val));
-                }}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white font-mono focus:outline-none focus:border-blue-500"
-              >
-                {OPCIONES_TARJETAS_POR_PANTALLA.map((opt) => (
-                  <option key={String(opt.value)} value={String(opt.value)}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
+          {/* Selector de Productos por Pantalla */}
+          <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="space-y-0.5">
+              <div className="flex items-center gap-2">
+                <LayoutGrid className="w-4 h-4 text-emerald-400" />
+                <span className="text-xs font-bold text-white uppercase tracking-wider">
+                  Productos por Pantalla (Tarjetas por Ventana)
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-400">
+                Si eliges menos de 8 (ej. 2, 3 o 4), las tarjetas se expandirán automáticamente para
+                ocupar toda la pantalla del TV con números e imágenes más grandes.
+              </p>
             </div>
 
-            <div>
-              <label className="block text-xs text-slate-400 mb-1.5 font-medium">
-                Tiempo de Transición por Ventana
-              </label>
+            <div className="flex items-center gap-2 flex-wrap">
               <select
-                value={formTiempoTransicion}
-                onChange={(e) => setFormTiempoTransicion(Number(e.target.value))}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white font-mono tabular-nums focus:outline-none focus:border-blue-500"
+                aria-label="Productos por Pantalla"
+                value={String(formCardsPerScreen)}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setFormCardsPerScreen(val === "TODAS" ? "TODAS" : Number(val));
+                }}
+                className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono font-bold text-emerald-400 focus:outline-none focus:border-emerald-500 cursor-pointer"
               >
-                {OPCIONES_TIEMPO_TRANSICION.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
+                {PRODUCTS_PER_SCREEN_OPTIONS.map((opt) => (
+                  <option key={String(opt.value)} value={String(opt.value)}>
                     {opt.label}
                   </option>
                 ))}
@@ -897,8 +908,9 @@ export default function LicensesManager() {
                     ? lic.bound_device_ids.length
                     : 0;
 
-                  const { cleanName, allowedLotteries, tarjetasPorPantalla, tiempoTransicion } =
-                    deserializarConfigCliente(lic.client_name);
+                  const { cleanName, allowedLotteries, cardsPerScreen } = parseClientLicenseName(
+                    lic.client_name,
+                  );
                   const isAll =
                     !allowedLotteries || allowedLotteries.length >= ALL_AVAILABLE_LOTTERIES.length;
                   const totalAllowedCount = allowedLotteries
@@ -931,16 +943,36 @@ export default function LicensesManager() {
                               ? `Todas (${ALL_AVAILABLE_LOTTERIES.length} loterías)`
                               : `${totalAllowedCount} de ${ALL_AVAILABLE_LOTTERIES.length} loterías`}
                           </span>
-                          <span
-                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-semibold border bg-slate-950/80 text-slate-300 border-slate-700/60"
-                            title="Productos por pantalla y tiempo de transición del carrusel"
-                          >
-                            <Tv className="w-3 h-3 text-amber-400" />
-                            {tarjetasPorPantalla === "TODAS"
-                              ? "Todas/pant."
-                              : `${tarjetasPorPantalla}/pant.`}{" "}
-                            · {tiempoTransicion}s
-                          </span>
+
+                          {/* Selector rápido de Productos por Pantalla en la fila */}
+                          <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-semibold border bg-purple-950/50 text-purple-300 border-purple-700/50">
+                            <LayoutGrid className="w-3 h-3 text-purple-400" />
+                            <select
+                              aria-label={`Productos por pantalla para ${cleanName}`}
+                              value={String(cardsPerScreen)}
+                              disabled={saving}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                handleQuickChangeCardsPerScreen(
+                                  lic,
+                                  val === "TODAS" ? "TODAS" : Number(val),
+                                );
+                              }}
+                              className="bg-transparent text-purple-200 font-mono font-bold text-[10px] focus:outline-none cursor-pointer"
+                              title="Cambiar cantidad de productos por pantalla para esta licencia"
+                            >
+                              {[2, 3, 4, 6, 8, 9, 10, 12, "TODAS"].map((optVal) => (
+                                <option
+                                  key={String(optVal)}
+                                  value={String(optVal)}
+                                  className="bg-slate-900 text-white"
+                                >
+                                  {optVal === "TODAS" ? "Todas/pant." : `${optVal} prod./pant.`}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+
                           <button
                             type="button"
                             onClick={() => handleOpenEditLotteries(lic)}
@@ -1165,7 +1197,7 @@ export default function LicensesManager() {
         )}
       </div>
 
-      {/* Modal para Editar Loterías y Parámetros de Pantalla */}
+      {/* Modal para Editar Loterías Permitidas */}
       {editingLicense && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
           <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-2xl p-6 shadow-2xl space-y-4 my-8">
@@ -1174,9 +1206,9 @@ export default function LicensesManager() {
                 <div className="flex items-center gap-2">
                   <ListFilter className="w-5 h-5 text-blue-400" />
                   <h3 className="text-base font-bold text-white">
-                    Configuración de Pizarra y Loterías para{" "}
+                    Loterías Permitidas para{" "}
                     <span className="text-blue-400">
-                      {deserializarConfigCliente(editingLicense.client_name).cleanName}
+                      {parseClientLicenseName(editingLicense.client_name).cleanName}
                     </span>
                   </h3>
                 </div>
@@ -1185,8 +1217,7 @@ export default function LicensesManager() {
                   <span className="font-mono text-emerald-400 font-bold tracking-widest">
                     {editingLicense.pin_code}
                   </span>{" "}
-                  · Personaliza cuántas tarjetas se ven por pantalla, la velocidad de transición y
-                  las loterías activas.
+                  · La pizarra y los anuncios de voz solo mostrarán las loterías marcadas aquí.
                 </p>
               </div>
 
@@ -1199,21 +1230,25 @@ export default function LicensesManager() {
               </button>
             </div>
 
-            {/* Selectores de Tarjetas por Pantalla y Tiempo de Transición */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-slate-950/70 p-3.5 rounded-xl border border-slate-800">
-              <div>
-                <label className="block text-xs text-slate-300 mb-1.5 font-semibold">
-                  Productos por Pantalla (Grilla TV)
-                </label>
+            {/* Selector de Productos por Pantalla en el Modal */}
+            <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3.5 space-y-2.5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <LayoutGrid className="w-4 h-4 text-purple-400" />
+                  <span className="text-xs font-bold text-white uppercase tracking-wider">
+                    Productos por Pantalla
+                  </span>
+                </div>
                 <select
-                  value={String(editingTarjetasPorPantalla)}
+                  aria-label="Productos por Pantalla Modal"
+                  value={String(editingCardsPerScreen)}
                   onChange={(e) => {
                     const val = e.target.value;
-                    setEditingTarjetasPorPantalla(val === "TODAS" ? "TODAS" : Number(val));
+                    setEditingCardsPerScreen(val === "TODAS" ? "TODAS" : Number(val));
                   }}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white font-mono focus:outline-none focus:border-blue-500"
+                  className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs font-mono font-bold text-purple-300 focus:outline-none focus:border-purple-500 cursor-pointer"
                 >
-                  {OPCIONES_TARJETAS_POR_PANTALLA.map((opt) => (
+                  {PRODUCTS_PER_SCREEN_OPTIONS.map((opt) => (
                     <option key={String(opt.value)} value={String(opt.value)}>
                       {opt.label}
                     </option>
@@ -1221,21 +1256,24 @@ export default function LicensesManager() {
                 </select>
               </div>
 
-              <div>
-                <label className="block text-xs text-slate-300 mb-1.5 font-semibold">
-                  Tiempo de Transición (segundos)
-                </label>
-                <select
-                  value={editingTiempoTransicion}
-                  onChange={(e) => setEditingTiempoTransicion(Number(e.target.value))}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white font-mono tabular-nums focus:outline-none focus:border-blue-500"
-                >
-                  {OPCIONES_TIEMPO_TRANSICION.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {([2, 3, 4, 6, 8, 9, 10, 12, "TODAS"] as CardsPerScreenOption[]).map((val) => {
+                  const active = editingCardsPerScreen === val;
+                  return (
+                    <button
+                      key={String(val)}
+                      type="button"
+                      onClick={() => setEditingCardsPerScreen(val)}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold transition border cursor-pointer ${
+                        active
+                          ? "bg-purple-600 text-white border-purple-500 shadow-sm"
+                          : "bg-slate-900 text-slate-400 border-slate-800 hover:text-white hover:bg-slate-800"
+                      }`}
+                    >
+                      {val === "TODAS" ? "Todas" : `${val}`}
+                    </button>
+                  );
+                })}
               </div>
             </div>
 

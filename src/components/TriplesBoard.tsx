@@ -2,7 +2,7 @@ import { useState, useMemo } from "react";
 import { Hash } from "lucide-react";
 import { useBoardSettings } from "@/context/BoardSettingsContext";
 import { useLicenseContext } from "@/components/LicenseGate";
-import { calcularGrillaTV } from "@/lib/license-lotteries";
+import { getResponsiveBoardGridStyle } from "@/lib/license-lotteries";
 import {
   TRIPLE_GAMES,
   formatZodiacSign,
@@ -37,7 +37,7 @@ function findTripleForTimeSlot(
 
 export default function TriplesBoard({ results, loading = false, games }: TriplesBoardProps) {
   const { settings } = useBoardSettings();
-  const { isGameAllowed, tarjetasPorPantalla } = useLicenseContext();
+  const { isGameAllowed } = useLicenseContext();
 
   const visibleTriples = useMemo(() => {
     if (games && games.length > 0) return games;
@@ -65,7 +65,7 @@ export default function TriplesBoard({ results, loading = false, games }: Triple
   return (
     <div
       className="board-fluid-grid grid h-full w-full min-h-0 min-w-0 auto-rows-fr overflow-hidden"
-      style={calcularGrillaTV(tarjetasPorPantalla, visibleTriples.length)}
+      style={getResponsiveBoardGridStyle(visibleTriples.length)}
     >
       {visibleTriples.map((game) => {
         const gameResults = results
@@ -176,18 +176,30 @@ function TripleGameCard({
           className="fluid-hero-avatar rounded-xl bg-slate-950/90 border flex flex-col items-center justify-center shrink-0 overflow-hidden shadow-inner px-1.5"
           style={{
             borderColor: latestResult ? game.color : "rgba(51, 65, 85, 0.8)",
-            width: "calc(clamp(2.2rem, min(5.5vh, 4vw), 4.8rem) * var(--display-animal-scale, 1))",
-            height: "calc(clamp(2.2rem, min(5.5vh, 4vw), 4.8rem) * var(--display-animal-scale, 1))",
+            width:
+              "calc(clamp(2.2rem, min(5.5vh, 4vw), 4.8rem) * var(--display-animal-scale, 1) * var(--card-avatar-scale, 1))",
+            height:
+              "calc(clamp(2.2rem, min(5.5vh, 4vw), 4.8rem) * var(--display-animal-scale, 1) * var(--card-avatar-scale, 1))",
           }}
         >
           {latestResult ? (
             <>
-              <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 leading-none">
+              <span
+                className="font-bold uppercase tracking-wider text-slate-400 leading-none"
+                style={{
+                  fontSize:
+                    "calc(clamp(0.5rem, 0.7vw, 0.75rem) * var(--display-font-scale, 1) * var(--card-density-scale, 1))",
+                }}
+              >
                 {isSingleColumn ? primaryLabel : "A"}
               </span>
               <span
-                className="font-mono font-black tracking-tight tabular-nums leading-none mt-0.5 text-[clamp(0.95rem,1.6vw,1.6rem)]"
-                style={{ color: game.color }}
+                className="font-mono font-black tracking-tight tabular-nums leading-none mt-0.5"
+                style={{
+                  color: game.color,
+                  fontSize:
+                    "calc(clamp(0.95rem, 1.6vw, 1.6rem) * var(--display-font-scale, 1) * var(--card-density-scale, 1))",
+                }}
               >
                 {latestResult.triple_a}
               </span>
@@ -210,7 +222,13 @@ function TripleGameCard({
                 </div>
               ) : (
                 <div className="font-black text-white tracking-tight font-mono tabular-nums flex flex-col items-end leading-tight">
-                  <div className="flex items-center justify-end gap-2 text-[clamp(0.8rem,min(2vh,1.2vw),1.35rem)]">
+                  <div
+                    className="flex items-center justify-end gap-2"
+                    style={{
+                      fontSize:
+                        "calc(clamp(0.8rem, min(2vh, 1.2vw), 1.35rem) * var(--display-font-scale, 1) * var(--display-hero-scale, 1) * var(--card-density-scale, 1))",
+                    }}
+                  >
                     <span>A:{latestResult.triple_a}</span>
                     {latestResult.triple_b && (
                       <span className="text-slate-200">B:{latestResult.triple_b}</span>
@@ -218,8 +236,12 @@ function TripleGameCard({
                   </div>
                   {(latestResult.triple_c || latestResult.zodiac_sign) && (
                     <div
-                      className="text-[clamp(0.75rem,min(1.8vh,1.05vw),1.15rem)] font-extrabold"
-                      style={{ color: game.color }}
+                      className="font-extrabold"
+                      style={{
+                        color: game.color,
+                        fontSize:
+                          "calc(clamp(0.75rem, min(1.8vh, 1.05vw), 1.15rem) * var(--display-font-scale, 1) * var(--display-hero-scale, 1) * var(--card-density-scale, 1))",
+                      }}
                     >
                       {latestResult.triple_c ? `${latestResult.triple_c} ` : ""}
                       {formatZodiacSign(latestResult.zodiac_sign)}
@@ -267,28 +289,48 @@ function TripleGameCard({
                   {res ? (
                     isSingleColumn ? (
                       <span
-                        style={{ color: game.color }}
-                        className="font-black text-[clamp(0.85rem,min(2vh,1.2vw),1.3rem)]"
+                        className="font-black"
+                        style={{
+                          color: game.color,
+                          fontSize:
+                            "calc(clamp(0.85rem, min(2vh, 1.2vw), 1.3rem) * var(--display-font-scale, 1) * var(--card-cell-scale, 1))",
+                        }}
                       >
                         {res.triple_a}
                       </span>
                     ) : (
                       <div className="flex items-center justify-end gap-1.5 sm:gap-2 flex-wrap">
                         <span
-                          style={{ color: game.color }}
-                          className="font-black text-[clamp(0.72rem,min(1.8vh,1.05vw),1.15rem)] whitespace-nowrap"
+                          className="font-black whitespace-nowrap"
+                          style={{
+                            color: game.color,
+                            fontSize:
+                              "calc(clamp(0.72rem, min(1.8vh, 1.05vw), 1.15rem) * var(--display-font-scale, 1) * var(--card-cell-scale, 1))",
+                          }}
                         >
                           <span className="text-[0.8em] opacity-75 mr-0.5">A:</span>
                           {res.triple_a}
                         </span>
                         {res.triple_b && (
-                          <span className="font-black text-white text-[clamp(0.72rem,min(1.8vh,1.05vw),1.15rem)] whitespace-nowrap">
+                          <span
+                            className="font-black text-white whitespace-nowrap"
+                            style={{
+                              fontSize:
+                                "calc(clamp(0.72rem, min(1.8vh, 1.05vw), 1.15rem) * var(--display-font-scale, 1) * var(--card-cell-scale, 1))",
+                            }}
+                          >
                             <span className="text-[0.8em] text-slate-400 mr-0.5">B:</span>
                             {res.triple_b}
                           </span>
                         )}
                         {(res.triple_c || res.zodiac_sign) && (
-                          <span className="font-extrabold text-amber-300 text-[clamp(0.68rem,min(1.7vh,0.98vw),1.05rem)] whitespace-nowrap bg-amber-500/10 border border-amber-500/30 rounded px-1.5 py-0.5 leading-none">
+                          <span
+                            className="font-extrabold text-amber-300 whitespace-nowrap bg-amber-500/10 border border-amber-500/30 rounded px-1.5 py-0.5 leading-none"
+                            style={{
+                              fontSize:
+                                "calc(clamp(0.68rem, min(1.7vh, 0.98vw), 1.05rem) * var(--display-font-scale, 1) * var(--card-cell-scale, 1))",
+                            }}
+                          >
                             {res.triple_c ?? ""}
                             {res.zodiac_sign ? ` ${formatZodiacSign(res.zodiac_sign)}` : ""}
                           </span>

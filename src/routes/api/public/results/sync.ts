@@ -1,6 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { mockStore, INITIAL_GAMES } from "@/lib/mock-db";
-import type { ClientLicense } from "@/lib/types";
+import {
+  mockStore,
+  INITIAL_GAMES,
+  mergeAnimalImagesPreserveCustom,
+  isDefaultCatalogImageUrl,
+} from "@/lib/mock-db";
+import type { ClientLicense, AnimalImage } from "@/lib/types";
 import { TRIPLE_GAMES, buildTripleAlertItem, type TripleResult } from "@/lib/triples";
 import {
   getDefaultGameScheduleTimes,
@@ -16,6 +21,7 @@ const RESULTS_FILE = "/tmp/lottery_results.json";
 const TRIPLE_RESULTS_FILE = "/tmp/lottery_triples_results.json";
 const LATEST_ALERT_FILE = "/tmp/lottery_latest_alert.json";
 const ANIMAL_IMAGES_FILE = "/tmp/lottery_animal_images.json";
+const WORKSPACE_ANIMAL_IMAGES_FILE = path.join(process.cwd(), "animal_images.persisted.json");
 const GAMES_FILE = "/tmp/lottery_games.json";
 const TMP_CLIENT_LICENSES_FILE = "/tmp/lottery_client_licenses_v2.json";
 const WORKSPACE_CLIENT_LICENSES_FILE = path.join(process.cwd(), "client_licenses.persisted.json");
@@ -298,11 +304,28 @@ function saveServerResults() {
 
 function loadServerAnimalImages() {
   try {
-    if (fs.existsSync(ANIMAL_IMAGES_FILE)) {
-      const data = JSON.parse(fs.readFileSync(ANIMAL_IMAGES_FILE, "utf-8"));
-      if (Array.isArray(data) && data.length > 0) {
-        mockStore.animal_images = data;
+    let persistedWorkspace: AnimalImage[] = [];
+    let persistedTmp: AnimalImage[] = [];
+
+    if (fs.existsSync(WORKSPACE_ANIMAL_IMAGES_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(WORKSPACE_ANIMAL_IMAGES_FILE, "utf-8"));
+      if (Array.isArray(parsed)) {
+        persistedWorkspace = parsed;
       }
+    }
+    if (fs.existsSync(ANIMAL_IMAGES_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(ANIMAL_IMAGES_FILE, "utf-8"));
+      if (Array.isArray(parsed)) {
+        persistedTmp = parsed;
+      }
+    }
+
+    if (persistedWorkspace.length > 0 || persistedTmp.length > 0) {
+      mockStore.animal_images = mergeAnimalImagesPreserveCustom(
+        mockStore.animal_images,
+        persistedTmp,
+        persistedWorkspace,
+      );
     }
   } catch {
     // ignore
@@ -310,6 +333,14 @@ function loadServerAnimalImages() {
 }
 
 function saveServerAnimalImages() {
+  try {
+    const customOnly = mockStore.animal_images.filter(
+      (img) => !isDefaultCatalogImageUrl(img.image_url),
+    );
+    fs.writeFileSync(WORKSPACE_ANIMAL_IMAGES_FILE, JSON.stringify(customOnly, null, 2));
+  } catch {
+    // ignore
+  }
   try {
     fs.writeFileSync(ANIMAL_IMAGES_FILE, JSON.stringify(mockStore.animal_images));
   } catch {
@@ -575,13 +606,25 @@ export const Route = createFileRoute("/api/public/results/sync")({
         loadServerAnimalImages();
         loadServerGames();
         loadServerLicenses();
+        const serverToday = new Intl.DateTimeFormat("en-CA", {
+          timeZone: "America/Caracas",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+        }).format(new Date());
+
         const monjeGame = mockStore.games.find((g) => g.slug === "monje-millonario");
         const monjeCount = monjeGame
-          ? mockStore.results.filter((r) => r.game_id === monjeGame.id).length
+          ? mockStore.results.filter(
+              (r) => r.game_id === monjeGame.id && r.draw_date === serverToday,
+            ).length
           : 0;
+        const todayResultsCount = mockStore.results.filter(
+          (r) => r.draw_date === serverToday,
+        ).length;
 
         const needsImmediateSync =
-          mockStore.results.length === 0 ||
+          todayResultsCount === 0 ||
           serverTripleResults.length === 0 ||
           (monjeGame && monjeCount < 6);
 
@@ -603,6 +646,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
 
         return Response.json({
           status: "ok",
+          serverLotteryDate: serverToday,
           results: mockStore.results,
           tripleResults: serverTripleResults,
           latestAlert,
@@ -655,6 +699,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
         try {
           loadServerLicenses();
           loadServerTripleResults();
+          loadServerAnimalImages();
           const body = await request.json();
           const {
             result,
@@ -662,6 +707,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
             deleteTripleId,
             alert,
             animalImage,
+            animalImagesBatch,
             deleteAnimalImage,
             gameUpdate,
             licenseAction,
@@ -1066,6 +1112,32 @@ export const Route = createFileRoute("/api/public/results/sync")({
               });
             }
             saveServerAnimalImages();
+          }
+
+          if (Array.isArray(animalImagesBatch) && animalImagesBatch.length > 0) {
+            const validBatch: AnimalImage[] = animalImagesBatch
+              .filter(
+                (item: unknown) =>
+                  Boolean(item) &&
+                  typeof item === "object" &&
+                  typeof (item as AnimalImage).game_id === "string" &&
+                  typeof (item as AnimalImage).animal_number === "number" &&
+                  typeof (item as AnimalImage).image_url === "string" &&
+                  Boolean((item as AnimalImage).image_url.trim()),
+              )
+              .map((item: AnimalImage) => ({
+                id: item.id ?? `img-${item.game_id}-${item.animal_number}`,
+                game_id: item.game_id,
+                animal_number: item.animal_number,
+                image_url: item.image_url,
+              }));
+            if (validBatch.length > 0) {
+              mockStore.animal_images = mergeAnimalImagesPreserveCustom(
+                mockStore.animal_images,
+                validBatch,
+              );
+              saveServerAnimalImages();
+            }
           }
 
           if (deleteAnimalImage && typeof deleteAnimalImage === "object") {

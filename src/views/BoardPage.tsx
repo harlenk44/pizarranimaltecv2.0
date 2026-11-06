@@ -37,12 +37,7 @@ import { useDisplay } from "@/context/DisplayContext";
 import { sorteoAlertTracker, getSorteoAlertKey } from "@/lib/sorteo-alert-tracker";
 import { getGameScheduleTimes } from "@/lib/game-schedules";
 import { resolveCanonicalAnimal } from "@/lib/official-animals";
-import {
-  calcularGrillaTV,
-  dividirEnVentanas,
-  iniciarCarruselVentanas,
-  DEFAULT_TIEMPO_TRANSICION_SEGUNDOS,
-} from "@/lib/license-lotteries";
+import { getResponsiveBoardGridStyle, DEFAULT_CARDS_PER_SCREEN } from "@/lib/license-lotteries";
 
 interface BoardPageProps {
   onAdminClick: () => void;
@@ -123,6 +118,8 @@ function findResultForTimeSlot(results: Result[], timeSlot: string): Result | un
   });
 }
 
+const DEFAULT_ROTATION_SECONDS = 25;
+
 interface BoardWindowPage {
   id: string;
   type: "animalitos" | "triples";
@@ -138,7 +135,7 @@ interface BoardWindowPage {
 export default function BoardPage({ onAdminClick }: BoardPageProps) {
   const { profile, signOut } = useAuth();
   const { settings } = useBoardSettings();
-  const { isGameAllowed, tarjetasPorPantalla, tiempoTransicion } = useLicenseContext();
+  const { isGameAllowed, cardsPerScreen } = useLicenseContext();
   const [games, setGames] = useState<Game[]>([]);
   const [resultsMap, setResultsMap] = useState<Record<string, Result[]>>({});
   const [animalImages, setAnimalImages] = useState<AnimalImageMap>({});
@@ -764,21 +761,25 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     window.dispatchEvent(new CustomEvent("pizarra:open-license-screen"));
   };
 
-  // Paginación automática usando la función auxiliar dividirEnVentanas
+  // Paginación dinámica según Productos por Pantalla configurados en la licencia (8 por defecto)
   const boardWindows = useMemo<BoardWindowPage[]>(() => {
     const list: BoardWindowPage[] = [];
+    const maxPerPage =
+      cardsPerScreen === "TODAS"
+        ? Math.max(100, games.length + TRIPLE_GAMES.length)
+        : Math.max(2, Number(cardsPerScreen) || DEFAULT_CARDS_PER_SCREEN);
 
-    // 1. Animalitos (divididos en páginas según tarjetasPorPantalla de la licencia)
+    // 1. Animalitos (loterías visibles divididas según el límite configurado)
     const visibleAnimals = games.filter((g) => isGameAllowed(g.slug || g.id));
     const allAnimalCards: GameWithResults[] = visibleAnimals.map((g) => ({
       ...g,
       latest_results: resultsMap[g.id] ?? [],
     }));
 
-    const animalPages = dividirEnVentanas(allAnimalCards, tarjetasPorPantalla);
-    if (animalPages.length > 0) {
-      const totalAnimalPages = animalPages.length;
-      animalPages.forEach((chunk, i) => {
+    if (allAnimalCards.length > 0) {
+      const totalAnimalPages = Math.ceil(allAnimalCards.length / maxPerPage);
+      for (let i = 0; i < totalAnimalPages; i++) {
+        const chunk = allAnimalCards.slice(i * maxPerPage, (i + 1) * maxPerPage);
         const isMulti = totalAnimalPages > 1;
         list.push({
           id: `animalitos-${i + 1}`,
@@ -792,15 +793,15 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           shortLabel: isMulti ? `${i + 1}/${totalAnimalPages}` : "Anim",
           animalCards: chunk,
         });
-      });
+      }
     }
 
-    // 2. Triples (divididos en páginas según tarjetasPorPantalla de la licencia)
+    // 2. Triples (loterías visibles divididas según el límite configurado)
     const visibleTriples = TRIPLE_GAMES.filter((g) => isGameAllowed(g.id) || isGameAllowed(g.slug));
-    const triplePages = dividirEnVentanas(visibleTriples, tarjetasPorPantalla);
-    if (triplePages.length > 0) {
-      const totalTriplePages = triplePages.length;
-      triplePages.forEach((chunk, i) => {
+    if (visibleTriples.length > 0) {
+      const totalTriplePages = Math.ceil(visibleTriples.length / maxPerPage);
+      for (let i = 0; i < totalTriplePages; i++) {
+        const chunk = visibleTriples.slice(i * maxPerPage, (i + 1) * maxPerPage);
         const isMulti = totalTriplePages > 1;
         list.push({
           id: `triples-${i + 1}`,
@@ -814,7 +815,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           shortLabel: isMulti ? `${i + 1}/${totalTriplePages}` : "Trip",
           tripleGames: chunk,
         });
-      });
+      }
     }
 
     if (list.length === 0) {
@@ -831,7 +832,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     }
 
     return list;
-  }, [games, resultsMap, isGameAllowed, tarjetasPorPantalla]);
+  }, [games, resultsMap, isGameAllowed, cardsPerScreen]);
 
   const safePageIndex = activePageIndex < boardWindows.length ? activePageIndex : 0;
   const currentWindow = boardWindows[safePageIndex] || boardWindows[0];
@@ -881,37 +882,37 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [goToNextPage, goToPrevPage, goToPage, boardWindows.length]);
 
-  // Rotación automática usando iniciarCarruselVentanas (con pausa durante anuncios emergentes y configuración)
+  // Rotación automática cada 25 segundos (con pausa durante anuncios emergentes y configuración)
   const isRotationActive = autoRotate || settings.rotation_enabled;
-  const effectiveRotationSeconds = Math.max(
-    5,
-    tiempoTransicion || settings.rotation_interval_seconds || DEFAULT_TIEMPO_TRANSICION_SEGUNDOS,
-  );
   useEffect(() => {
     if (!isRotationActive) return;
     if (alertQueue.length > 0) return; // Pausa mientras el popup de sorteo está activo
     if (showVoiceSettings) return; // Pausa mientras el menú de voz está abierto
     if (boardWindows.length <= 1) return;
 
-    const cleanupCarousel = iniciarCarruselVentanas(
-      effectiveRotationSeconds,
-      () => {
-        setActivePageIndex((prev) => (prev + 1) % boardWindows.length);
-      },
-      (progressPct) => {
-        setRotationProgress(progressPct);
-      },
-    );
+    const intervalSec = Math.max(5, settings.rotation_interval_seconds || DEFAULT_ROTATION_SECONDS);
+    const intervalMs = intervalSec * 1000;
+    const tickInterval = 500;
+    let elapsed = 0;
 
-    return () => {
-      cleanupCarousel();
-    };
+    const timer = setInterval(() => {
+      elapsed += tickInterval;
+      setRotationProgress(Math.min(100, (elapsed / intervalMs) * 100));
+
+      if (elapsed >= intervalMs) {
+        elapsed = 0;
+        setRotationProgress(0);
+        setActivePageIndex((prev) => (prev + 1) % boardWindows.length);
+      }
+    }, tickInterval);
+
+    return () => clearInterval(timer);
   }, [
     isRotationActive,
     alertQueue.length,
     showVoiceSettings,
     boardWindows.length,
-    effectiveRotationSeconds,
+    settings.rotation_interval_seconds,
     timerResetKey,
   ]);
 
@@ -1064,7 +1065,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
               {voiceEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
             </button>
 
-            {/* Alternar rotación automática */}
+            {/* Alternar rotación automática de 25 segundos */}
             <button
               onClick={handleAutoRotateToggle}
               className={`px-2.5 py-2 rounded-lg border transition flex items-center gap-1.5 text-xs font-bold cursor-pointer whitespace-nowrap shrink-0 ${
@@ -1074,14 +1075,12 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
               }`}
               title={
                 isRotationActive
-                  ? `Rotación automática activa (cada ${effectiveRotationSeconds}s) · Haz clic para pausar`
-                  : `Rotación pausada · Haz clic para activar rotación automática (cada ${effectiveRotationSeconds}s)`
+                  ? "Rotación automática activa (cada 25s) · Haz clic para pausar"
+                  : "Rotación pausada · Haz clic para activar rotación automática (cada 25s)"
               }
             >
               <Repeat className="w-4 h-4" />
-              <span className="hidden sm:inline">
-                {isRotationActive ? `Auto ${effectiveRotationSeconds}s` : "Manual"}
-              </span>
+              <span className="hidden sm:inline">{isRotationActive ? "Auto 25s" : "Manual"}</span>
             </button>
 
             <button
@@ -1144,7 +1143,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           ) : (
             <div
               className="board-fluid-grid grid h-full w-full min-h-0 min-w-0 auto-rows-fr overflow-hidden"
-              style={calcularGrillaTV(tarjetasPorPantalla, currentWindow.animalCards.length)}
+              style={getResponsiveBoardGridStyle(currentWindow.animalCards.length)}
             >
               {currentWindow.animalCards.map((game) => (
                 <GameCard
@@ -1154,6 +1153,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
                   animalNames={animalNames}
                   animalLabels={animalLabels}
                   settings={settings}
+                  cardCount={currentWindow.animalCards?.length ?? 8}
                 />
               ))}
             </div>
@@ -1219,12 +1219,14 @@ function GameCard({
   animalNames,
   animalLabels,
   settings,
+  cardCount = 8,
 }: {
   game: GameWithResults;
   animalImages: AnimalImageMap;
   animalNames: AnimalNameMap;
   animalLabels: AnimalLabelMap;
   settings: ReturnType<typeof useBoardSettings>["settings"];
+  cardCount?: number;
 }) {
   const scheduleTimes = buildFullSchedule(game, game.latest_results || []);
   const validSlots = new Set(scheduleTimes.map((t) => t.substring(0, 5).replace(/^0/, "")));
@@ -1250,6 +1252,7 @@ function GameCard({
   const latestImgUrl = latestCanonical?.imageUrl;
   const latestDisplayName = latestCanonical?.name ?? "";
   const latestLabel = latestCanonical?.label ?? "";
+  const isExpandedCard = cardCount <= 4;
 
   return (
     <div
@@ -1298,7 +1301,7 @@ function GameCard({
         </div>
       </div>
 
-      {/* Hero Center Display (Customized by result_row_color, --display-hero-scale and --display-animal-scale) */}
+      {/* Hero Center Display (Customized by result_row_color, --display-hero-scale, --display-animal-scale and --card-avatar-scale) */}
       <div
         className="fluid-hero-banner shrink-0 min-h-0 overflow-hidden"
         style={{
@@ -1308,8 +1311,10 @@ function GameCard({
         <div
           className="fluid-hero-avatar rounded-xl bg-slate-950/90 border border-slate-700/80 flex items-center justify-center shrink-0 overflow-hidden shadow-inner p-1"
           style={{
-            width: "calc(clamp(2.2rem, min(5.5vh, 4vw), 4.8rem) * var(--display-animal-scale, 1))",
-            height: "calc(clamp(2.2rem, min(5.5vh, 4vw), 4.8rem) * var(--display-animal-scale, 1))",
+            width:
+              "calc(clamp(2.2rem, min(5.5vh, 4vw), 4.8rem) * var(--display-animal-scale, 1) * var(--card-avatar-scale, 1))",
+            height:
+              "calc(clamp(2.2rem, min(5.5vh, 4vw), 4.8rem) * var(--display-animal-scale, 1) * var(--card-avatar-scale, 1))",
           }}
         >
           {latestResult && latestCanonical ? (
@@ -1375,15 +1380,57 @@ function GameCard({
               }}
             >
               <div className="fluid-cell-time truncate w-full">{formatTime(timeSlot)}</div>
-              <div className="fluid-cell-result truncate w-full">
-                {res ? (
-                  <span style={{ color: game.color }} className="font-black">
-                    {displayNum}
-                  </span>
+              {res && cellCanonical ? (
+                isExpandedCard ? (
+                  <div className="flex items-center justify-center gap-1.5 w-full min-w-0 px-1 mt-0.5">
+                    {cellCanonical.imageUrl && (
+                      <div
+                        className="shrink-0 overflow-hidden rounded"
+                        style={{
+                          width:
+                            "calc(clamp(1.1rem, min(2.4vh, 1.8vw), 2.2rem) * var(--display-animal-scale, 1) * var(--card-cell-scale, 1))",
+                          height:
+                            "calc(clamp(1.1rem, min(2.4vh, 1.8vw), 2.2rem) * var(--display-animal-scale, 1) * var(--card-cell-scale, 1))",
+                        }}
+                      >
+                        <AnimalAvatar
+                          imageUrl={cellCanonical.imageUrl}
+                          name={cellCanonical.name}
+                          number={cellCanonical.number}
+                          className="w-full h-full object-contain"
+                        />
+                      </div>
+                    )}
+                    <div className="flex flex-col items-center justify-center min-w-0 leading-none">
+                      <span
+                        style={{ color: game.color }}
+                        className="fluid-cell-result font-black leading-none"
+                      >
+                        {displayNum}
+                      </span>
+                      <span
+                        className="text-slate-300 font-bold uppercase truncate max-w-full mt-0.5"
+                        style={{
+                          fontSize:
+                            "calc(clamp(0.42rem, min(0.95vh, 0.65vw), 0.7rem) * var(--display-font-scale, 1) * var(--card-cell-scale, 1))",
+                        }}
+                      >
+                        {cellCanonical.name}
+                      </span>
+                    </div>
+                  </div>
                 ) : (
+                  <div className="fluid-cell-result truncate w-full">
+                    <span style={{ color: game.color }} className="font-black">
+                      {displayNum}
+                    </span>
+                  </div>
+                )
+              ) : (
+                <div className="fluid-cell-result truncate w-full">
                   <span className="text-slate-600 font-normal">—</span>
-                )}
-              </div>
+                </div>
+              )}
             </div>
           );
         })}

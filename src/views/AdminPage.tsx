@@ -1331,8 +1331,47 @@ function AnimalsManager({ games }: { games: Game[] }) {
         .order("number", { ascending: true }),
     ]);
 
+    const {
+      mockStore,
+      recoverCustomAnimalImagesFromLocalStorage,
+      mergeAnimalImagesPreserveCustom,
+      isDefaultCatalogImageUrl,
+    } = await import("@/lib/mock-db");
+    const recoveredCustom = recoverCustomAnimalImagesFromLocalStorage();
+    if (recoveredCustom.length > 0) {
+      mockStore.animal_images = mergeAnimalImagesPreserveCustom(
+        mockStore.animal_images,
+        recoveredCustom,
+      );
+      try {
+        localStorage.setItem(
+          "pizarra_custom_animal_images",
+          JSON.stringify(mockStore.animal_images),
+        );
+        const customOnly = mockStore.animal_images.filter(
+          (img) => !isDefaultCatalogImageUrl(img.image_url),
+        );
+        if (customOnly.length > 0) {
+          localStorage.setItem("pizarra_user_custom_animal_images_v2", JSON.stringify(customOnly));
+          fetch("/api/public/results/sync", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ animalImagesBatch: customOnly }),
+          }).catch(() => {});
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    const mergedForGame = mergeAnimalImagesPreserveCustom(
+      ((imgRes.data ?? []) as AnimalImage[]).filter((img) => img.game_id === gameId),
+      mockStore.animal_images.filter((img) => img.game_id === gameId),
+      recoveredCustom.filter((img) => img.game_id === gameId),
+    );
+
     const imgMap: Record<number, string> = {};
-    for (const img of (imgRes.data ?? []) as AnimalImage[]) {
+    for (const img of mergedForGame) {
       imgMap[img.animal_number] = img.image_url;
     }
     setImages(imgMap);
@@ -1524,23 +1563,28 @@ function AnimalsManager({ games }: { games: Game[] }) {
       // Persist in localStorage cache as well
       if (typeof window !== "undefined") {
         try {
-          const raw = localStorage.getItem("pizarra_custom_animal_images");
-          const list: AnimalImage[] = raw ? JSON.parse(raw) : [];
-          const idx = list.findIndex(
-            (img) => img.game_id === selectedGame && img.animal_number === animalNumber,
-          );
           const updatedEntry: AnimalImage = {
             id: `img-${selectedGame}-${animalNumber}`,
             game_id: selectedGame,
             animal_number: animalNumber,
             image_url: finalUrl,
           };
-          if (idx >= 0) {
-            list[idx] = updatedEntry;
-          } else {
-            list.push(updatedEntry);
+          for (const storageKey of [
+            "pizarra_custom_animal_images",
+            "pizarra_user_custom_animal_images_v2",
+          ]) {
+            const raw = localStorage.getItem(storageKey);
+            const list: AnimalImage[] = raw ? JSON.parse(raw) : [];
+            const idx = list.findIndex(
+              (img) => img.game_id === selectedGame && img.animal_number === animalNumber,
+            );
+            if (idx >= 0) {
+              list[idx] = updatedEntry;
+            } else {
+              list.push(updatedEntry);
+            }
+            localStorage.setItem(storageKey, JSON.stringify(list));
           }
-          localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(list));
         } catch {
           // ignore
         }
@@ -1593,23 +1637,28 @@ function AnimalsManager({ games }: { games: Game[] }) {
 
     if (typeof window !== "undefined") {
       try {
-        const raw = localStorage.getItem("pizarra_custom_animal_images");
-        const list: AnimalImage[] = raw ? JSON.parse(raw) : [];
-        const idx = list.findIndex(
-          (img) => img.game_id === selectedGame && img.animal_number === animalNumber,
-        );
         const updatedEntry: AnimalImage = {
           id: `img-${selectedGame}-${animalNumber}`,
           game_id: selectedGame,
           animal_number: animalNumber,
           image_url: finalUrl,
         };
-        if (idx >= 0) {
-          list[idx] = updatedEntry;
-        } else {
-          list.push(updatedEntry);
+        for (const storageKey of [
+          "pizarra_custom_animal_images",
+          "pizarra_user_custom_animal_images_v2",
+        ]) {
+          const raw = localStorage.getItem(storageKey);
+          const list: AnimalImage[] = raw ? JSON.parse(raw) : [];
+          const idx = list.findIndex(
+            (img) => img.game_id === selectedGame && img.animal_number === animalNumber,
+          );
+          if (idx >= 0) {
+            list[idx] = updatedEntry;
+          } else {
+            list.push(updatedEntry);
+          }
+          localStorage.setItem(storageKey, JSON.stringify(list));
         }
-        localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(list));
       } catch {
         // ignore
       }
@@ -1659,13 +1708,29 @@ function AnimalsManager({ games }: { games: Game[] }) {
 
     if (typeof window !== "undefined") {
       try {
-        const raw = localStorage.getItem("pizarra_custom_animal_images");
-        if (raw) {
-          const list: AnimalImage[] = JSON.parse(raw);
-          const filtered = list.filter(
-            (img) => !(img.game_id === selectedGame && img.animal_number === animalNumber),
-          );
-          localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(filtered));
+        for (const storageKey of [
+          "pizarra_custom_animal_images",
+          "pizarra_user_custom_animal_images_v2",
+        ]) {
+          const raw = localStorage.getItem(storageKey);
+          if (raw) {
+            const list: AnimalImage[] = JSON.parse(raw);
+            const filtered = list.filter(
+              (img) => !(img.game_id === selectedGame && img.animal_number === animalNumber),
+            );
+            localStorage.setItem(storageKey, JSON.stringify(filtered));
+          }
+        }
+        const prefix = `pizarra_storage_animal-images_animals/${selectedGame}/animal-${animalNumber}-`;
+        const keysToDelete: string[] = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          if (k && k.startsWith(prefix)) {
+            keysToDelete.push(k);
+          }
+        }
+        for (const k of keysToDelete) {
+          localStorage.removeItem(k);
         }
       } catch {
         // ignore
