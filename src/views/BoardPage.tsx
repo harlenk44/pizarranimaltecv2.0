@@ -38,6 +38,11 @@ import { sorteoAlertTracker, getSorteoAlertKey } from "@/lib/sorteo-alert-tracke
 import { getGameScheduleTimes } from "@/lib/game-schedules";
 import { resolveCanonicalAnimal } from "@/lib/official-animals";
 import { getResponsiveBoardGridStyle, DEFAULT_CARDS_PER_SCREEN } from "@/lib/license-lotteries";
+import {
+  mergeAnimalImagesPreserveCustom,
+  recoverCustomAnimalImagesFromLocalStorage,
+  isDefaultCatalogImageUrl,
+} from "@/lib/mock-db";
 
 interface BoardPageProps {
   onAdminClick: () => void;
@@ -311,15 +316,25 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           }
         }
 
-        // Sync animal images into mockStore & localStorage so all TVs have them
+        // Sync animal images into mockStore & localStorage so all TVs have them, preserving custom admin images
         if (Array.isArray(syncData?.animalImages) && syncData.animalImages.length > 0) {
           const { mockStore } = await import("@/lib/mock-db");
-          mockStore.animal_images = syncData.animalImages;
+          const localCustom = recoverCustomAnimalImagesFromLocalStorage();
+          const merged = mergeAnimalImagesPreserveCustom(
+            mockStore.animal_images,
+            syncData.animalImages,
+            localCustom,
+          );
+          mockStore.animal_images = merged;
           try {
-            localStorage.setItem(
-              "pizarra_custom_animal_images",
-              JSON.stringify(syncData.animalImages),
-            );
+            localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(merged));
+            const customOnly = merged.filter((img) => !isDefaultCatalogImageUrl(img.image_url));
+            if (customOnly.length > 0) {
+              localStorage.setItem(
+                "pizarra_user_custom_animal_images_v2",
+                JSON.stringify(customOnly),
+              );
+            }
           } catch {
             // ignore
           }
@@ -377,29 +392,26 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     const map: Record<string, Result[]> = {};
     const imgMap: AnimalImageMap = {};
     const loadedGames = gamesData as Game[];
-    const combinedImages: AnimalImage[] = [...((imagesData.data ?? []) as AnimalImage[])];
+    const localRecoveredCustom = recoverCustomAnimalImagesFromLocalStorage();
 
+    let localCachedImages: AnimalImage[] = [];
     if (typeof window !== "undefined") {
       try {
         const localRaw = localStorage.getItem("pizarra_custom_animal_images");
         if (localRaw) {
-          const localImgs = JSON.parse(localRaw) as AnimalImage[];
-          if (Array.isArray(localImgs)) {
-            for (const li of localImgs) {
-              if (
-                !combinedImages.some(
-                  (ci) => ci.game_id === li.game_id && ci.animal_number === li.animal_number,
-                )
-              ) {
-                combinedImages.push(li);
-              }
-            }
-          }
+          const parsed = JSON.parse(localRaw);
+          if (Array.isArray(parsed)) localCachedImages = parsed;
         }
       } catch {
         // ignore
       }
     }
+
+    const combinedImages: AnimalImage[] = mergeAnimalImagesPreserveCustom(
+      (imagesData.data ?? []) as AnimalImage[],
+      localCachedImages,
+      localRecoveredCustom,
+    );
 
     for (const img of combinedImages) {
       if (!img?.image_url) continue;
@@ -630,7 +642,10 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     const onStorage = (e: StorageEvent) => {
       if (e.key === "pizarra_pending_result_alerts") {
         checkPendingAlerts();
-      } else if (e.key === "pizarra_custom_animal_images") {
+      } else if (
+        e.key === "pizarra_custom_animal_images" ||
+        e.key === "pizarra_user_custom_animal_images_v2"
+      ) {
         fetchAll();
       }
     };
