@@ -1163,6 +1163,30 @@ function createMockQueryBuilder(table: string) {
       const storeList = ((mockStore as unknown as Record<string, unknown[]>)[table] ??=
         []) as Record<string, unknown>[];
 
+      if (table === "app_settings" && typeof window !== "undefined") {
+        try {
+          const raw = localStorage.getItem("pizarra_app_settings");
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === "object") {
+              const current = storeList[0] as AppSettings | undefined;
+              const localTime = parsed.updated_at ? new Date(parsed.updated_at).getTime() : 0;
+              const storeTime = current?.updated_at ? new Date(current.updated_at).getTime() : 0;
+              if (localTime >= storeTime || !storeTime) {
+                storeList[0] = {
+                  ...DEFAULT_APP_SETTINGS,
+                  ...(current ?? {}),
+                  ...parsed,
+                  id: "global",
+                };
+              }
+            }
+          }
+        } catch {
+          // ignore
+        }
+      }
+
       if (isDelete) {
         const remaining = storeList.filter((item) => !filters.every((f) => f(item)));
         (mockStore as unknown as Record<string, unknown[]>)[table] = remaining;

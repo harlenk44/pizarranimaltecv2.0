@@ -139,7 +139,7 @@ interface BoardWindowPage {
 
 export default function BoardPage({ onAdminClick }: BoardPageProps) {
   const { profile, signOut } = useAuth();
-  const { settings } = useBoardSettings();
+  const { settings, updateSettings, refreshSettings } = useBoardSettings();
   const { isGameAllowed, cardsPerScreen } = useLicenseContext();
   const [games, setGames] = useState<Game[]>([]);
   const [resultsMap, setResultsMap] = useState<Record<string, Result[]>>({});
@@ -337,6 +337,25 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
             }
           } catch {
             // ignore
+          }
+        }
+
+        // Sync appSettings from cloud/server into BoardSettingsContext and localStorage
+        if (syncData?.appSettings && typeof syncData.appSettings === "object") {
+          const incoming = syncData.appSettings as AppSettings;
+          const incomingTime = incoming.updated_at ? new Date(incoming.updated_at).getTime() : 0;
+          let localTime = 0;
+          try {
+            const raw = localStorage.getItem("pizarra_app_settings");
+            if (raw) {
+              const parsed = JSON.parse(raw);
+              if (parsed?.updated_at) localTime = new Date(parsed.updated_at).getTime();
+            }
+          } catch {
+            // ignore
+          }
+          if (incomingTime >= localTime || localTime === 0) {
+            updateSettings(incoming);
           }
         }
 
@@ -597,7 +616,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
 
     setLastUpdate(new Date());
     setLoading(false);
-  }, [enqueueUniqueAlert, scheduleHardReload]);
+  }, [enqueueUniqueAlert, scheduleHardReload, updateSettings]);
 
   // Listen for real-time broadcasts and check pending alerts on mount
   useEffect(() => {
@@ -614,6 +633,11 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           fetchAll();
         } else if (event.data?.type === "ANIMAL_MEDIA_UPDATED") {
           fetchAll();
+        } else if (event.data?.type === "APP_SETTINGS_UPDATED") {
+          if (event.data.settings) {
+            updateSettings(event.data.settings);
+          }
+          refreshSettings();
         }
       };
     } catch {
@@ -667,7 +691,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       window.removeEventListener("storage", onStorage);
       supabase.removeChannel(realtimeChannel);
     };
-  }, [enqueueUniqueAlert, fetchAll, scheduleHardReload]);
+  }, [enqueueUniqueAlert, fetchAll, scheduleHardReload, refreshSettings, updateSettings]);
 
   const handleManualRefresh = useCallback(async () => {
     try {

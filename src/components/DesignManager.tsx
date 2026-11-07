@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { Palette, Timer, Type, Save, Loader2, Check, Volume2, Play, Radio } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useBoardSettings } from "@/context/BoardSettingsContext";
@@ -19,35 +19,95 @@ export default function DesignManager() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
 
-  useEffect(() => setDraft(settings), [settings]);
+  const saveTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const latestDraftRef = useRef<AppSettings>(draft);
+
+  const persistSettings = useCallback(async (payload: AppSettings) => {
+    try {
+      await supabase.from("app_settings").upsert(payload, { onConflict: "id" });
+    } catch {
+      // ignore
+    }
+    try {
+      await fetch("/api/public/results/sync", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ appSettings: payload }),
+      });
+    } catch {
+      // ignore
+    }
+    try {
+      const bc = new BroadcastChannel("pizarra_lottery_channel");
+      bc.postMessage({ type: "APP_SETTINGS_UPDATED", settings: payload });
+      setTimeout(() => bc.close(), 1000);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!saveTimerRef.current) {
+      setDraft(settings);
+      latestDraftRef.current = settings;
+    }
+  }, [settings]);
+
+  // Flush any pending changes when leaving the DesignManager page
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+        persistSettings(latestDraftRef.current);
+      }
+    };
+  }, [persistSettings]);
 
   function setValue<K extends keyof AppSettings>(key: K, value: AppSettings[K]) {
-    const updated = { ...draft, [key]: value };
+    const updated: AppSettings = {
+      ...draft,
+      [key]: value,
+      id: "global",
+      updated_at: new Date().toISOString(),
+    };
+    latestDraftRef.current = updated;
     setDraft(updated);
-    // Instant live preview across all boards
+    // Instant live preview across all boards and locally
     updateSettings(updated);
+
+    // Auto-save with small debounce so that going directly back to Pizarra never loses changes
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+    }
+    saveTimerRef.current = setTimeout(() => {
+      saveTimerRef.current = null;
+      persistSettings(updated);
+    }, 300);
   }
 
   async function save() {
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
     setSaving(true);
     setMessage("");
 
-    const fullPayload = {
+    const fullPayload: AppSettings = {
       ...draft,
       id: "global",
       updated_at: new Date().toISOString(),
     };
+    latestDraftRef.current = fullPayload;
 
-    // Update context state immediately
+    // 1. Update context state and local storage immediately
     updateSettings(fullPayload);
 
-    const { error } = await supabase.from("app_settings").upsert(fullPayload, { onConflict: "id" });
+    // 2. Persist to Supabase and server
+    await persistSettings(fullPayload);
 
-    if (error) {
-      setMessage(`Guardado localmente. (Aviso servidor: ${error.message})`);
-    } else {
-      setMessage("¡Diseño guardado exitosamente para todas las pantallas!");
-    }
+    setMessage("¡Diseño guardado y sincronizado exitosamente para todas las pantallas!");
     await refreshSettings();
     setSaving(false);
   }

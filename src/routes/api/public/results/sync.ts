@@ -23,6 +23,8 @@ const LATEST_ALERT_FILE = "/tmp/lottery_latest_alert.json";
 const ANIMAL_IMAGES_FILE = "/tmp/lottery_animal_images.json";
 const WORKSPACE_ANIMAL_IMAGES_FILE = path.join(process.cwd(), "animal_images.persisted.json");
 const GAMES_FILE = "/tmp/lottery_games.json";
+const APP_SETTINGS_FILE = "/tmp/lottery_app_settings.json";
+const WORKSPACE_APP_SETTINGS_FILE = path.join(process.cwd(), "app_settings.persisted.json");
 const TMP_CLIENT_LICENSES_FILE = "/tmp/lottery_client_licenses_v2.json";
 const WORKSPACE_CLIENT_LICENSES_FILE = path.join(process.cwd(), "client_licenses.persisted.json");
 
@@ -402,12 +404,69 @@ function saveServerGames() {
   }
 }
 
+function loadServerAppSettings() {
+  try {
+    let loaded: AppSettings | null = null;
+    for (const f of [WORKSPACE_APP_SETTINGS_FILE, APP_SETTINGS_FILE]) {
+      if (fs.existsSync(f)) {
+        const parsed = JSON.parse(fs.readFileSync(f, "utf-8"));
+        if (parsed && typeof parsed === "object") {
+          loaded = parsed;
+          break;
+        }
+      }
+    }
+    if (loaded) {
+      const merged = { ...mockStore.app_settings[0], ...loaded, id: "global" };
+      mockStore.app_settings = [merged];
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function saveServerAppSettings() {
+  try {
+    const current = mockStore.app_settings[0] || { id: "global" };
+    const serialized = JSON.stringify(current, null, 2);
+    fs.writeFileSync(WORKSPACE_APP_SETTINGS_FILE, serialized);
+    fs.writeFileSync(APP_SETTINGS_FILE, JSON.stringify(current));
+  } catch {
+    // ignore
+  }
+}
+
+export async function syncAppSettingsWithSupabase() {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("app_settings")
+      .select("*")
+      .eq("id", "global")
+      .maybeSingle();
+
+    if (!error && data) {
+      const merged = { ...mockStore.app_settings[0], ...(data as AppSettings), id: "global" };
+      mockStore.app_settings = [merged];
+      saveServerAppSettings();
+    } else if (!error && !data && mockStore.app_settings[0]) {
+      await supabaseAdmin.from("app_settings").upsert({
+        ...mockStore.app_settings[0],
+        id: "global",
+      });
+    }
+  } catch {
+    // ignore
+  }
+}
+
 loadServerResults();
 loadServerTripleResults();
 loadServerAnimalImages();
 loadServerGames();
+loadServerAppSettings();
 loadServerLicenses();
 syncLicensesWithSupabase().catch(() => {});
+syncAppSettingsWithSupabase().catch(() => {});
 
 let lastAutoSyncTimestamp = 0;
 let isAutoSyncing = false;
@@ -606,6 +665,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
         loadServerAnimalImages();
         loadServerGames();
         loadServerLicenses();
+        loadServerAppSettings();
         const serverToday = new Intl.DateTimeFormat("en-CA", {
           timeZone: "America/Caracas",
           year: "numeric",
@@ -652,6 +712,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
           latestAlert,
           animalImages: mockStore.animal_images,
           games: mockStore.games,
+          appSettings: mockStore.app_settings[0] || null,
           requireLicense: serverLicenseState.requireLicense,
           clientLicenses: serverLicenseState.licenses,
           deletedIds: serverLicenseState.deletedIds || [],
@@ -700,6 +761,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
           loadServerLicenses();
           loadServerTripleResults();
           loadServerAnimalImages();
+          loadServerAppSettings();
           const body = await request.json();
           const {
             result,
@@ -711,6 +773,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
             deleteAnimalImage,
             gameUpdate,
             licenseAction,
+            appSettings,
           } = body;
           let licenseActivation: {
             valid: boolean;
@@ -1151,6 +1214,21 @@ export const Route = createFileRoute("/api/public/results/sync")({
             saveServerAnimalImages();
           }
 
+          if (appSettings && typeof appSettings === "object") {
+            const merged = { ...mockStore.app_settings[0], ...appSettings, id: "global" };
+            mockStore.app_settings = [merged];
+            saveServerAppSettings();
+            try {
+              await supabaseAdmin.from("app_settings").upsert({
+                ...merged,
+                id: "global",
+                updated_at: new Date().toISOString(),
+              });
+            } catch {
+              // ignore
+            }
+          }
+
           if (alert) {
             try {
               fs.writeFileSync(LATEST_ALERT_FILE, JSON.stringify(alert));
@@ -1165,6 +1243,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
             tripleResults: serverTripleResults,
             animalImages: mockStore.animal_images,
             games: mockStore.games,
+            appSettings: mockStore.app_settings[0] || null,
             requireLicense: serverLicenseState.requireLicense,
             clientLicenses: serverLicenseState.licenses,
             deletedIds: serverLicenseState.deletedIds || [],

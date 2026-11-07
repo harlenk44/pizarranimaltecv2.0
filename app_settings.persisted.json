@@ -1,0 +1,19 @@
+{
+  "id": "global",
+  "background_color": "#123456",
+  "surface_color": "#0f172a",
+  "primary_color": "#2563eb",
+  "text_color": "#f8fafc",
+  "card_color": "#0f172a",
+  "result_row_color": "#1e293b",
+  "font_family": "Inter",
+  "base_font_size": 16,
+  "rotation_enabled": false,
+  "rotation_interval_seconds": 60,
+  "start_view": "daily",
+  "logo_size": 72,
+  "font_size_scale": 100,
+  "hero_card_scale": 100,
+  "animal_scale": 100,
+  "updated_at": "2026-11-07T03:25:18.647Z"
+}
