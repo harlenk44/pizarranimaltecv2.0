@@ -80,10 +80,13 @@ async function downloadTuazarPage(): Promise<TuazarPage> {
   try {
     const html = await fetchHtmlWithTimeout(TUAZAR_PRIMARY_URL);
     return parseTuazarResults(html);
-  } catch (primaryErr) {
-    console.warn(`[tuazar] Primary fetch failed (${primaryErr}), trying fallback`);
-    const fallbackHtml = await fetchHtmlWithTimeout(TUAZAR_FALLBACK_URL);
-    return parseTuazarResults(fallbackHtml);
+  } catch {
+    try {
+      const fallbackHtml = await fetchHtmlWithTimeout(TUAZAR_FALLBACK_URL);
+      return parseTuazarResults(fallbackHtml);
+    } catch {
+      return { date: todayInCaracas(), results: [] };
+    }
   }
 }
 
@@ -188,7 +191,6 @@ export function createTuazarProvider(tuazarGameName: string, gameSlug?: string):
           }
         } catch {
           // LoteriaDeHoy unavailable or no matching draws; cleanly use TuAzar fallback
-          console.info(`[sync] Using TuAzar fallback for ${game.slug}`);
         }
       }
 
@@ -244,8 +246,7 @@ export function createTuazarProvider(tuazarGameName: string, gameSlug?: string):
         }
 
         return draws;
-      } catch (tuazarErr) {
-        console.error(`[sync-fallback] TuAzar also failed for ${game.slug}:`, tuazarErr);
+      } catch {
         return [];
       }
     },

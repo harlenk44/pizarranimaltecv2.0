@@ -199,7 +199,9 @@ function buildInitialEntries(): MockStore["animal_entries"] {
 export function isDefaultCatalogImageUrl(url?: string | null): boolean {
   if (!url) return true;
   return (
-    url.includes("tuazar.com/in/animalitos/") || url.includes("toteback.atilax.io/storage/bases/")
+    url.includes("tuazar.com/in/animalitos/") ||
+    url.includes("toteback.atilax.io/storage/bases/") ||
+    url.includes("/api/media?file=")
   );
 }
 
@@ -231,7 +233,7 @@ export function recoverCustomAnimalImagesFromLocalStorage(): MockStore["animal_i
       const animalNumber = parseInt(match[2]!, 10);
       const ts = parseInt(match[3]!, 10) || 0;
       const dataUrl = localStorage.getItem(key);
-      if (!dataUrl) continue;
+      if (!dataUrl || isDefaultCatalogImageUrl(dataUrl)) continue;
 
       const mapKey = `${gameId}:${animalNumber}`;
       const existing = recoveredMap.get(mapKey);
@@ -252,7 +254,12 @@ export function recoverCustomAnimalImagesFromLocalStorage(): MockStore["animal_i
       const backupList = JSON.parse(backupRaw);
       if (Array.isArray(backupList)) {
         for (const item of backupList) {
-          if (item?.game_id && typeof item?.animal_number === "number" && item?.image_url) {
+          if (
+            item?.game_id &&
+            typeof item?.animal_number === "number" &&
+            item?.image_url &&
+            !isDefaultCatalogImageUrl(item.image_url)
+          ) {
             const mapKey = `${item.game_id}:${item.animal_number}`;
             recoveredMap.set(mapKey, {
               id: item.id ?? `img-${item.game_id}-${item.animal_number}`,
@@ -337,7 +344,13 @@ export function mergeAnimalImagesPreserveCustom(
   for (const list of lists) {
     if (!Array.isArray(list)) continue;
     for (const item of list) {
-      if (!item || !item.game_id || typeof item.animal_number !== "number" || !item.image_url) {
+      if (
+        !item ||
+        !item.game_id ||
+        typeof item.animal_number !== "number" ||
+        !item.image_url ||
+        item.image_url.includes("/api/media?file=")
+      ) {
         continue;
       }
       const key = `${item.game_id}:${item.animal_number}`;
@@ -820,7 +833,7 @@ export async function syncTuazarDirectly(): Promise<number> {
           ldhSuccess = added > 0 || ldhPage.results.length > 0;
         }
       } catch {
-        console.info("[mock-db] Using TuAzar fallback");
+        // Primary unavailable, use TuAzar fallback
       }
 
       // 2. If LoteriaDeHoy was not available or produced 0 draws, fallback to TuAzar
@@ -883,14 +896,13 @@ export async function syncTuazarDirectly(): Promise<number> {
               }
             }
           }
-        } catch (tuazarErr) {
-          console.warn("[mock-db] Fallback TuAzar fetch also failed:", tuazarErr);
+        } catch {
+          // Ignore when no draws have occurred yet for the day
         }
       }
 
       return added;
-    } catch (err) {
-      console.warn("[mock-db] Error syncing lottery results directly:", err);
+    } catch {
       return 0;
     } finally {
       syncPromise = null;
@@ -901,8 +913,10 @@ export async function syncTuazarDirectly(): Promise<number> {
 
 export const syncLotteryDirectly = syncTuazarDirectly;
 
-// Initial sync on module load
-syncTuazarDirectly();
+// Initial sync on client load
+if (typeof window !== "undefined") {
+  syncTuazarDirectly();
+}
 
 function parsePostgrestCond(cond: string) {
   const trimmed = cond.trim();

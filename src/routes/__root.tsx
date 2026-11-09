@@ -121,7 +121,7 @@ function RootShell({ children }: { children: ReactNode }) {
       <head>
         <script
           dangerouslySetInnerHTML={{
-            __html: `(function(){try{var _f=typeof window!=="undefined"&&window.fetch?window.fetch.bind(window):null;var d={get:function(){return _f;},set:function(v){_f=v;},configurable:true,enumerable:true};try{Object.defineProperty(window,"fetch",d);}catch(e){}try{if(typeof Window!=="undefined"&&Window.prototype){Object.defineProperty(Window.prototype,"fetch",d);}}catch(e){}}catch(e){}})();`,
+            __html: `(function(){try{var _f=typeof window!=="undefined"&&window.fetch?window.fetch.bind(window):null;var d={get:function(){return _f;},set:function(v){_f=v;},configurable:true,enumerable:true};try{Object.defineProperty(window,"fetch",d);}catch(e){}try{if(typeof Window!=="undefined"&&Window.prototype){Object.defineProperty(Window.prototype,"fetch",d);}}catch(e){}function h(m){if(!m)return;var s=String(m.message||m.reason||m);if(s.indexOf("Failed to fetch dynamically imported module")!==-1||s.indexOf("Importing a module script failed")!==-1||s.indexOf("Outdated Optimize Dep")!==-1){try{var k="__pizarra_dyn_reload_ts",now=Date.now(),last=Number(sessionStorage.getItem(k)||0);if(now-last>10000){sessionStorage.setItem(k,String(now));if(m.preventDefault)m.preventDefault();window.location.reload();}}catch(e){}}}window.addEventListener("error",h,true);window.addEventListener("unhandledrejection",h,true);}catch(e){}})();`,
           }}
         />
         <HeadContent />

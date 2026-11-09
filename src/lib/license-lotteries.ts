@@ -59,6 +59,18 @@ const KNOWN_UUID_TO_SLUG: Record<string, string> = MASTER_PRODUCTS_CATALOG.reduc
   {} as Record<string, string>,
 );
 
+export const DEFAULT_TRANSITION_SECONDS = 25;
+
+export const TRANSITION_SECONDS_OPTIONS: { value: number; label: string }[] = [
+  { value: 10, label: "10s" },
+  { value: 15, label: "15s" },
+  { value: 20, label: "20s" },
+  { value: 25, label: "25s (def.)" },
+  { value: 30, label: "30s" },
+  { value: 45, label: "45s" },
+  { value: 60, label: "60s" },
+];
+
 function normalizeCardsPerScreen(raw: unknown): CardsPerScreenOption {
   if (typeof raw === "string" && raw.trim().toUpperCase() === "TODAS") {
     return "TODAS";
@@ -70,21 +82,31 @@ function normalizeCardsPerScreen(raw: unknown): CardsPerScreenOption {
   return DEFAULT_CARDS_PER_SCREEN;
 }
 
+export function normalizeTransitionSeconds(raw: unknown): number {
+  const num = Number(raw);
+  if (Number.isFinite(num) && num >= 5) {
+    return Math.round(num);
+  }
+  return DEFAULT_TRANSITION_SECONDS;
+}
+
 /**
- * Parses client_name to extract clean display name, allowed lotteries array, and cardsPerScreen.
- * If rawName has no "||" delimiter, allowedLotteries is null (unrestricted access to all lotteries)
- * and cardsPerScreen defaults to 8.
+ * Parses client_name to extract clean display name, allowed lotteries array, cardsPerScreen, and transitionSeconds.
+ * If rawName has no "||" delimiter, allowedLotteries is null (unrestricted access to all lotteries),
+ * cardsPerScreen defaults to 8, and transitionSeconds defaults to 25.
  */
 export function parseClientLicenseName(rawName?: string | null): {
   cleanName: string;
   allowedLotteries: string[] | null;
   cardsPerScreen: CardsPerScreenOption;
+  transitionSeconds: number;
 } {
   if (!rawName) {
     return {
       cleanName: "Cliente",
       allowedLotteries: null,
       cardsPerScreen: DEFAULT_CARDS_PER_SCREEN,
+      transitionSeconds: DEFAULT_TRANSITION_SECONDS,
     };
   }
 
@@ -94,6 +116,7 @@ export function parseClientLicenseName(rawName?: string | null): {
       cleanName: str || "Cliente",
       allowedLotteries: null,
       cardsPerScreen: DEFAULT_CARDS_PER_SCREEN,
+      transitionSeconds: DEFAULT_TRANSITION_SECONDS,
     };
   }
 
@@ -106,6 +129,7 @@ export function parseClientLicenseName(rawName?: string | null): {
       cleanName,
       allowedLotteries: null,
       cardsPerScreen: DEFAULT_CARDS_PER_SCREEN,
+      transitionSeconds: DEFAULT_TRANSITION_SECONDS,
     };
   }
 
@@ -117,6 +141,7 @@ export function parseClientLicenseName(rawName?: string | null): {
         cleanName,
         allowedLotteries: sanitized.length > 0 ? sanitized : null,
         cardsPerScreen: DEFAULT_CARDS_PER_SCREEN,
+        transitionSeconds: DEFAULT_TRANSITION_SECONDS,
       };
     }
 
@@ -134,10 +159,15 @@ export function parseClientLicenseName(rawName?: string | null): {
         obj.tarjetasPorPantalla ?? obj.cardsPerScreen ?? DEFAULT_CARDS_PER_SCREEN,
       );
 
+      const transitionSeconds = normalizeTransitionSeconds(
+        obj.tiempoTransicion ?? obj.transitionSeconds ?? DEFAULT_TRANSITION_SECONDS,
+      );
+
       return {
         cleanName,
         allowedLotteries,
         cardsPerScreen,
+        transitionSeconds,
       };
     }
   } catch {
@@ -152,6 +182,7 @@ export function parseClientLicenseName(rawName?: string | null): {
         cleanName,
         allowedLotteries: items,
         cardsPerScreen: DEFAULT_CARDS_PER_SCREEN,
+        transitionSeconds: DEFAULT_TRANSITION_SECONDS,
       };
     }
   }
@@ -160,27 +191,33 @@ export function parseClientLicenseName(rawName?: string | null): {
     cleanName,
     allowedLotteries: null,
     cardsPerScreen: DEFAULT_CARDS_PER_SCREEN,
+    transitionSeconds: DEFAULT_TRANSITION_SECONDS,
   };
 }
 
 /**
- * Formats clean client name with selected allowed lotteries and cardsPerScreen.
- * Preserves 100% backward compatibility with existing licenses when cardsPerScreen is 8.
+ * Formats clean client name with selected allowed lotteries, cardsPerScreen, and transitionSeconds.
+ * Preserves 100% backward compatibility with existing licenses when cardsPerScreen is 8 and transition is 25s.
  */
 export function formatClientLicenseName(
   cleanName: string,
   allowedLotteries: string[] | null,
   totalAvailableCount?: number,
   cardsPerScreen: CardsPerScreenOption = DEFAULT_CARDS_PER_SCREEN,
+  transitionSeconds: number = DEFAULT_TRANSITION_SECONDS,
 ): string {
   const name = cleanName.trim() || "Cliente";
   const normalizedCards = normalizeCardsPerScreen(cardsPerScreen);
+  const normalizedTransition = normalizeTransitionSeconds(transitionSeconds);
   const isAllLotteries =
     !allowedLotteries ||
     allowedLotteries.length === 0 ||
     Boolean(totalAvailableCount && allowedLotteries.length >= totalAvailableCount);
 
-  if (normalizedCards === DEFAULT_CARDS_PER_SCREEN) {
+  if (
+    normalizedCards === DEFAULT_CARDS_PER_SCREEN &&
+    normalizedTransition === DEFAULT_TRANSITION_SECONDS
+  ) {
     if (isAllLotteries) {
       return name;
     }
@@ -190,6 +227,7 @@ export function formatClientLicenseName(
   return `${name}||${JSON.stringify({
     loterias: isAllLotteries ? "TODAS" : allowedLotteries,
     tarjetasPorPantalla: normalizedCards,
+    tiempoTransicion: normalizedTransition,
   })}`;
 }
 

@@ -106,6 +106,42 @@ describe("license-lotteries utilities", () => {
     expect(parsedAll.cardsPerScreen).toBe("TODAS");
   });
 
+  it("packs and parses custom transitionSeconds (e.g. 15s, 30s, or defaulting to 25s)", () => {
+    // Default transition is 25s when unspecified
+    const parsedDefault = parseClientLicenseName("Agencia Regular");
+    expect(parsedDefault.transitionSeconds).toBe(25);
+
+    // Legacy JSON array format retains default 25s
+    const parsedLegacy = parseClientLicenseName('Agencia Vieja||["lotto-activo"]');
+    expect(parsedLegacy.transitionSeconds).toBe(25);
+
+    // Custom transition packed cleanly
+    const packedCustom = formatClientLicenseName(
+      "Agencia Rápida",
+      ["lotto-activo"],
+      ALL_AVAILABLE_LOTTERIES.length,
+      8,
+      15,
+    );
+    const parsedCustom = parseClientLicenseName(packedCustom);
+    expect(parsedCustom.cleanName).toBe("Agencia Rápida");
+    expect(parsedCustom.cardsPerScreen).toBe(8);
+    expect(parsedCustom.transitionSeconds).toBe(15);
+
+    // Custom cards and transition together
+    const packedBoth = formatClientLicenseName(
+      "Agencia Completa",
+      ALL_AVAILABLE_LOTTERIES.map((l) => l.id),
+      ALL_AVAILABLE_LOTTERIES.length,
+      4,
+      30,
+    );
+    const parsedBoth = parseClientLicenseName(packedBoth);
+    expect(parsedBoth.cleanName).toBe("Agencia Completa");
+    expect(parsedBoth.cardsPerScreen).toBe(4);
+    expect(parsedBoth.transitionSeconds).toBe(30);
+  });
+
   it("computes responsive grid columns/rows and proportional scaling for 2 vs 8 cards", () => {
     const grid2 = getResponsiveBoardGridStyle(2) as Record<string, unknown>;
     expect(grid2.gridTemplateColumns).toBe("repeat(2, minmax(0, 1fr))");

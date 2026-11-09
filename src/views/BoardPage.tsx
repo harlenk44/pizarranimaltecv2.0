@@ -140,7 +140,7 @@ interface BoardWindowPage {
 export default function BoardPage({ onAdminClick }: BoardPageProps) {
   const { profile, signOut } = useAuth();
   const { settings, updateSettings, refreshSettings } = useBoardSettings();
-  const { isGameAllowed, cardsPerScreen } = useLicenseContext();
+  const { isGameAllowed, cardsPerScreen, transitionSeconds } = useLicenseContext();
   const [games, setGames] = useState<Game[]>([]);
   const [resultsMap, setResultsMap] = useState<Record<string, Result[]>>({});
   const [animalImages, setAnimalImages] = useState<AnimalImageMap>({});
@@ -317,26 +317,37 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         }
 
         // Sync animal images into mockStore & localStorage so all TVs have them, preserving custom admin images
-        if (Array.isArray(syncData?.animalImages) && syncData.animalImages.length > 0) {
+        {
           const { mockStore } = await import("@/lib/mock-db");
           const localCustom = recoverCustomAnimalImagesFromLocalStorage();
-          const merged = mergeAnimalImagesPreserveCustom(
-            mockStore.animal_images,
-            syncData.animalImages,
-            localCustom,
-          );
-          mockStore.animal_images = merged;
-          try {
-            localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(merged));
+          const serverImages = Array.isArray(syncData?.animalImages) ? syncData.animalImages : [];
+          if (serverImages.length > 0 || localCustom.length > 0) {
+            const merged = mergeAnimalImagesPreserveCustom(
+              mockStore.animal_images,
+              serverImages,
+              localCustom,
+            );
+            mockStore.animal_images = merged;
             const customOnly = merged.filter((img) => !isDefaultCatalogImageUrl(img.image_url));
-            if (customOnly.length > 0) {
-              localStorage.setItem(
-                "pizarra_user_custom_animal_images_v2",
-                JSON.stringify(customOnly),
-              );
+            try {
+              localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(merged));
+              if (customOnly.length > 0) {
+                localStorage.setItem(
+                  "pizarra_user_custom_animal_images_v2",
+                  JSON.stringify(customOnly),
+                );
+              }
+            } catch {
+              // ignore
             }
-          } catch {
-            // ignore
+            // If browser has valid custom images missing from server, restore them to server & Supabase
+            if (localCustom.length > 0 && serverImages.length < customOnly.length) {
+              fetch("/api/public/results/sync", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ animalImagesBatch: customOnly }),
+              }).catch(() => {});
+            }
           }
         }
 
@@ -921,15 +932,20 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [goToNextPage, goToPrevPage, goToPage, boardWindows.length]);
 
-  // Rotación automática cada 25 segundos (con pausa durante anuncios emergentes y configuración)
+  // Rotación automática según tiempo de transición configurado en la licencia (o ajuste global / 25s por defecto)
   const isRotationActive = autoRotate || settings.rotation_enabled;
+  const effectiveTransitionSeconds =
+    typeof transitionSeconds === "number" && transitionSeconds >= 5
+      ? transitionSeconds
+      : settings.rotation_interval_seconds || DEFAULT_ROTATION_SECONDS;
+
   useEffect(() => {
     if (!isRotationActive) return;
     if (alertQueue.length > 0) return; // Pausa mientras el popup de sorteo está activo
     if (showVoiceSettings) return; // Pausa mientras el menú de voz está abierto
     if (boardWindows.length <= 1) return;
 
-    const intervalSec = Math.max(5, settings.rotation_interval_seconds || DEFAULT_ROTATION_SECONDS);
+    const intervalSec = Math.max(5, effectiveTransitionSeconds);
     const intervalMs = intervalSec * 1000;
     const tickInterval = 500;
     let elapsed = 0;
@@ -951,7 +967,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     alertQueue.length,
     showVoiceSettings,
     boardWindows.length,
-    settings.rotation_interval_seconds,
+    effectiveTransitionSeconds,
     timerResetKey,
   ]);
 

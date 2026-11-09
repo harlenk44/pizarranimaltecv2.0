@@ -1459,6 +1459,64 @@ function AnimalsManager({ games }: { games: Game[] }) {
     return null;
   }
 
+  async function fileToPermanentDataUrl(file: File): Promise<string> {
+    const rawDataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+
+    if (
+      typeof document === "undefined" ||
+      !file.type.startsWith("image/") ||
+      file.type.includes("gif") ||
+      file.type.includes("svg")
+    ) {
+      return rawDataUrl;
+    }
+
+    return new Promise<string>((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const maxDim = 240;
+          let width = img.naturalWidth || img.width || maxDim;
+          let height = img.naturalHeight || img.height || maxDim;
+          if (width > maxDim || height > maxDim) {
+            if (width >= height) {
+              height = Math.max(1, Math.round((height * maxDim) / width));
+              width = maxDim;
+            } else {
+              width = Math.max(1, Math.round((width * maxDim) / height));
+              height = maxDim;
+            }
+          }
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) {
+            resolve(rawDataUrl);
+            return;
+          }
+          ctx.clearRect(0, 0, width, height);
+          ctx.drawImage(img, 0, 0, width, height);
+          const webpUrl = canvas.toDataURL("image/webp", 0.84);
+          if (webpUrl && webpUrl.startsWith("data:image/") && webpUrl.length < rawDataUrl.length) {
+            resolve(webpUrl);
+          } else {
+            resolve(rawDataUrl);
+          }
+        } catch {
+          resolve(rawDataUrl);
+        }
+      };
+      img.onerror = () => resolve(rawDataUrl);
+      img.src = rawDataUrl;
+    });
+  }
+
   async function handleBulkUpload(files: FileList) {
     if (!selectedGame || files.length === 0) return;
     setBulkUploading(true);
@@ -1496,59 +1554,25 @@ function AnimalsManager({ games }: { games: Game[] }) {
     if (!selectedGame) return;
     if (!bulkUploading) setUploadingFor(animalNumber);
     try {
-      let finalUrl = "";
-      let storageUrl = "";
+      const permanentDataUrl = await fileToPermanentDataUrl(file);
+      let finalUrl = permanentDataUrl;
 
-      // 1. Primary: Upload directly to Supabase Storage permanent bucket 'animal-images'
+      // 1. Upload to Supabase Storage bucket 'animal-images' (if external HTTPS storage is active, use it; otherwise keep permanent Base64 DataURL)
       try {
-        const rawExt = file.name.split(".").pop() ?? "png";
-        const ext = rawExt.toLowerCase().replace(/[^a-z0-9]/g, "") || "png";
+        const rawExt = file.name.split(".").pop() ?? "webp";
+        const ext = rawExt.toLowerCase().replace(/[^a-z0-9]/g, "") || "webp";
         const storagePath = `animals/${selectedGame}/animal-${animalNumber}-${Date.now()}.${ext}`;
         const { error: upErr } = await supabase.storage
           .from("animal-images")
-          .upload(storagePath, file, { upsert: true, cacheControl: "31536000" });
+          .upload(storagePath, permanentDataUrl, { upsert: true, cacheControl: "31536000" });
         if (!upErr) {
-          storageUrl = await getMediaUrl("animal-images", storagePath);
+          const storageUrl = await getMediaUrl("animal-images", storagePath);
           if (storageUrl.startsWith("http://") || storageUrl.startsWith("https://")) {
             finalUrl = storageUrl;
           }
         }
-      } catch (err) {
-        console.warn("Supabase Storage upload warning, trying /api/media fallback:", err);
-      }
-
-      // 2. Secondary: If not an external HTTP(S) Supabase Storage URL, upload to /api/media
-      if (!finalUrl) {
-        try {
-          const formData = new FormData();
-          formData.append("file", file);
-          const res = await fetch("/api/media", {
-            method: "POST",
-            body: formData,
-          });
-          if (res.ok) {
-            const resData = await res.json();
-            if (resData.url) {
-              finalUrl = resData.url;
-            }
-          }
-        } catch (err) {
-          console.warn("Upload to /api/media error, using dataUrl fallback:", err);
-        }
-      }
-
-      // 3. Fallback: Use storageUrl (data: URL from mock storage) or FileReader DataURL
-      if (!finalUrl) {
-        if (storageUrl.startsWith("data:")) {
-          finalUrl = storageUrl;
-        } else {
-          finalUrl = await new Promise<string>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result as string);
-            reader.onerror = reject;
-            reader.readAsDataURL(file);
-          });
-        }
+      } catch {
+        // Keep permanentDataUrl
       }
 
       await supabase.from("animal_images").upsert(

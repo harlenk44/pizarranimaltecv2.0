@@ -308,26 +308,40 @@ function loadServerAnimalImages() {
   try {
     let persistedWorkspace: AnimalImage[] = [];
     let persistedTmp: AnimalImage[] = [];
+    let hadBrokenMediaRefs = false;
 
     if (fs.existsSync(WORKSPACE_ANIMAL_IMAGES_FILE)) {
       const parsed = JSON.parse(fs.readFileSync(WORKSPACE_ANIMAL_IMAGES_FILE, "utf-8"));
       if (Array.isArray(parsed)) {
-        persistedWorkspace = parsed;
+        hadBrokenMediaRefs = parsed.some(
+          (img: AnimalImage) =>
+            typeof img?.image_url === "string" && img.image_url.includes("/api/media?file="),
+        );
+        persistedWorkspace = parsed.filter(
+          (img: AnimalImage) =>
+            typeof img?.image_url === "string" && !img.image_url.includes("/api/media?file="),
+        );
       }
     }
     if (fs.existsSync(ANIMAL_IMAGES_FILE)) {
       const parsed = JSON.parse(fs.readFileSync(ANIMAL_IMAGES_FILE, "utf-8"));
       if (Array.isArray(parsed)) {
-        persistedTmp = parsed;
+        persistedTmp = parsed.filter(
+          (img: AnimalImage) =>
+            typeof img?.image_url === "string" && !img.image_url.includes("/api/media?file="),
+        );
       }
     }
 
-    if (persistedWorkspace.length > 0 || persistedTmp.length > 0) {
+    if (persistedWorkspace.length > 0 || persistedTmp.length > 0 || hadBrokenMediaRefs) {
       mockStore.animal_images = mergeAnimalImagesPreserveCustom(
         mockStore.animal_images,
         persistedTmp,
         persistedWorkspace,
       );
+      if (hadBrokenMediaRefs) {
+        saveServerAnimalImages();
+      }
     }
   } catch {
     // ignore
@@ -347,6 +361,63 @@ function saveServerAnimalImages() {
     fs.writeFileSync(ANIMAL_IMAGES_FILE, JSON.stringify(mockStore.animal_images));
   } catch {
     // ignore
+  }
+}
+
+export async function syncAnimalImagesWithSupabase() {
+  try {
+    const { data, error } = await supabaseAdmin.from("animal_images").select("*");
+    if (!error && Array.isArray(data)) {
+      const cloudCustom: AnimalImage[] = [];
+      for (const row of data as Array<Record<string, unknown>>) {
+        const gameId = String(row["game_id"] || "");
+        const animalNumber = Number(row["animal_number"]);
+        const imageUrl = String(row["image_url"] || "");
+        if (!gameId || !Number.isFinite(animalNumber) || !imageUrl) continue;
+        if (isDefaultCatalogImageUrl(imageUrl)) continue;
+        cloudCustom.push({
+          id: String(row["id"] || `img-${gameId}-${animalNumber}`),
+          game_id: gameId,
+          animal_number: animalNumber,
+          image_url: imageUrl,
+        });
+      }
+
+      if (cloudCustom.length > 0) {
+        mockStore.animal_images = mergeAnimalImagesPreserveCustom(
+          mockStore.animal_images,
+          cloudCustom,
+        );
+        saveServerAnimalImages();
+      }
+
+      const localCustom = mockStore.animal_images.filter(
+        (img) => !isDefaultCatalogImageUrl(img.image_url),
+      );
+      for (const item of localCustom) {
+        const existsInCloud = cloudCustom.some(
+          (c) =>
+            c.game_id === item.game_id &&
+            c.animal_number === item.animal_number &&
+            c.image_url === item.image_url,
+        );
+        if (!existsInCloud) {
+          await supabaseAdmin
+            .from("animal_images")
+            .upsert(
+              {
+                game_id: item.game_id,
+                animal_number: item.animal_number,
+                image_url: item.image_url,
+              },
+              { onConflict: "game_id,animal_number" },
+            )
+            .catch(() => {});
+        }
+      }
+    }
+  } catch {
+    // ignore if table is unavailable
   }
 }
 
@@ -467,6 +538,7 @@ loadServerAppSettings();
 loadServerLicenses();
 syncLicensesWithSupabase().catch(() => {});
 syncAppSettingsWithSupabase().catch(() => {});
+syncAnimalImagesWithSupabase().catch(() => {});
 
 let lastAutoSyncTimestamp = 0;
 let isAutoSyncing = false;
@@ -504,6 +576,7 @@ async function triggerBackgroundSync(forceWait = false) {
       synchronizeAutomaticTriplesResults(serverTripleResults),
       synchronizeMultiloteriasData(mockStore.results, serverTripleResults),
       syncLicensesWithSupabase().catch(() => null),
+      syncAnimalImagesWithSupabase().catch(() => null),
     ]);
 
     // Apply Multiloterias animal results if any
@@ -1157,7 +1230,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
             }
           }
 
-          if (animalImage) {
+          if (animalImage && !isDefaultCatalogImageUrl(animalImage.image_url)) {
             const existingIdx = mockStore.animal_images.findIndex(
               (img) =>
                 img.game_id === animalImage.game_id &&
@@ -1175,6 +1248,18 @@ export const Route = createFileRoute("/api/public/results/sync")({
               });
             }
             saveServerAnimalImages();
+            try {
+              await supabaseAdmin.from("animal_images").upsert(
+                {
+                  game_id: animalImage.game_id,
+                  animal_number: animalImage.animal_number,
+                  image_url: animalImage.image_url,
+                },
+                { onConflict: "game_id,animal_number" },
+              );
+            } catch {
+              // ignore
+            }
           }
 
           if (Array.isArray(animalImagesBatch) && animalImagesBatch.length > 0) {
@@ -1186,7 +1271,8 @@ export const Route = createFileRoute("/api/public/results/sync")({
                   typeof (item as AnimalImage).game_id === "string" &&
                   typeof (item as AnimalImage).animal_number === "number" &&
                   typeof (item as AnimalImage).image_url === "string" &&
-                  Boolean((item as AnimalImage).image_url.trim()),
+                  Boolean((item as AnimalImage).image_url.trim()) &&
+                  !isDefaultCatalogImageUrl((item as AnimalImage).image_url),
               )
               .map((item: AnimalImage) => ({
                 id: item.id ?? `img-${item.game_id}-${item.animal_number}`,
@@ -1200,6 +1286,18 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 validBatch,
               );
               saveServerAnimalImages();
+              try {
+                await supabaseAdmin.from("animal_images").upsert(
+                  validBatch.map((item) => ({
+                    game_id: item.game_id,
+                    animal_number: item.animal_number,
+                    image_url: item.image_url,
+                  })),
+                  { onConflict: "game_id,animal_number" },
+                );
+              } catch {
+                // ignore
+              }
             }
           }
 
@@ -1212,6 +1310,15 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 ),
             );
             saveServerAnimalImages();
+            try {
+              await supabaseAdmin
+                .from("animal_images")
+                .delete()
+                .eq("game_id", deleteAnimalImage.game_id)
+                .eq("animal_number", deleteAnimalImage.animal_number);
+            } catch {
+              // ignore
+            }
           }
 
           if (appSettings && typeof appSettings === "object") {

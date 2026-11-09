@@ -203,7 +203,7 @@ export function parseTuazarResults(html: string): TuazarPage {
   // Modern structured TuAzar layout with lc-card and lc-tile containers
   if (cleaned.includes("lc-tile") || cleaned.includes("lc-card")) {
     const tileResults = parseTuazarTiles(cleaned);
-    if (tileResults.length > 0) {
+    if (tileResults.length > 0 || /\bpendiente\b/i.test(cleaned) || pageDate !== null) {
       return { date: pageDate, results: tileResults };
     }
   }
@@ -294,7 +294,13 @@ export function parseTuazarResults(html: string): TuazarPage {
   }
 
   const results = [...found.values()];
-  if (results.length === 0) {
+  const hasValidEmptyDayStructure =
+    date !== null ||
+    pageDate !== null ||
+    /\bpendiente\b/i.test(cleaned) ||
+    cleaned.includes("lc-title") ||
+    cleaned.includes("maintitle");
+  if (results.length === 0 && !hasValidEmptyDayStructure) {
     throw new TuazarParseError(
       "No se encontraron resultados; la estructura de la página pudo haber cambiado.",
     );

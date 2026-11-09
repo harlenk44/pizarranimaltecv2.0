@@ -17,6 +17,7 @@ import {
   Eye,
   ListFilter,
   LayoutGrid,
+  Clock,
   CheckSquare,
   Square,
   X,
@@ -31,6 +32,8 @@ import {
   ALL_TRIPLE_LOTTERIES,
   DEFAULT_CARDS_PER_SCREEN,
   PRODUCTS_PER_SCREEN_OPTIONS,
+  DEFAULT_TRANSITION_SECONDS,
+  TRANSITION_SECONDS_OPTIONS,
   type CardsPerScreenOption,
 } from "@/lib/license-lotteries";
 
@@ -77,12 +80,18 @@ export default function LicensesManager() {
   );
   const [formCardsPerScreen, setFormCardsPerScreen] =
     useState<CardsPerScreenOption>(DEFAULT_CARDS_PER_SCREEN);
+  const [formTransitionSeconds, setFormTransitionSeconds] = useState<number>(
+    DEFAULT_TRANSITION_SECONDS,
+  );
 
   // Edit lotteries & cards per screen modal state
   const [editingLicense, setEditingLicense] = useState<ClientLicense | null>(null);
   const [editingLotteries, setEditingLotteries] = useState<string[]>([]);
   const [editingCardsPerScreen, setEditingCardsPerScreen] =
     useState<CardsPerScreenOption>(DEFAULT_CARDS_PER_SCREEN);
+  const [editingTransitionSeconds, setEditingTransitionSeconds] = useState<number>(
+    DEFAULT_TRANSITION_SECONDS,
+  );
 
   // Copy feedback
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -274,7 +283,9 @@ export default function LicensesManager() {
   };
 
   const handleOpenEditLotteries = (lic: ClientLicense) => {
-    const { allowedLotteries, cardsPerScreen } = parseClientLicenseName(lic.client_name);
+    const { allowedLotteries, cardsPerScreen, transitionSeconds } = parseClientLicenseName(
+      lic.client_name,
+    );
     setEditingLicense(lic);
     setEditingLotteries(
       allowedLotteries && allowedLotteries.length > 0
@@ -282,6 +293,7 @@ export default function LicensesManager() {
         : ALL_AVAILABLE_LOTTERIES.map((l) => l.id),
     );
     setEditingCardsPerScreen(cardsPerScreen ?? DEFAULT_CARDS_PER_SCREEN);
+    setEditingTransitionSeconds(transitionSeconds ?? DEFAULT_TRANSITION_SECONDS);
   };
 
   const handleSaveEditLotteries = async () => {
@@ -292,6 +304,7 @@ export default function LicensesManager() {
       editingLotteries,
       ALL_AVAILABLE_LOTTERIES.length,
       editingCardsPerScreen,
+      editingTransitionSeconds,
     );
     const cardsLabel =
       editingCardsPerScreen === "TODAS" ? "Todas" : `${editingCardsPerScreen} por pantalla`;
@@ -301,7 +314,7 @@ export default function LicensesManager() {
         id: editingLicense.id,
         client_name: packedName,
       },
-      `Configuración actualizada para ${cleanName} (${editingLotteries.length}/${ALL_AVAILABLE_LOTTERIES.length} loterías · ${cardsLabel})`,
+      `Configuración actualizada para ${cleanName} (${editingLotteries.length}/${ALL_AVAILABLE_LOTTERIES.length} loterías · ${cardsLabel} · ${editingTransitionSeconds}s rotación)`,
     );
     setEditingLicense(null);
   };
@@ -310,12 +323,15 @@ export default function LicensesManager() {
     lic: ClientLicense,
     newCards: CardsPerScreenOption,
   ) => {
-    const { cleanName, allowedLotteries } = parseClientLicenseName(lic.client_name);
+    const { cleanName, allowedLotteries, transitionSeconds } = parseClientLicenseName(
+      lic.client_name,
+    );
     const packedName = formatClientLicenseName(
       cleanName,
       allowedLotteries,
       ALL_AVAILABLE_LOTTERIES.length,
       newCards,
+      transitionSeconds,
     );
     const cardsLabel = newCards === "TODAS" ? "Todas" : `${newCards} productos por pantalla`;
     await runLicenseAction(
@@ -325,6 +341,25 @@ export default function LicensesManager() {
         client_name: packedName,
       },
       `${cleanName}: configurado a ${cardsLabel}`,
+    );
+  };
+
+  const handleQuickChangeTransitionSeconds = async (lic: ClientLicense, newSeconds: number) => {
+    const { cleanName, allowedLotteries, cardsPerScreen } = parseClientLicenseName(lic.client_name);
+    const packedName = formatClientLicenseName(
+      cleanName,
+      allowedLotteries,
+      ALL_AVAILABLE_LOTTERIES.length,
+      cardsPerScreen,
+      newSeconds,
+    );
+    await runLicenseAction(
+      {
+        type: "update_lotteries",
+        id: lic.id,
+        client_name: packedName,
+      },
+      `${cleanName}: tiempo de transición configurado a ${newSeconds}s`,
     );
   };
 
@@ -339,6 +374,7 @@ export default function LicensesManager() {
       formLotteries,
       ALL_AVAILABLE_LOTTERIES.length,
       formCardsPerScreen,
+      formTransitionSeconds,
     );
 
     const cardsLabel =
@@ -353,7 +389,7 @@ export default function LicensesManager() {
         max_devices: maxDevices,
         notes: notes.trim(),
       },
-      `Licencia creada para ${clientName.trim()} (${formLotteries.length}/${ALL_AVAILABLE_LOTTERIES.length} loterías · ${cardsLabel} · ${days ? `${days} ${days === 1 ? "día" : "días"}` : "Permanente"})`,
+      `Licencia creada para ${clientName.trim()} (${formLotteries.length}/${ALL_AVAILABLE_LOTTERIES.length} loterías · ${cardsLabel} · ${formTransitionSeconds}s rotación · ${days ? `${days} ${days === 1 ? "día" : "días"}` : "Permanente"})`,
     );
     setClientName("");
     setPinCode(generateRandomPin());
@@ -361,6 +397,7 @@ export default function LicensesManager() {
     setDurationDays("30");
     setFormLotteries(ALL_AVAILABLE_LOTTERIES.map((l) => l.id));
     setFormCardsPerScreen(DEFAULT_CARDS_PER_SCREEN);
+    setFormTransitionSeconds(DEFAULT_TRANSITION_SECONDS);
     setShowForm(false);
   };
 
@@ -706,6 +743,40 @@ export default function LicensesManager() {
             </div>
           </div>
 
+          {/* Selector de Tiempo de Transición */}
+          <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="space-y-0.5">
+              <div className="flex items-center gap-2">
+                <Clock className="w-4 h-4 text-blue-400" />
+                <span className="text-xs font-bold text-white uppercase tracking-wider">
+                  Tiempo de Transición por Ventana
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-400">
+                Velocidad de rotación automática entre páginas de productos (25 segundos por
+                defecto).
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2 flex-wrap">
+              <select
+                aria-label="Tiempo de Transición"
+                value={String(formTransitionSeconds)}
+                onChange={(e) => {
+                  setFormTransitionSeconds(Number(e.target.value) || DEFAULT_TRANSITION_SECONDS);
+                }}
+                className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono font-bold text-blue-400 focus:outline-none focus:border-blue-500 cursor-pointer"
+              >
+                {TRANSITION_SECONDS_OPTIONS.map((opt) => (
+                  <option key={String(opt.value)} value={String(opt.value)}>
+                    {opt.value} segundos{" "}
+                    {opt.value === DEFAULT_TRANSITION_SECONDS ? "(Por defecto)" : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
           {/* Loterías Permitidas Selector */}
           <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-4 space-y-3">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800/80 pb-2.5">
@@ -908,9 +979,8 @@ export default function LicensesManager() {
                     ? lic.bound_device_ids.length
                     : 0;
 
-                  const { cleanName, allowedLotteries, cardsPerScreen } = parseClientLicenseName(
-                    lic.client_name,
-                  );
+                  const { cleanName, allowedLotteries, cardsPerScreen, transitionSeconds } =
+                    parseClientLicenseName(lic.client_name);
                   const isAll =
                     !allowedLotteries || allowedLotteries.length >= ALL_AVAILABLE_LOTTERIES.length;
                   const totalAllowedCount = allowedLotteries
@@ -968,6 +1038,32 @@ export default function LicensesManager() {
                                   className="bg-slate-900 text-white"
                                 >
                                   {optVal === "TODAS" ? "Todas/pant." : `${optVal} prod./pant.`}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+
+                          {/* Selector rápido de Tiempo de Transición en la fila */}
+                          <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-semibold border bg-blue-950/50 text-blue-300 border-blue-700/50">
+                            <Clock className="w-3 h-3 text-blue-400" />
+                            <select
+                              aria-label={`Tiempo de transición para ${cleanName}`}
+                              value={String(transitionSeconds ?? DEFAULT_TRANSITION_SECONDS)}
+                              disabled={saving}
+                              onChange={(e) => {
+                                const val = Number(e.target.value) || DEFAULT_TRANSITION_SECONDS;
+                                handleQuickChangeTransitionSeconds(lic, val);
+                              }}
+                              className="bg-transparent text-blue-200 font-mono font-bold text-[10px] focus:outline-none cursor-pointer"
+                              title="Cambiar tiempo de transición por ventana para esta licencia"
+                            >
+                              {TRANSITION_SECONDS_OPTIONS.map((opt) => (
+                                <option
+                                  key={String(opt.value)}
+                                  value={String(opt.value)}
+                                  className="bg-slate-900 text-white"
+                                >
+                                  {opt.label}
                                 </option>
                               ))}
                             </select>
@@ -1271,6 +1367,55 @@ export default function LicensesManager() {
                       }`}
                     >
                       {val === "TODAS" ? "Todas" : `${val}`}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Selector de Tiempo de Transición en el Modal */}
+            <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3.5 space-y-2.5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Clock className="w-4 h-4 text-blue-400" />
+                  <span className="text-xs font-bold text-white uppercase tracking-wider">
+                    Tiempo de Transición por Ventana
+                  </span>
+                </div>
+                <select
+                  aria-label="Tiempo de Transición Modal"
+                  value={String(editingTransitionSeconds)}
+                  onChange={(e) => {
+                    setEditingTransitionSeconds(
+                      Number(e.target.value) || DEFAULT_TRANSITION_SECONDS,
+                    );
+                  }}
+                  className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs font-mono font-bold text-blue-300 focus:outline-none focus:border-blue-500 cursor-pointer"
+                >
+                  {TRANSITION_SECONDS_OPTIONS.map((opt) => (
+                    <option key={String(opt.value)} value={String(opt.value)}>
+                      {opt.value} segundos{" "}
+                      {opt.value === DEFAULT_TRANSITION_SECONDS ? "(Por defecto)" : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {TRANSITION_SECONDS_OPTIONS.map((opt) => {
+                  const active = editingTransitionSeconds === opt.value;
+                  return (
+                    <button
+                      key={String(opt.value)}
+                      type="button"
+                      onClick={() => setEditingTransitionSeconds(opt.value)}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold transition border cursor-pointer ${
+                        active
+                          ? "bg-blue-600 text-white border-blue-500 shadow-sm"
+                          : "bg-slate-900 text-slate-400 border-slate-800 hover:text-white hover:bg-slate-800"
+                      }`}
+                    >
+                      {opt.label}
                     </button>
                   );
                 })}

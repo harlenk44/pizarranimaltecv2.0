@@ -14,6 +14,7 @@ import {
   parseClientLicenseName,
   isLotteryPermitted,
   DEFAULT_CARDS_PER_SCREEN,
+  DEFAULT_TRANSITION_SECONDS,
   type CardsPerScreenOption,
 } from "@/lib/license-lotteries";
 
@@ -22,6 +23,7 @@ export interface LicenseContextValue {
   isAuthorized: boolean;
   allowedLotteries: string[] | null;
   cardsPerScreen: CardsPerScreenOption;
+  transitionSeconds: number;
   isGameAllowed: (gameIdOrSlug?: string | null) => boolean;
 }
 
@@ -30,6 +32,7 @@ export const LicenseContext = createContext<LicenseContextValue>({
   isAuthorized: false,
   allowedLotteries: null,
   cardsPerScreen: DEFAULT_CARDS_PER_SCREEN,
+  transitionSeconds: DEFAULT_TRANSITION_SECONDS,
   isGameAllowed: () => true,
 });
 
@@ -190,6 +193,8 @@ export default function LicenseGate({
   const allowedLotteries = parsedLicenseInfo?.allowedLotteries ?? null;
   const cardsPerScreen: CardsPerScreenOption =
     parsedLicenseInfo?.cardsPerScreen ?? DEFAULT_CARDS_PER_SCREEN;
+  const transitionSeconds: number =
+    parsedLicenseInfo?.transitionSeconds ?? DEFAULT_TRANSITION_SECONDS;
 
   const isGameAllowed = useCallback(
     (gameIdOrSlug?: string | null) => {
@@ -203,6 +208,7 @@ export default function LicenseGate({
     isAuthorized,
     allowedLotteries,
     cardsPerScreen,
+    transitionSeconds,
     isGameAllowed,
   };
 

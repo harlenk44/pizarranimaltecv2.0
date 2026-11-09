@@ -48,6 +48,71 @@ function DisplayShell({ children }: { children: ReactNode }) {
     }
   }
 
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
+
+  async function requestScreenWakeLock() {
+    if (typeof navigator === "undefined" || !("wakeLock" in navigator)) return;
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+    if (wakeLockRef.current && !wakeLockRef.current.released) return;
+    try {
+      const sentinel = await navigator.wakeLock.request("screen");
+      wakeLockRef.current = sentinel;
+      sentinel.addEventListener("release", () => {
+        if (wakeLockRef.current === sentinel) {
+          wakeLockRef.current = null;
+        }
+      });
+    } catch {
+      // Browser may block until first user gesture or if battery saver is active
+    }
+  }
+
+  useEffect(() => {
+    void requestScreenWakeLock();
+
+    const handleVisibilityOrFullscreen = () => {
+      if (document.visibilityState === "visible") {
+        void requestScreenWakeLock();
+      }
+    };
+
+    const handleUserGesture = () => {
+      if (!wakeLockRef.current || wakeLockRef.current.released) {
+        void requestScreenWakeLock();
+      }
+    };
+
+    const keepAliveInterval = setInterval(() => {
+      if (
+        document.visibilityState === "visible" &&
+        (!wakeLockRef.current || wakeLockRef.current.released)
+      ) {
+        void requestScreenWakeLock();
+      }
+    }, 30000);
+
+    document.addEventListener("visibilitychange", handleVisibilityOrFullscreen);
+    document.addEventListener("fullscreenchange", handleVisibilityOrFullscreen);
+    window.addEventListener("focus", handleVisibilityOrFullscreen);
+    window.addEventListener("click", handleUserGesture, { passive: true });
+    window.addEventListener("touchstart", handleUserGesture, { passive: true });
+    window.addEventListener("keydown", handleUserGesture, { passive: true });
+
+    return () => {
+      clearInterval(keepAliveInterval);
+      document.removeEventListener("visibilitychange", handleVisibilityOrFullscreen);
+      document.removeEventListener("fullscreenchange", handleVisibilityOrFullscreen);
+      window.removeEventListener("focus", handleVisibilityOrFullscreen);
+      window.removeEventListener("click", handleUserGesture);
+      window.removeEventListener("touchstart", handleUserGesture);
+      window.removeEventListener("keydown", handleUserGesture);
+      if (wakeLockRef.current && !wakeLockRef.current.released) {
+        wakeLockRef.current.release().catch(() => {});
+        wakeLockRef.current = null;
+      }
+    };
+  }, []);
+
   useEffect(() => {
     const sync = () => setExpanded(document.fullscreenElement === shell.current);
     const escape = (event: KeyboardEvent) => {
@@ -106,6 +171,7 @@ function DisplayShell({ children }: { children: ReactNode }) {
   async function toggleFullscreen() {
     setNotice("");
     setControls(false);
+    void requestScreenWakeLock();
     if (expanded) {
       if (document.fullscreenElement) await document.exitFullscreen();
       setExpanded(false);
@@ -115,6 +181,7 @@ function DisplayShell({ children }: { children: ReactNode }) {
     try {
       if (!shell.current?.requestFullscreen) throw new Error("unsupported");
       await shell.current.requestFullscreen();
+      void requestScreenWakeLock();
     } catch {
       setNotice("Vista ampliada activa. El navegador no permitió ocultar sus barras.");
     }
