@@ -97,6 +97,8 @@ export interface AppSettings {
   font_size_scale?: number;
   hero_card_scale?: number;
   animal_scale?: number;
+  card_style?: "neon" | "solid";
+  game_colors?: Record<string, string>;
   updated_at: string;
 }
 
@@ -117,6 +119,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   font_size_scale: 100,
   hero_card_scale: 100,
   animal_scale: 100,
+  card_style: "neon",
+  game_colors: {},
   updated_at: "",
 };
 

@@ -130,6 +130,8 @@ export default function AdBanner({ placement, className = "" }: AdBannerProps) {
             key={ad.image_url}
             src={ad.image_url}
             alt={ad.title || "Publicidad"}
+            loading="lazy"
+            decoding="async"
             className="w-full h-full object-contain max-h-full max-w-full block"
           />
         )}

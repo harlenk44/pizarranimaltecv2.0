@@ -321,7 +321,8 @@
   min-height: 0;
   min-width: 0;
   grid-auto-rows: minmax(0, 1fr);
-  gap: clamp(4px, 0.7vw, 12px);
+  gap: clamp(8px, 1.1vw, 16px);
+  padding: clamp(4px, 0.6vw, 10px);
   align-content: stretch;
   overflow: hidden;
 }
@@ -354,10 +355,10 @@
   border-radius: calc(clamp(8px, 1vw, 16px) * var(--card-density-scale, 1));
   background-color: #000000;
   border-style: solid;
-  border-width: 1px;
+  border-width: clamp(2.5px, 0.28vw, 3.8px);
   padding: calc(clamp(5px, 0.7vh, 12px) * var(--card-density-scale, 1))
     calc(clamp(6px, 0.8vw, 14px) * var(--card-density-scale, 1));
-  box-shadow: 0 0 15px rgba(0, 0, 0, 0.8);
+  box-shadow: 0 0 18px rgba(0, 0, 0, 0.9);
   overflow: hidden;
 }
 

@@ -8,6 +8,8 @@
  *  3. Ingestión y mapeo de resultados desde TuAzar y LoteríaDeHoy.
  */
 
+import { getGameLogo } from "@/lib/game-logos";
+
 export interface MasterProduct {
   id: string; // Identificador único interno (ej: 'lotto-activo', 'triple-ricachona')
   uuid?: string; // UUID de base de datos para retrocompatibilidad con Supabase
@@ -74,6 +76,21 @@ export const RICACHONA_HOURLY = [
   "17:05:00",
   "18:05:00",
   "19:05:00",
+];
+
+export const LA_RICACHONA_ANIMALITOS_HOURLY = [
+  "08:10:00",
+  "09:10:00",
+  "10:10:00",
+  "11:10:00",
+  "12:10:00",
+  "13:10:00",
+  "14:10:00",
+  "15:10:00",
+  "16:10:00",
+  "17:10:00",
+  "18:10:00",
+  "19:10:00",
 ];
 
 export const MASTER_PRODUCTS_CATALOG: MasterProduct[] = [
@@ -271,6 +288,21 @@ export const MASTER_PRODUCTS_CATALOG: MasterProduct[] = [
     schedule_times: HOURLY_8_TO_7,
     display_order: 10,
   },
+  {
+    id: "la-ricachona",
+    uuid: "3b92f700-0000-4000-8000-000000000011",
+    slug: "la-ricachona",
+    name: "La Ricachona",
+    category: "animalitos",
+    color: "#eab308",
+    logo_url: "https://loteriadehoy.com/dist/files_img/48-La_Ricachona.webp",
+    schedule_times: LA_RICACHONA_ANIMALITOS_HOURLY,
+    display_order: 11,
+    extraction: {
+      tuazar_name: "LA RICACHONA",
+      loteriadehoy_class: "48-La_Ricachona",
+    },
+  },
 
   // ==========================================
   // 2. LOTERÍAS DE TRIPLES
@@ -425,16 +457,22 @@ export const MASTER_PRODUCTS_CATALOG: MasterProduct[] = [
 
 /** Obtiene todos los productos de la categoría Animalitos */
 export function getMasterAnimalProducts(): MasterProduct[] {
-  return MASTER_PRODUCTS_CATALOG.filter((p) => p.category === "animalitos").sort(
-    (a, b) => a.display_order - b.display_order,
-  );
+  return MASTER_PRODUCTS_CATALOG.filter((p) => p.category === "animalitos")
+    .map((p) => ({
+      ...p,
+      logo_url: getGameLogo(p, p.color),
+    }))
+    .sort((a, b) => a.display_order - b.display_order);
 }
 
 /** Obtiene todos los productos de la categoría Triples */
 export function getMasterTripleProducts(): MasterProduct[] {
-  return MASTER_PRODUCTS_CATALOG.filter((p) => p.category === "triples").sort(
-    (a, b) => a.display_order - b.display_order,
-  );
+  return MASTER_PRODUCTS_CATALOG.filter((p) => p.category === "triples")
+    .map((p) => ({
+      ...p,
+      logo_url: getGameLogo(p, p.color),
+    }))
+    .sort((a, b) => a.display_order - b.display_order);
 }
 
 /** Divide un arreglo en páginas de máximo `chunkSize` elementos (por defecto 8) */

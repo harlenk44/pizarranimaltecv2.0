@@ -21,6 +21,8 @@ import LicensesManager from "@/components/LicensesManager";
 import AdsStudioManager from "@/components/AdsStudioManager";
 import { deleteAdFromStore } from "@/lib/ads-service";
 import TriplesAdminManager from "@/components/TriplesAdminManager";
+import { CLASSIC_COLOR_PALETTE, NEON_COLOR_PALETTE } from "@/lib/neon-flex";
+import { getGameLogo } from "@/lib/game-logos";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -64,7 +66,11 @@ import {
   Video,
   KeyRound,
   Hash,
+  Download,
+  FileUp,
+  ShieldCheck,
 } from "lucide-react";
+import { toast } from "sonner";
 import AnimalMedia, { isVideoMedia } from "@/components/AnimalMedia";
 import { mockStore } from "@/lib/mock-db";
 
@@ -887,6 +893,24 @@ function GamesManager({ games, onRefresh }: { games: Game[]; onRefresh: () => vo
 
   async function handleColorChange(game: Game, newColor: string) {
     await supabase.from("games").update({ color: newColor }).eq("id", game.id);
+    try {
+      await fetch("/api/public/results/sync", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          gameUpdate: { id: game.id, color: newColor },
+        }),
+      });
+    } catch {
+      // ignore
+    }
+    try {
+      const bc = new BroadcastChannel("pizarra_lottery_channel");
+      bc.postMessage({ type: "GAMES_UPDATED" });
+      setTimeout(() => bc.close(), 1000);
+    } catch {
+      // ignore
+    }
     onRefresh();
   }
 
@@ -894,18 +918,35 @@ function GamesManager({ games, onRefresh }: { games: Game[]; onRefresh: () => vo
     setUploadingLogo(game.id);
     setError(null);
     try {
-      const ext = file.name.split(".").pop() ?? "png";
-      const fileName = `logos/${game.id}-${Date.now()}.${ext}`;
-      const { error: upErr } = await supabase.storage
-        .from("animal-images")
-        .upload(fileName, file, { upsert: true });
-      if (upErr) throw upErr;
-      const url = await getMediaUrl("animal-images", fileName);
-      const { error: updErr } = await supabase
-        .from("games")
-        .update({ logo_url: url })
-        .eq("id", game.id);
-      if (updErr) throw updErr;
+      const reader = new FileReader();
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      await supabase.from("games").update({ logo_url: dataUrl }).eq("id", game.id);
+
+      try {
+        await fetch("/api/public/results/sync", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            gameUpdate: { id: game.id, logo_url: dataUrl },
+          }),
+        });
+      } catch {
+        // ignore
+      }
+
+      try {
+        const bc = new BroadcastChannel("pizarra_lottery_channel");
+        bc.postMessage({ type: "GAMES_UPDATED" });
+        setTimeout(() => bc.close(), 1000);
+      } catch {
+        // ignore
+      }
+
       onRefresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "No se pudo subir el logo");
@@ -914,7 +955,26 @@ function GamesManager({ games, onRefresh }: { games: Game[]; onRefresh: () => vo
   }
 
   async function handleLogoRemove(game: Game) {
-    await supabase.from("games").update({ logo_url: null }).eq("id", game.id);
+    const fallback = getGameLogo(game.slug || game.name, game.color);
+    await supabase.from("games").update({ logo_url: fallback }).eq("id", game.id);
+    try {
+      await fetch("/api/public/results/sync", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          gameUpdate: { id: game.id, logo_url: fallback },
+        }),
+      });
+    } catch {
+      // ignore
+    }
+    try {
+      const bc = new BroadcastChannel("pizarra_lottery_channel");
+      bc.postMessage({ type: "GAMES_UPDATED" });
+      setTimeout(() => bc.close(), 1000);
+    } catch {
+      // ignore
+    }
     onRefresh();
   }
 
@@ -944,7 +1004,7 @@ function GamesManager({ games, onRefresh }: { games: Game[]; onRefresh: () => vo
               />
             </div>
             <div>
-              <label className="block text-xs text-slate-400 mb-1.5">Color</label>
+              <label className="block text-xs text-slate-400 mb-1.5">Color (Libre o Rápido)</label>
               <div className="flex items-center gap-3">
                 <input
                   type="color"
@@ -958,6 +1018,45 @@ function GamesManager({ games, onRefresh }: { games: Game[]; onRefresh: () => vo
                   onChange={(e) => setColor(e.target.value)}
                   className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 text-sm font-mono focus:outline-none focus:border-blue-500"
                 />
+              </div>
+              <div className="mt-2.5 space-y-2">
+                <div>
+                  <span className="block text-[10px] font-bold text-slate-400 uppercase mb-1">
+                    🎨 Colores Normales / Clásicos
+                  </span>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {CLASSIC_COLOR_PALETTE.map((swatch) => (
+                      <button
+                        key={swatch.hex}
+                        type="button"
+                        onClick={() => setColor(swatch.hex)}
+                        title={`${swatch.name} (${swatch.hex})`}
+                        className="w-6 h-6 rounded-md border border-white/30 hover:scale-110 transition cursor-pointer"
+                        style={{ backgroundColor: swatch.hex }}
+                      />
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <span className="block text-[10px] font-bold text-emerald-400 uppercase mb-1">
+                    ⚡ Colores Fosforescentes / Neón
+                  </span>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {NEON_COLOR_PALETTE.map((swatch) => (
+                      <button
+                        key={swatch.hex}
+                        type="button"
+                        onClick={() => setColor(swatch.hex)}
+                        title={`${swatch.name} (${swatch.hex})`}
+                        className="w-6 h-6 rounded-md border border-white/50 hover:scale-110 transition cursor-pointer"
+                        style={{
+                          backgroundColor: swatch.hex,
+                          boxShadow: `0 0 6px ${swatch.hex}`,
+                        }}
+                      />
+                    ))}
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -1030,49 +1129,113 @@ function GamesManager({ games, onRefresh }: { games: Game[]; onRefresh: () => vo
                   title="Cambiar color"
                 />
                 {editingColor === game.id && (
-                  <div className="absolute left-0 top-12 z-20 bg-slate-800 rounded-xl border border-slate-700 p-3 shadow-2xl">
-                    <div className="flex items-center gap-3">
+                  <div className="absolute left-0 top-12 z-30 w-72 bg-slate-900 rounded-xl border border-slate-700 p-3.5 shadow-2xl space-y-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-white truncate">
+                        Color: {game.name}
+                      </span>
+                      <button
+                        onClick={() => setEditingColor(null)}
+                        className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition cursor-pointer"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                    <div className="flex items-center gap-2">
                       <input
                         type="color"
                         value={game.color}
                         onChange={(e) => handleColorChange(game, e.target.value)}
-                        className="w-12 h-10 rounded-lg cursor-pointer bg-slate-800 border border-slate-700"
+                        className="w-11 h-9 rounded-lg cursor-pointer bg-slate-800 border border-slate-700 p-0.5"
                       />
                       <input
                         type="text"
                         value={game.color}
                         onChange={(e) => handleColorChange(game, e.target.value)}
-                        className="w-24 bg-slate-900 border border-slate-700 rounded-lg px-2 py-2 text-xs font-mono focus:outline-none focus:border-blue-500"
+                        className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs font-mono uppercase text-white focus:outline-none focus:border-blue-500"
                       />
-                      <button
-                        onClick={() => setEditingColor(null)}
-                        className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition"
-                      >
-                        <X className="w-4 h-4" />
-                      </button>
+                    </div>
+                    <div className="space-y-1.5 pt-1 border-t border-slate-800">
+                      <span className="block text-[10px] font-bold text-slate-300 uppercase">
+                        🎨 Colores Normales / Clásicos
+                      </span>
+                      <div className="grid grid-cols-5 gap-1.5">
+                        {CLASSIC_COLOR_PALETTE.map((swatch) => {
+                          const hexVal = swatch.hex || swatch.value;
+                          const isMatch =
+                            Boolean(game.color) &&
+                            (game.color || "").toLowerCase() === hexVal.toLowerCase();
+                          return (
+                            <button
+                              key={hexVal}
+                              type="button"
+                              onClick={() => handleColorChange(game, hexVal)}
+                              title={`${swatch.name || swatch.label} (${hexVal})`}
+                              className={`h-6 rounded-md border transition cursor-pointer ${
+                                isMatch
+                                  ? "border-white ring-1 ring-white scale-105"
+                                  : "border-white/30 hover:scale-105"
+                              }`}
+                              style={{ backgroundColor: hexVal }}
+                            />
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <div className="space-y-1.5 pt-1 border-t border-slate-800">
+                      <span className="block text-[10px] font-bold text-emerald-400 uppercase">
+                        ⚡ Colores Fosforescentes / Neón
+                      </span>
+                      <div className="grid grid-cols-6 gap-1.5">
+                        {NEON_COLOR_PALETTE.map((swatch) => {
+                          const hexVal = swatch.hex || swatch.value;
+                          const isMatch =
+                            Boolean(game.color) &&
+                            (game.color || "").toLowerCase() === hexVal.toLowerCase();
+                          return (
+                            <button
+                              key={hexVal}
+                              type="button"
+                              onClick={() => handleColorChange(game, hexVal)}
+                              title={`${swatch.name || swatch.label} (${hexVal})`}
+                              className={`h-6 rounded-md border transition cursor-pointer ${
+                                isMatch
+                                  ? "border-white ring-1 ring-white scale-105"
+                                  : "border-white/40 hover:scale-105"
+                              }`}
+                              style={{
+                                backgroundColor: hexVal,
+                                boxShadow: `0 0 6px ${hexVal}`,
+                              }}
+                            />
+                          );
+                        })}
+                      </div>
                     </div>
                   </div>
                 )}
               </div>
               <label
-                className="relative flex-shrink-0 w-12 h-12 rounded-lg bg-slate-800 border border-dashed border-slate-600 hover:border-blue-500 cursor-pointer flex items-center justify-center overflow-hidden"
-                title="Subir logo"
+                className="relative flex-shrink-0 w-12 h-12 rounded-lg bg-slate-800 border border-slate-700 hover:border-blue-500 cursor-pointer flex items-center justify-center overflow-hidden p-0.5 group"
+                title="Cambiar o subir logotipo para este juego"
               >
                 {uploadingLogo === game.id ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
-                ) : game.logo_url ? (
+                ) : (
                   <img
-                    src={game.logo_url}
+                    src={getGameLogo(game, game.color)}
                     alt={`Logo ${game.name}`}
+                    loading="lazy"
+                    decoding="async"
+                    onError={(e) => {
+                      e.currentTarget.src = getGameLogo(game.slug || game.name, game.color);
+                    }}
                     className="w-full h-full object-contain"
                   />
-                ) : (
-                  <span className="text-[10px] text-slate-400 text-center leading-tight">
-                    Subir
-                    <br />
-                    logo
-                  </span>
                 )}
+                <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 flex items-center justify-center transition text-[9px] text-white font-bold text-center leading-none">
+                  Cambiar
+                </div>
                 <input
                   type="file"
                   accept="image/*"
@@ -1335,8 +1498,9 @@ function AnimalsManager({ games }: { games: Game[] }) {
       mockStore,
       recoverCustomAnimalImagesFromLocalStorage,
       mergeAnimalImagesPreserveCustom,
-      isDefaultCatalogImageUrl,
+      filterAdminCustomAnimalImages,
     } = await import("@/lib/mock-db");
+    const { resolveCanonicalAnimal } = await import("@/lib/official-animals");
     const recoveredCustom = recoverCustomAnimalImagesFromLocalStorage();
     if (recoveredCustom.length > 0) {
       mockStore.animal_images = mergeAnimalImagesPreserveCustom(
@@ -1344,13 +1508,8 @@ function AnimalsManager({ games }: { games: Game[] }) {
         recoveredCustom,
       );
       try {
-        localStorage.setItem(
-          "pizarra_custom_animal_images",
-          JSON.stringify(mockStore.animal_images),
-        );
-        const customOnly = mockStore.animal_images.filter(
-          (img) => !isDefaultCatalogImageUrl(img.image_url),
-        );
+        const customOnly = filterAdminCustomAnimalImages(mockStore.animal_images);
+        localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(customOnly));
         if (customOnly.length > 0) {
           localStorage.setItem("pizarra_user_custom_animal_images_v2", JSON.stringify(customOnly));
           fetch("/api/public/results/sync", {
@@ -1371,6 +1530,13 @@ function AnimalsManager({ games }: { games: Game[] }) {
     );
 
     const imgMap: Record<number, string> = {};
+    const entriesForLookup = (entriesRes.data ?? []) as AnimalEntry[];
+    for (const entry of entriesForLookup) {
+      const canonical = resolveCanonicalAnimal(gameId, entry.label ?? entry.number, entry.name);
+      if (canonical.imageUrl) {
+        imgMap[entry.number] = canonical.imageUrl;
+      }
+    }
     for (const img of mergedForGame) {
       imgMap[img.animal_number] = img.image_url;
     }
@@ -1844,16 +2010,143 @@ function AnimalsManager({ games }: { games: Game[] }) {
     setTimeout(() => setListMessage(null), 3000);
   }
 
+  const backupInputRef = useRef<HTMLInputElement | null>(null);
+  const [isRestoringBackup, setIsRestoringBackup] = useState(false);
+
+  async function handleExportBackup() {
+    try {
+      const { mockStore, recoverCustomAnimalImagesFromLocalStorage, isDefaultCatalogImageUrl } =
+        await import("@/lib/mock-db");
+      const localCustom = recoverCustomAnimalImagesFromLocalStorage();
+      const allCurrent = mockStore.animal_images ?? [];
+      const customOnly = allCurrent.filter((img) => !isDefaultCatalogImageUrl(img.image_url));
+
+      const map = new Map<string, AnimalImage>();
+      for (const item of [...customOnly, ...localCustom]) {
+        if (
+          item?.game_id &&
+          typeof item.animal_number === "number" &&
+          item.image_url &&
+          !item.image_url.includes("/api/media?file=")
+        ) {
+          map.set(`${item.game_id}:${item.animal_number}`, item);
+        }
+      }
+      const backupList = Array.from(map.values());
+      if (backupList.length === 0) {
+        toast.info("No hay imágenes personalizadas para exportar.");
+        return;
+      }
+
+      const blob = new Blob([JSON.stringify(backupList, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `respaldo_imagenes_animales_${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast.success(`Se exportó el respaldo con ${backupList.length} imágenes personalizadas.`);
+    } catch (err) {
+      console.error(err);
+      toast.error("Error al exportar el archivo de respaldo.");
+    }
+  }
+
+  async function handleImportBackup(file: File) {
+    try {
+      setIsRestoringBackup(true);
+      const text = await file.text();
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        toast.error("El archivo no tiene un formato JSON válido.");
+        setIsRestoringBackup(false);
+        return;
+      }
+
+      if (!Array.isArray(parsed) || parsed.length === 0) {
+        toast.error("El archivo no contiene una lista de imágenes de respaldo.");
+        setIsRestoringBackup(false);
+        return;
+      }
+
+      const validList: AnimalImage[] = parsed.filter(
+        (item): item is AnimalImage =>
+          item != null &&
+          typeof item === "object" &&
+          typeof item.game_id === "string" &&
+          typeof item.animal_number === "number" &&
+          typeof item.image_url === "string" &&
+          !item.image_url.includes("/api/media?file="),
+      );
+
+      if (validList.length === 0) {
+        toast.error("No se encontraron imágenes válidas en el archivo.");
+        setIsRestoringBackup(false);
+        return;
+      }
+
+      const { mockStore, mergeAnimalImagesPreserveCustom, filterAdminCustomAnimalImages } =
+        await import("@/lib/mock-db");
+      mockStore.animal_images = mergeAnimalImagesPreserveCustom(mockStore.animal_images, validList);
+      const customOnly = filterAdminCustomAnimalImages(mockStore.animal_images);
+
+      try {
+        localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(customOnly));
+        localStorage.setItem("pizarra_user_custom_animal_images_v2", JSON.stringify(customOnly));
+      } catch {
+        // ignore
+      }
+
+      if (customOnly.length > 0) {
+        await fetch("/api/public/results/sync", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ animalImagesBatch: customOnly }),
+        }).catch(() => {});
+      }
+
+      try {
+        const bc = new BroadcastChannel("pizarra_lottery_channel");
+        bc.postMessage({ type: "ANIMAL_MEDIA_BATCH_UPDATED" });
+        setTimeout(() => bc.close(), 1000);
+      } catch {
+        // ignore
+      }
+
+      if (selectedGame) {
+        await fetchAll(selectedGame);
+      }
+      toast.success(`Se restauraron exitosamente ${validList.length} imágenes personalizadas.`);
+    } catch (err) {
+      console.error(err);
+      toast.error("Error al procesar el archivo de respaldo.");
+    } finally {
+      setIsRestoringBackup(false);
+    }
+  }
+
   const selectedGameObj = games.find((g) => g.id === selectedGame);
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
       <div>
-        <h2 className="text-lg font-semibold flex items-center gap-2">
-          <ImageIcon className="w-5 h-5 text-blue-500" /> Animales por Juego
-        </h2>
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <h2 className="text-lg font-semibold flex items-center gap-2">
+            <ImageIcon className="w-5 h-5 text-blue-500" /> Animales por Juego
+          </h2>
+          <span className="inline-flex items-center gap-1.5 text-xs text-emerald-400 font-medium bg-emerald-950/40 border border-emerald-800/60 px-2.5 py-1 rounded-lg">
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+            Catálogo Permanente Blindado (Incrustado en código y nube)
+          </span>
+        </div>
         <p className="text-sm text-slate-400 mt-1">
-          Cada juego tiene su propia lista de animales con sus imagenes y nombres.
+          Cada juego tiene su propia lista de animales con sus imágenes y nombres.
         </p>
       </div>
 
@@ -1905,10 +2198,46 @@ function AnimalsManager({ games }: { games: Game[] }) {
                 )}
                 <button
                   onClick={() => setShowListConfig(!showListConfig)}
-                  className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-sm font-medium flex items-center gap-2 transition"
+                  className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium flex items-center gap-1.5 transition text-slate-200 border border-slate-700/70"
                 >
-                  <ListPlus className="w-4 h-4" />
+                  <ListPlus className="w-3.5 h-3.5" />
                   Configurar lista
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportBackup}
+                  title="Descargar copia de seguridad en JSON de todas las imágenes personalizadas"
+                  className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium flex items-center gap-1.5 transition text-slate-200 border border-slate-700/70"
+                >
+                  <Download className="w-3.5 h-3.5 text-emerald-400" />
+                  Exportar Respaldo
+                </button>
+                <input
+                  ref={backupInputRef}
+                  type="file"
+                  accept=".json,application/json"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      handleImportBackup(file);
+                      e.target.value = "";
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => backupInputRef.current?.click()}
+                  disabled={isRestoringBackup}
+                  title="Restaurar imágenes personalizadas desde un archivo JSON de respaldo"
+                  className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-xs font-medium flex items-center gap-1.5 transition text-slate-200 border border-slate-700/70"
+                >
+                  {isRestoringBackup ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <FileUp className="w-3.5 h-3.5 text-cyan-400" />
+                  )}
+                  Restaurar Respaldo
                 </button>
                 <input
                   ref={bulkInputRef}
@@ -1926,12 +2255,12 @@ function AnimalsManager({ games }: { games: Game[] }) {
                 <button
                   onClick={() => bulkInputRef.current?.click()}
                   disabled={bulkUploading}
-                  className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-sm font-medium flex items-center gap-2 transition"
+                  className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-xs font-medium flex items-center gap-1.5 transition"
                 >
                   {bulkUploading ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   ) : (
-                    <Upload className="w-4 h-4" />
+                    <Upload className="w-3.5 h-3.5" />
                   )}
                   Subir todas
                 </button>
@@ -2389,7 +2718,13 @@ function AdsManager() {
                 {mediaType === "video" ? (
                   <video src={imageUrl} className="w-full h-32 object-cover" muted controls />
                 ) : (
-                  <img src={imageUrl} alt="Vista previa" className="w-full h-32 object-cover" />
+                  <img
+                    src={imageUrl}
+                    alt="Vista previa"
+                    loading="lazy"
+                    decoding="async"
+                    className="w-full h-32 object-cover"
+                  />
                 )}
                 <button
                   onClick={() => fileRef.current?.click()}
@@ -2487,7 +2822,13 @@ function AdsManager() {
                   {ad.media_type === "video" ? (
                     <video src={ad.image_url} className="w-full h-full object-cover" muted />
                   ) : (
-                    <img src={ad.image_url} alt={ad.title} className="w-full h-full object-cover" />
+                    <img
+                      src={ad.image_url}
+                      alt={ad.title}
+                      loading="lazy"
+                      decoding="async"
+                      className="w-full h-full object-cover"
+                    />
                   )}
                 </div>
 

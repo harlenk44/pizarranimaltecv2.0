@@ -265,4 +265,20 @@ describe("ResultAlertModal component", () => {
 
     vi.useRealTimers();
   });
+
+  it("normalizes uppercase text, hyphens, slashes, numbers, and 00 phonetically for speech synthesis", async () => {
+    const { normalizeTextForSpeech } = await import("@/lib/lottery-audio");
+
+    expect(normalizeTextForSpeech("05-LEON")).toBe("número 05, León");
+    expect(normalizeTextForSpeech("00-BALLENA")).toBe("número cero cero, Ballena");
+    expect(normalizeTextForSpeech("LOTTO ACTIVO")).toBe("Lotto Activo");
+    expect(normalizeTextForSpeech("LA_GRANJITA/GUACHARO")).toBe("La, Granjita, Guácharo");
+    expect(
+      normalizeTextForSpeech(
+        "Atención en la agencia. Nuevo resultado de LOTTO ACTIVO. Ha salido el 00-BALLENA.",
+      ),
+    ).toBe(
+      "Atención en la agencia. Nuevo resultado de Lotto Activo. Ha salido el número cero cero, Ballena.",
+    );
+  });
 });

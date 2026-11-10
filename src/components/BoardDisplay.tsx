@@ -15,10 +15,12 @@ import {
 import { Button } from "@/components/ui/button";
 import { DisplayProvider, useDisplay } from "@/context/DisplayContext";
 import { useBoardSettings } from "@/context/BoardSettingsContext";
+import { useLicenseContext } from "@/components/LicenseGate";
 
 function DisplayShell({ children }: { children: ReactNode }) {
   const { preferences, update, storageError } = useDisplay();
   const { settings, updateSettings } = useBoardSettings();
+  const { designConfig } = useLicenseContext();
   const shell = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(false);
   const [controls, setControls] = useState(false);
@@ -26,10 +28,13 @@ function DisplayShell({ children }: { children: ReactNode }) {
   const [isToolsVisible, setIsToolsVisible] = useState(true);
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const logoSize = preferences.logoSize ?? settings.logo_size ?? 72;
+  const customDesign = designConfig?.useCustomDesign ? designConfig : null;
+  const logoSize = preferences.logoSize ?? customDesign?.logo_size ?? settings.logo_size ?? 72;
   const fontSizeScale = preferences.fontSizeScale ?? settings.font_size_scale ?? 100;
-  const heroCardScale = preferences.heroCardScale ?? settings.hero_card_scale ?? 100;
-  const animalScale = preferences.animalScale ?? settings.animal_scale ?? 100;
+  const heroCardScale =
+    preferences.heroCardScale ?? customDesign?.hero_card_scale ?? settings.hero_card_scale ?? 100;
+  const animalScale =
+    preferences.animalScale ?? customDesign?.animal_scale ?? settings.animal_scale ?? 100;
 
   function updatePreferenceAndSetting(
     updates: Partial<typeof preferences> & Partial<typeof settings>,

@@ -1,10 +1,19 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { Volume2, VolumeX, X, Clock, Trophy, ChevronRight, RotateCcw, Sliders } from "lucide-react";
-import { speakLotteryResult, stopAllAudio } from "@/lib/lottery-audio";
+import { speakLotteryResult, stopAllAudio, loadVoiceSettings } from "@/lib/lottery-audio";
 import { getEmojiForNumber } from "@/lib/animals";
 import VoiceSettingsModal from "@/components/VoiceSettingsModal";
 import AnimalMedia from "@/components/AnimalMedia";
 import { getSorteoAlertKey, sorteoAlertTracker } from "@/lib/sorteo-alert-tracker";
+import { useLicenseContext } from "@/components/LicenseGate";
+import { useBoardSettings } from "@/context/BoardSettingsContext";
+import { getGameLogo } from "@/lib/game-logos";
+import {
+  getGameNeonColor,
+  getNeonLogoRingStyle,
+  getNeonTitleStyle,
+  type BoardCardVisualStyle,
+} from "@/lib/neon-flex";
 
 export interface ResultAlertItem {
   id: string;
@@ -151,9 +160,18 @@ export default function ResultAlertModal({
   const proceedRef = useRef(proceedToNextOrClose);
   proceedRef.current = proceedToNextOrClose;
 
+  const { voiceConfig, designConfig } = useLicenseContext();
+  const voiceConfigRef = useRef(voiceConfig);
+  voiceConfigRef.current = voiceConfig;
+
+  const boardSettingsContext = useBoardSettings();
+  const settings = boardSettingsContext?.settings;
+
   // Function to synthesize speech in Spanish using natural voice
   const speakCurrent = useCallback((alert: ResultAlertItem) => {
-    if (!voiceEnabledRef.current) {
+    const pinVoice = voiceConfigRef.current;
+    const isAllowedByPin = pinVoice ? pinVoice.enabled : true;
+    if (!voiceEnabledRef.current || !isAllowedByPin) {
       isSpeakingRef.current = false;
       setIsSpeaking(false);
       return;
@@ -162,12 +180,23 @@ export default function ResultAlertModal({
     isSpeakingRef.current = true;
     setIsSpeaking(true);
 
+    const localSettings = loadVoiceSettings();
+    const effectiveVoiceSettings = pinVoice
+      ? {
+          ...localSettings,
+          engine: pinVoice.engine,
+          rate: pinVoice.rate,
+          playChime: pinVoice.playChime,
+        }
+      : localSettings;
+
     speakLotteryResult({
       gameName: alert.gameName,
       drawTime: alert.drawTime,
       animalNumber: alert.animalNumber,
       animalName: alert.animalName,
       animalLabel: alert.animalLabel,
+      settings: effectiveVoiceSettings,
       onStart: () => {
         isSpeakingRef.current = true;
         setIsSpeaking(true);
@@ -261,9 +290,25 @@ export default function ResultAlertModal({
 
   if (!currentAlert) return null;
 
+  const customColorMap = designConfig?.useCustomDesign
+    ? designConfig.game_colors
+    : designConfig?.game_colors || settings?.game_colors;
+
+  const styleMode: BoardCardVisualStyle =
+    (designConfig?.useCustomDesign
+      ? designConfig.card_style
+      : designConfig?.card_style || settings?.card_style) === "solid"
+      ? "solid"
+      : "neon";
+
+  const brandColor = getGameNeonColor(
+    currentAlert.gameId || currentAlert.gameName,
+    currentAlert.gameColor || "#00FF66",
+    customColorMap,
+  );
+
   const displayLabel =
     currentAlert.animalLabel ?? String(currentAlert.animalNumber).padStart(2, "0");
-  const brandColor = currentAlert.gameColor || "#3b82f6";
   const progressPercent = Math.max(0, Math.min(100, (timeLeft / effectiveDuration) * 100));
 
   return (
@@ -279,56 +324,97 @@ export default function ResultAlertModal({
       }}
     >
       <div
-        className="relative w-full max-w-xl rounded-2xl overflow-hidden bg-slate-900 border-2 shadow-2xl transition-all transform animate-in zoom-in-95 duration-200 cursor-default"
+        className="relative w-full max-w-xl rounded-3xl overflow-hidden transition-all transform animate-in zoom-in-95 duration-200 cursor-default"
         onClick={(e) => e.stopPropagation()}
-        style={{
-          borderColor: brandColor,
-          boxShadow: `0 0 50px -10px ${brandColor}50, 0 25px 50px -12px rgba(0, 0, 0, 0.7)`,
-        }}
+        style={
+          styleMode === "solid"
+            ? {
+                backgroundColor: "#0b1220",
+                border: `2.5px solid ${brandColor}`,
+                boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.85)",
+              }
+            : {
+                backgroundColor: "#070b14",
+                border: `3px solid ${brandColor}`,
+                boxShadow: `0 0 16px ${brandColor}99, 0 0 38px ${brandColor}4d, 0 0 80px ${brandColor}22, inset 0 0 16px ${brandColor}18, 0 30px 70px -15px rgba(0, 0, 0, 0.95)`,
+              }
+        }
       >
         {/* Top auto-close progress bar */}
-        <div className="h-1.5 w-full bg-slate-800 overflow-hidden">
+        <div className="h-2 w-full bg-slate-950 overflow-hidden">
           <div
             className="h-full transition-all duration-1000 ease-linear"
             style={{
               width: `${progressPercent}%`,
               backgroundColor: brandColor,
+              boxShadow: styleMode === "neon" ? `0 0 10px ${brandColor}, 0 0 4px #ffffff` : "none",
             }}
           />
         </div>
 
         {/* Header bar with Game title and Quick controls */}
         <div
-          className="px-6 py-4 flex items-center justify-between border-b border-slate-800"
-          style={{ backgroundColor: `${brandColor}18` }}
+          className="px-6 py-4 flex items-center justify-between border-b"
+          style={{
+            backgroundColor: `${brandColor}1c`,
+            borderColor: styleMode === "neon" ? `${brandColor}40` : "rgba(51, 65, 85, 0.5)",
+          }}
         >
-          <div className="flex items-center gap-3">
-            {currentAlert.gameLogoUrl ? (
+          <div className="flex items-center gap-3.5">
+            <div
+              className="w-12 h-12 rounded-xl p-1 bg-slate-950/80 flex items-center justify-center shrink-0 overflow-hidden"
+              style={getNeonLogoRingStyle(brandColor, styleMode)}
+            >
               <img
-                src={currentAlert.gameLogoUrl}
+                src={getGameLogo(
+                  {
+                    id: currentAlert.gameId,
+                    name: currentAlert.gameName,
+                    logo_url: currentAlert.gameLogoUrl,
+                  },
+                  brandColor,
+                )}
                 alt={currentAlert.gameName}
-                className="w-10 h-10 object-contain rounded-lg bg-slate-950/40 p-1 border border-slate-800"
+                loading="lazy"
+                decoding="async"
+                onError={(e) => {
+                  e.currentTarget.src = getGameLogo(currentAlert.gameName, brandColor);
+                }}
+                className="w-full h-full object-contain"
               />
-            ) : (
-              <div
-                className="w-10 h-10 rounded-lg flex items-center justify-center text-xl font-bold shadow-sm"
-                style={{ backgroundColor: brandColor, color: "#fff" }}
-              >
-                <Trophy className="w-5 h-5" />
-              </div>
-            )}
+            </div>
             <div>
               <div className="flex items-center gap-2">
-                <span className="text-[11px] font-semibold tracking-wider uppercase px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                <span
+                  className="text-[11px] font-black tracking-wider uppercase px-2.5 py-0.5 rounded-full"
+                  style={
+                    styleMode === "neon"
+                      ? {
+                          backgroundColor: `${brandColor}26`,
+                          color: "#ffffff",
+                          border: `1.5px solid ${brandColor}99`,
+                          boxShadow: `0 0 10px ${brandColor}66`,
+                          textShadow: `0 0 8px ${brandColor}`,
+                        }
+                      : {
+                          backgroundColor: `${brandColor}22`,
+                          color: brandColor,
+                          border: `1.5px solid ${brandColor}80`,
+                        }
+                  }
+                >
                   ¡Sorteo Confirmado!
                 </span>
                 {hasMultiple && (
-                  <span className="text-xs text-slate-400 font-mono">
+                  <span className="text-xs text-slate-400 font-mono font-bold">
                     ({currentIndex + 1} de {uniqueAlerts.length})
                   </span>
                 )}
               </div>
-              <h2 className="text-lg sm:text-xl font-black text-white tracking-wide uppercase mt-0.5">
+              <h2
+                className="text-xl sm:text-2xl font-black tracking-wide uppercase mt-0.5"
+                style={getNeonTitleStyle(brandColor, styleMode)}
+              >
                 {currentAlert.gameName}
               </h2>
             </div>
@@ -339,41 +425,70 @@ export default function ResultAlertModal({
               <button
                 type="button"
                 onClick={() => onToggleVoice(!voiceEnabled)}
-                className={`p-2 rounded-lg border transition ${
+                className={`p-2 rounded-xl border transition ${
                   voiceEnabled
-                    ? "bg-blue-600/20 border-blue-500/40 text-blue-400 hover:bg-blue-600/30"
-                    : "bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700"
+                    ? "text-white"
+                    : "bg-slate-800/80 border-slate-700 text-slate-400 hover:bg-slate-700"
                 }`}
+                style={
+                  voiceEnabled
+                    ? styleMode === "neon"
+                      ? {
+                          backgroundColor: `${brandColor}33`,
+                          borderColor: `${brandColor}88`,
+                          boxShadow: `0 0 12px ${brandColor}66`,
+                          color: "#ffffff",
+                        }
+                      : {
+                          backgroundColor: brandColor,
+                          borderColor: brandColor,
+                          color: "#ffffff",
+                        }
+                    : undefined
+                }
                 title={voiceEnabled ? "Desactivar voz" : "Activar voz"}
               >
-                {voiceEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+                {voiceEnabled ? (
+                  <Volume2 className="w-4.5 h-4.5" />
+                ) : (
+                  <VolumeX className="w-4.5 h-4.5" />
+                )}
               </button>
             )}
             <button
               type="button"
               onClick={() => setShowVoiceSettings(true)}
-              className="p-2 rounded-lg border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white transition"
+              className="p-2 rounded-xl border border-slate-700 bg-slate-800/80 text-slate-300 hover:bg-slate-700 hover:text-white transition"
               title="Configurar voz natural (seleccionar voz humana y tono)"
             >
-              <Sliders className="w-4 h-4 text-amber-400" />
+              <Sliders className="w-4.5 h-4.5 text-amber-400" />
             </button>
             <button
               type="button"
               onClick={handleReplayVoice}
-              className={`p-2 rounded-lg border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 transition ${
-                isSpeaking ? "animate-pulse ring-2 ring-blue-500" : ""
+              className={`p-2 rounded-xl border border-slate-700 bg-slate-800/80 text-slate-300 hover:bg-slate-700 transition ${
+                isSpeaking ? "animate-pulse" : ""
               }`}
+              style={
+                isSpeaking && styleMode === "neon"
+                  ? {
+                      borderColor: brandColor,
+                      boxShadow: `0 0 14px ${brandColor}`,
+                      color: "#ffffff",
+                    }
+                  : undefined
+              }
               title="Escuchar de nuevo"
             >
-              <RotateCcw className="w-4 h-4" />
+              <RotateCcw className="w-4.5 h-4.5" />
             </button>
             <button
               type="button"
               onClick={handleClose}
-              className="p-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300 transition"
+              className="p-2 rounded-xl border border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-slate-300 transition"
               title="Volver a la pizarra"
             >
-              <X className="w-4 h-4" />
+              <X className="w-4.5 h-4.5" />
             </button>
           </div>
         </div>
@@ -381,74 +496,139 @@ export default function ResultAlertModal({
         {/* Content body */}
         <div className="p-6 sm:p-8 text-center flex flex-col items-center">
           {/* Draw Time */}
-          <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-slate-800/80 border border-slate-700 text-slate-300 font-medium text-sm sm:text-base mb-6">
-            <Clock className="w-4 h-4 text-amber-400" />
-            <span>Sorteo de las</span>
-            <span className="font-bold text-white font-mono">
+          <div
+            className="inline-flex items-center gap-2 px-5 py-2 rounded-full font-medium text-sm sm:text-base mb-6 backdrop-blur-sm"
+            style={{
+              backgroundColor: "rgba(15, 23, 42, 0.8)",
+              border: `1.5px solid ${styleMode === "neon" ? `${brandColor}66` : "rgba(51, 65, 85, 0.8)"}`,
+              boxShadow: styleMode === "neon" ? `0 0 14px ${brandColor}30` : "none",
+            }}
+          >
+            <Clock className="w-4.5 h-4.5 text-amber-400" />
+            <span className="text-slate-300">Sorteo de las</span>
+            <span className="font-extrabold text-white font-mono tracking-tight text-base sm:text-lg">
               {formatDisplayTime(currentAlert.drawTime)}
             </span>
           </div>
 
           {/* Winning Animal Display (Image / Video / Emoji + Big Number) */}
-          <div className="relative mb-5 flex flex-col items-center">
+          <div className="relative mb-6 flex flex-col items-center">
             <div
-              className="relative w-44 h-44 sm:w-52 sm:h-52 rounded-2xl p-3 bg-slate-950/80 border-2 flex items-center justify-center overflow-hidden shadow-2xl"
-              style={{ borderColor: `${brandColor}80` }}
+              className="relative w-48 h-48 sm:w-56 sm:h-56 rounded-3xl p-4 flex items-center justify-center overflow-hidden"
+              style={
+                styleMode === "neon"
+                  ? {
+                      backgroundColor: "rgba(3, 7, 18, 0.85)",
+                      border: `3px solid ${brandColor}`,
+                      boxShadow: `0 0 24px ${brandColor}77, inset 0 0 20px ${brandColor}26, 0 20px 40px rgba(0, 0, 0, 0.85)`,
+                    }
+                  : {
+                      backgroundColor: "rgba(10, 15, 29, 0.95)",
+                      border: `2.5px solid ${brandColor}`,
+                      boxShadow: "0 15px 35px rgba(0, 0, 0, 0.65)",
+                    }
+              }
             >
               <AnimalMedia
                 mediaUrl={currentAlert.animalImageUrl}
                 name={currentAlert.animalName}
                 number={currentAlert.animalNumber}
-                className="w-full h-full object-contain filter drop-shadow-lg"
-                emojiClassName="text-7xl sm:text-8xl select-none"
+                className="w-full h-full object-contain filter drop-shadow-2xl"
+                emojiClassName="text-8xl sm:text-9xl select-none"
               />
             </div>
 
             {/* Winning Number Badge Floating Over the Animal */}
             <div
-              className="absolute -bottom-4 px-6 py-1.5 rounded-xl text-2xl sm:text-3xl font-black font-mono tracking-tight shadow-xl border-2 border-slate-900"
-              style={{
-                backgroundColor: brandColor,
-                color: "#ffffff",
-                boxShadow: `0 8px 20px -4px ${brandColor}80`,
-              }}
+              className="absolute -bottom-5 px-7 py-2 rounded-2xl text-2xl sm:text-4xl font-black font-mono tracking-tight z-10"
+              style={
+                styleMode === "neon"
+                  ? {
+                      backgroundColor: brandColor,
+                      color: "#ffffff",
+                      border: "3px solid #070b14",
+                      boxShadow: `0 0 22px ${brandColor}dd, 0 0 40px ${brandColor}66, 0 10px 25px rgba(0, 0, 0, 0.8)`,
+                      textShadow: "0 2px 4px rgba(0, 0, 0, 0.7)",
+                    }
+                  : {
+                      backgroundColor: brandColor,
+                      color: "#ffffff",
+                      border: "2.5px solid #0b1220",
+                      boxShadow: "0 6px 18px rgba(0, 0, 0, 0.6)",
+                    }
+              }
             >
               {displayLabel}
             </div>
           </div>
 
           {/* Animal Name */}
-          <h3 className="text-3xl sm:text-4xl font-black tracking-tight text-white uppercase mt-4 mb-2 drop-shadow">
+          <h3
+            className="text-3xl sm:text-5xl font-black tracking-tight text-white uppercase mt-6 mb-2 text-center"
+            style={
+              styleMode === "neon"
+                ? {
+                    textShadow: `0 0 20px ${brandColor}aa, 0 2px 6px rgba(0, 0, 0, 0.9)`,
+                  }
+                : {
+                    textShadow: "0 2px 4px rgba(0, 0, 0, 0.7)",
+                  }
+            }
+          >
             {currentAlert.animalName}
           </h3>
 
           {/* Voice speaking indicator */}
-          <div className="h-6 flex items-center justify-center gap-1.5 text-xs text-slate-400">
+          <div className="h-7 flex items-center justify-center gap-2 text-xs sm:text-sm text-slate-400">
             {isSpeaking ? (
               <>
-                <Volume2 className="w-3.5 h-3.5 text-blue-400 animate-bounce" />
-                <span className="text-blue-400 font-medium">Dictando resultado en voz alta...</span>
+                <Volume2
+                  className="w-4 h-4 animate-bounce"
+                  style={{ color: styleMode === "neon" ? brandColor : "#60a5fa" }}
+                />
+                <span
+                  className="font-bold tracking-wide"
+                  style={{
+                    color: styleMode === "neon" ? brandColor : "#60a5fa",
+                    textShadow: styleMode === "neon" ? `0 0 8px ${brandColor}80` : "none",
+                  }}
+                >
+                  Dictando resultado en voz alta...
+                </span>
               </>
             ) : (
-              <span className="text-slate-500">
+              <span className="text-slate-400 font-medium">
                 Regresando a la pizarra en{" "}
-                <span className="text-slate-300 font-bold font-mono">{timeLeft}s</span>
+                <span className="text-white font-extrabold font-mono text-sm sm:text-base">
+                  {timeLeft}s
+                </span>
               </span>
             )}
           </div>
         </div>
 
         {/* Modal Footer with Actions */}
-        <div className="px-6 py-4 bg-slate-950/70 border-t border-slate-800 flex items-center justify-between gap-3">
-          <div className="text-xs text-slate-400 hidden sm:flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+        <div className="px-6 py-4 bg-slate-950/80 border-t border-slate-800/80 flex items-center justify-between gap-3">
+          <div className="text-xs text-slate-400 hidden sm:flex items-center gap-2">
+            <span
+              className="w-2 h-2 rounded-full animate-pulse"
+              style={{
+                backgroundColor: brandColor,
+                boxShadow: styleMode === "neon" ? `0 0 8px ${brandColor}` : "none",
+              }}
+            />
             <span>
               {isSpeaking ? (
-                <span className="text-blue-400 font-medium">Dictando resultado en voz alta...</span>
+                <span
+                  className="font-semibold"
+                  style={{ color: styleMode === "neon" ? brandColor : "#60a5fa" }}
+                >
+                  Dictando resultado en voz alta...
+                </span>
               ) : (
                 <>
                   Volviendo a la pizarra en{" "}
-                  <strong className="text-white font-mono">{timeLeft}s</strong>
+                  <strong className="text-white font-mono text-sm">{timeLeft}s</strong>
                 </>
               )}
             </span>
@@ -459,7 +639,7 @@ export default function ResultAlertModal({
               <button
                 type="button"
                 onClick={handleNext}
-                className="flex-1 sm:flex-initial px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-semibold flex items-center justify-center gap-2 border border-slate-700 transition"
+                className="flex-1 sm:flex-initial px-4 py-2.5 rounded-xl bg-slate-800/90 hover:bg-slate-700 text-slate-200 text-sm font-bold flex items-center justify-center gap-2 border border-slate-700 transition"
               >
                 <span>Siguiente</span>
                 <ChevronRight className="w-4 h-4" />
@@ -468,11 +648,19 @@ export default function ResultAlertModal({
             <button
               type="button"
               onClick={handleClose}
-              className="flex-1 sm:flex-initial px-5 py-2.5 rounded-xl font-bold text-sm text-white transition shadow-lg flex items-center justify-center gap-2"
-              style={{
-                backgroundColor: brandColor,
-                boxShadow: `0 4px 14px 0 ${brandColor}40`,
-              }}
+              className="flex-1 sm:flex-initial px-6 py-2.5 rounded-xl font-black text-sm uppercase tracking-wider text-white transition transform active:scale-95 flex items-center justify-center gap-2"
+              style={
+                styleMode === "neon"
+                  ? {
+                      backgroundColor: brandColor,
+                      boxShadow: `0 0 18px ${brandColor}88, 0 4px 14px rgba(0, 0, 0, 0.5)`,
+                      textShadow: "0 1px 3px rgba(0, 0, 0, 0.5)",
+                    }
+                  : {
+                      backgroundColor: brandColor,
+                      boxShadow: "0 4px 14px rgba(0, 0, 0, 0.4)",
+                    }
+              }
             >
               Volver a la pizarra
             </button>

@@ -141,6 +141,20 @@ export const DEFAULT_GAME_SCHEDULES: Readonly<Record<string, string[]>> = {
     "18:00",
     "19:00",
   ],
+  "la-ricachona": [
+    "08:10",
+    "09:10",
+    "10:10",
+    "11:10",
+    "12:10",
+    "13:10",
+    "14:10",
+    "15:10",
+    "16:10",
+    "17:10",
+    "18:10",
+    "19:10",
+  ],
 };
 
 const STANDARD_HOURS = [
@@ -163,6 +177,9 @@ export function getDefaultGameScheduleTimes(slug: string): string[] {
   if (DEFAULT_GAME_SCHEDULES[norm]) {
     return [...DEFAULT_GAME_SCHEDULES[norm]];
   }
+  if (norm.includes("ricachona")) {
+    return [...DEFAULT_GAME_SCHEDULES["la-ricachona"]];
+  }
   if (norm.includes("monje")) {
     return [...DEFAULT_GAME_SCHEDULES["monje-millonario"]];
   }
@@ -182,10 +199,18 @@ export function getGameScheduleTimes(gameOrSlug: Game | string | undefined | nul
   if (!gameOrSlug) return [...STANDARD_HOURS];
 
   if (typeof gameOrSlug === "object") {
+    const slugNorm = (gameOrSlug.slug || gameOrSlug.name || "").toLowerCase();
+    const isRicachona =
+      slugNorm.includes("ricachona") || gameOrSlug.id === "3b92f700-0000-4000-8000-000000000011";
+
     if (Array.isArray(gameOrSlug.schedule_times) && gameOrSlug.schedule_times.length > 0) {
+      // Auto-migrate legacy :00 schedule for La Ricachona to its official :10 schedule
+      if (isRicachona && gameOrSlug.schedule_times.every((t) => String(t).endsWith(":00"))) {
+        return [...DEFAULT_GAME_SCHEDULES["la-ricachona"]];
+      }
       return [...gameOrSlug.schedule_times].sort((a, b) => a.localeCompare(b));
     }
-    return getDefaultGameScheduleTimes(gameOrSlug.slug);
+    return getDefaultGameScheduleTimes(gameOrSlug.slug || gameOrSlug.name || "");
   }
 
   return getDefaultGameScheduleTimes(gameOrSlug);

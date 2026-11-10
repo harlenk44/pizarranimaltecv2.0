@@ -9,6 +9,15 @@ import {
   type TripleGameConfig,
   type TripleResult,
 } from "@/lib/triples";
+import {
+  getGameNeonColor,
+  getNeonFlexCardStyle,
+  getNeonLogoRingStyle,
+  getNeonTitleStyle,
+  getNeonHeroStyle,
+  getNeonBadgeStyle,
+} from "@/lib/neon-flex";
+import { getGameLogo } from "@/lib/game-logos";
 
 interface TriplesBoardProps {
   results: TripleResult[];
@@ -37,7 +46,30 @@ function findTripleForTimeSlot(
 
 export default function TriplesBoard({ results, loading = false, games }: TriplesBoardProps) {
   const { settings } = useBoardSettings();
-  const { isGameAllowed } = useLicenseContext();
+  const { isGameAllowed, designConfig } = useLicenseContext();
+
+  const effectiveSettings = useMemo(() => {
+    if (!designConfig) return settings;
+    return {
+      ...settings,
+      ...(designConfig.useCustomDesign
+        ? {
+            background_color: designConfig.background_color ?? settings.background_color,
+            surface_color: designConfig.surface_color ?? settings.surface_color,
+            primary_color: designConfig.primary_color ?? settings.primary_color,
+            text_color: designConfig.text_color ?? settings.text_color,
+            card_color: designConfig.card_color ?? settings.card_color,
+            result_row_color: designConfig.result_row_color ?? settings.result_row_color,
+            font_family: designConfig.font_family ?? settings.font_family,
+          }
+        : {}),
+      card_style: designConfig.card_style ?? settings.card_style ?? "neon",
+      game_colors: {
+        ...(settings.game_colors ?? {}),
+        ...(designConfig.game_colors ?? {}),
+      },
+    };
+  }, [settings, designConfig]);
 
   const visibleTriples = useMemo(() => {
     if (games && games.length > 0) return games;
@@ -73,7 +105,12 @@ export default function TriplesBoard({ results, loading = false, games }: Triple
           .sort((a, b) => a.draw_time.localeCompare(b.draw_time));
 
         return (
-          <TripleGameCard key={game.id} game={game} results={gameResults} settings={settings} />
+          <TripleGameCard
+            key={game.id}
+            game={game}
+            results={gameResults}
+            settings={effectiveSettings}
+          />
         );
       })}
     </div>
@@ -89,6 +126,12 @@ function TripleGameCard({
   results: TripleResult[];
   settings: ReturnType<typeof useBoardSettings>["settings"];
 }) {
+  const styleMode = settings.card_style ?? "neon";
+  const neonColor = getGameNeonColor(
+    game.slug || game.id || game.name,
+    game.color,
+    settings.game_colors,
+  );
   const [imgError, setImgError] = useState(false);
   const scheduleTimes = game.schedule_times;
   const validSlots = new Set(scheduleTimes.map((t) => t.substring(0, 5).replace(/^0/, "")));
@@ -118,41 +161,31 @@ function TripleGameCard({
   return (
     <div
       className="fluid-game-card h-full w-full min-h-0 min-w-0 overflow-hidden flex flex-col justify-between"
-      style={{
-        backgroundColor: settings.card_color || "#000000",
-        borderColor: game.color,
-        boxShadow: `0 0 15px ${game.color}15`,
-      }}
+      style={getNeonFlexCardStyle(neonColor, settings.card_color || "#000000", styleMode)}
     >
       {/* Top Header */}
       <div className="fluid-card-header shrink-0">
-        {game.logo_url && !imgError ? (
-          <div
-            className="rounded-full border border-slate-800 bg-slate-900 flex items-center justify-center overflow-hidden shrink-0 fluid-logo-wrapper"
-            style={{ width: "var(--display-logo)", height: "var(--display-logo)" }}
-          >
-            <img
-              src={game.logo_url}
-              alt={game.name}
-              onError={() => setImgError(true)}
-              className="w-full h-full object-contain max-h-full max-w-full p-0.5"
-            />
-          </div>
-        ) : (
-          <div
-            className="rounded-full flex items-center justify-center text-xs font-black shrink-0 fluid-logo-wrapper border border-slate-700/80"
-            style={{
-              backgroundColor: `${game.color}25`,
-              color: game.color,
-              width: "var(--display-logo)",
-              height: "var(--display-logo)",
+        <div
+          className="rounded-full bg-slate-900 flex items-center justify-center overflow-hidden shrink-0 fluid-logo-wrapper"
+          style={{
+            width: "var(--display-logo)",
+            height: "var(--display-logo)",
+            ...getNeonLogoRingStyle(neonColor, styleMode),
+          }}
+        >
+          <img
+            src={getGameLogo(game, neonColor)}
+            alt={game.name}
+            loading="lazy"
+            decoding="async"
+            onError={(e) => {
+              e.currentTarget.src = getGameLogo(game.slug || game.name, neonColor);
             }}
-          >
-            777
-          </div>
-        )}
+            className="w-full h-full object-contain max-h-full max-w-full p-0.5"
+          />
+        </div>
         <div className="flex-1 min-w-0">
-          <h2 className="fluid-game-title truncate" style={{ color: game.color }}>
+          <h2 className="fluid-game-title truncate" style={getNeonTitleStyle(neonColor, styleMode)}>
             {game.name}
           </h2>
           <p className="fluid-game-subtitle font-mono truncate">
@@ -168,14 +201,17 @@ function TripleGameCard({
       {/* Hero Center Display (Latest Triple Result) */}
       <div
         className="fluid-hero-banner shrink-0 min-h-0 overflow-hidden"
-        style={{
-          backgroundColor: settings.result_row_color || "rgba(15, 23, 42, 0.8)",
-        }}
+        style={getNeonHeroStyle(
+          neonColor,
+          settings.result_row_color || "rgba(15, 23, 42, 0.8)",
+          styleMode,
+        )}
       >
         <div
           className="fluid-hero-avatar rounded-xl bg-slate-950/90 border flex flex-col items-center justify-center shrink-0 overflow-hidden shadow-inner px-1.5"
           style={{
-            borderColor: latestResult ? game.color : "rgba(51, 65, 85, 0.8)",
+            borderColor: latestResult ? `${neonColor}80` : "rgba(51, 65, 85, 0.8)",
+            boxShadow: latestResult && styleMode === "neon" ? `0 0 10px ${neonColor}33` : undefined,
             width:
               "calc(clamp(2.2rem, min(5.5vh, 4vw), 4.8rem) * var(--display-animal-scale, 1) * var(--card-avatar-scale, 1))",
             height:
@@ -196,7 +232,8 @@ function TripleGameCard({
               <span
                 className="font-mono font-black tracking-tight tabular-nums leading-none mt-0.5"
                 style={{
-                  color: game.color,
+                  color: neonColor,
+                  textShadow: styleMode === "neon" ? `0 0 8px ${neonColor}80` : "none",
                   fontSize:
                     "calc(clamp(0.95rem, 1.6vw, 1.6rem) * var(--display-font-scale, 1) * var(--card-density-scale, 1))",
                 }}
@@ -211,8 +248,8 @@ function TripleGameCard({
 
         <div className="flex-1 text-right min-w-0 overflow-hidden">
           <div
-            className="h-1.5 w-10 sm:w-14 rounded-full ml-auto mb-1 shadow-sm"
-            style={{ backgroundColor: game.color }}
+            className="h-1.5 w-10 sm:w-14 rounded-full ml-auto mb-1"
+            style={getNeonBadgeStyle(neonColor, styleMode)}
           />
           {latestResult ? (
             <div className="min-w-0">
@@ -291,7 +328,8 @@ function TripleGameCard({
                       <span
                         className="font-black"
                         style={{
-                          color: game.color,
+                          color: neonColor,
+                          textShadow: `0 0 6px ${neonColor}80`,
                           fontSize:
                             "calc(clamp(0.85rem, min(2vh, 1.2vw), 1.3rem) * var(--display-font-scale, 1) * var(--card-cell-scale, 1))",
                         }}
@@ -303,7 +341,8 @@ function TripleGameCard({
                         <span
                           className="font-black whitespace-nowrap"
                           style={{
-                            color: game.color,
+                            color: neonColor,
+                            textShadow: `0 0 6px ${neonColor}80`,
                             fontSize:
                               "calc(clamp(0.72rem, min(1.8vh, 1.05vw), 1.15rem) * var(--display-font-scale, 1) * var(--card-cell-scale, 1))",
                           }}
@@ -363,13 +402,16 @@ function TripleGameCard({
               <div className="fluid-cell-result w-full text-center font-mono tabular-nums">
                 {res ? (
                   isSingleColumn ? (
-                    <span style={{ color: game.color }} className="font-black">
+                    <span
+                      style={{ color: neonColor, textShadow: `0 0 6px ${neonColor}80` }}
+                      className="font-black"
+                    >
                       {res.triple_a}
                     </span>
                   ) : (
                     <div className="flex flex-col items-center justify-center leading-none">
                       <span
-                        style={{ color: game.color }}
+                        style={{ color: neonColor, textShadow: `0 0 6px ${neonColor}80` }}
                         className="font-black text-[0.76em] tracking-tighter whitespace-nowrap"
                       >
                         {res.triple_a}

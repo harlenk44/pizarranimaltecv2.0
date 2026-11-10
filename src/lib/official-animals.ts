@@ -29,6 +29,7 @@ export const GAME_ID_TO_SLUG: Readonly<Record<string, string>> = {
   "1e40af00-0000-4000-8000-000000000008": "lotto-activo-internacional",
   "d953f80c-4335-4bc9-9f78-9b56193286fe": "lotoanimalito",
   "61580ccf-5a2d-4d10-877e-4883515135e4": "lottopantera",
+  "3b92f700-0000-4000-8000-000000000011": "la-ricachona",
 };
 
 export function resolveGameSlug(gameIdOrSlug?: string | null): string {
@@ -250,6 +251,7 @@ export const OFFICIAL_ANIMALS: Record<string, OfficialAnimal[]> = {
   "lotto-activo-internacional": LOTTO_ACTIVO_ANIMALS,
   lotoanimalito: LOTTO_ACTIVO_ANIMALS,
   lottopantera: LOTTOPANTERA_ANIMALS,
+  "la-ricachona": LOTTO_ACTIVO_ANIMALS,
 };
 
 /**
@@ -300,28 +302,8 @@ export function getFixedAnimalImageUrl(
     return `https://toteback.atilax.io/storage/bases/2/${code}.png`;
   }
 
-  if (slug === "monje-millonario") {
-    const num = isBallena ? 76 : canonicalNumber;
-    return `https://tuazar.com/in/animalitos/monje_millonario/${num}.webp`;
-  }
-
-  if (slug === "granjita") {
-    if (isBallena) return "https://tuazar.com/in/animalitos/la_granjita/00.png";
-    return `https://tuazar.com/in/animalitos/la_granjita/${canonicalNumber}.png`;
-  }
-
-  // Traditional 0-36 animals + 00 Ballena across Lotto Activo, RD, Guacharo, Guacharito, Selva Plus, Loto Chaima
-  if (isBallena) {
-    return "https://tuazar.com/in/animalitos/lotto_activo/00.png";
-  }
-  if (canonicalNumber >= 0 && canonicalNumber <= 36) {
-    return `https://tuazar.com/in/animalitos/lotto_activo/${canonicalNumber}.png`;
-  }
-  if (canonicalNumber >= 37 && canonicalNumber <= 75) {
-    return `https://tuazar.com/in/animalitos/monje_millonario/${canonicalNumber}.webp`;
-  }
-
-  return "";
+  const label = isBallena ? "00" : canonicalNumber === 0 ? "0" : canonicalLabel;
+  return `/api/public/results/sync?animalImage=${encodeURIComponent(slug)}:${canonicalNumber}&label=${encodeURIComponent(label)}`;
 }
 
 /**

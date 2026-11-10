@@ -3,7 +3,9 @@ import {
   mockStore,
   INITIAL_GAMES,
   mergeAnimalImagesPreserveCustom,
-  isDefaultCatalogImageUrl,
+  isBaseOrDefaultCatalogImageUrl,
+  filterAdminCustomAnimalImages,
+  ensureCustomCatalogLoaded,
 } from "@/lib/mock-db";
 import type { ClientLicense, AnimalImage } from "@/lib/types";
 import { TRIPLE_GAMES, buildTripleAlertItem, type TripleResult } from "@/lib/triples";
@@ -16,6 +18,7 @@ import fs from "fs";
 import path from "path";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { resolveCanonicalAnimal, parseCanonicalAnimalNumber } from "@/lib/official-animals";
+import { getGameLogo, isBrokenExternalLogo } from "@/lib/game-logos";
 
 const RESULTS_FILE = "/tmp/lottery_results.json";
 const TRIPLE_RESULTS_FILE = "/tmp/lottery_triples_results.json";
@@ -23,6 +26,7 @@ const LATEST_ALERT_FILE = "/tmp/lottery_latest_alert.json";
 const ANIMAL_IMAGES_FILE = "/tmp/lottery_animal_images.json";
 const WORKSPACE_ANIMAL_IMAGES_FILE = path.join(process.cwd(), "animal_images.persisted.json");
 const GAMES_FILE = "/tmp/lottery_games.json";
+const WORKSPACE_GAMES_FILE = path.join(process.cwd(), "games.persisted.json");
 const APP_SETTINGS_FILE = "/tmp/lottery_app_settings.json";
 const WORKSPACE_APP_SETTINGS_FILE = path.join(process.cwd(), "app_settings.persisted.json");
 const TMP_CLIENT_LICENSES_FILE = "/tmp/lottery_client_licenses_v2.json";
@@ -308,38 +312,40 @@ function loadServerAnimalImages() {
   try {
     let persistedWorkspace: AnimalImage[] = [];
     let persistedTmp: AnimalImage[] = [];
-    let hadBrokenMediaRefs = false;
+    let hadRedundantOrBrokenRefs = false;
 
     if (fs.existsSync(WORKSPACE_ANIMAL_IMAGES_FILE)) {
       const parsed = JSON.parse(fs.readFileSync(WORKSPACE_ANIMAL_IMAGES_FILE, "utf-8"));
       if (Array.isArray(parsed)) {
-        hadBrokenMediaRefs = parsed.some(
+        hadRedundantOrBrokenRefs = parsed.some(
           (img: AnimalImage) =>
-            typeof img?.image_url === "string" && img.image_url.includes("/api/media?file="),
+            typeof img?.image_url === "string" && isBaseOrDefaultCatalogImageUrl(img.image_url),
         );
-        persistedWorkspace = parsed.filter(
-          (img: AnimalImage) =>
-            typeof img?.image_url === "string" && !img.image_url.includes("/api/media?file="),
-        );
+        persistedWorkspace = filterAdminCustomAnimalImages(parsed);
       }
     }
     if (fs.existsSync(ANIMAL_IMAGES_FILE)) {
       const parsed = JSON.parse(fs.readFileSync(ANIMAL_IMAGES_FILE, "utf-8"));
       if (Array.isArray(parsed)) {
-        persistedTmp = parsed.filter(
-          (img: AnimalImage) =>
-            typeof img?.image_url === "string" && !img.image_url.includes("/api/media?file="),
-        );
+        if (
+          parsed.some(
+            (img: AnimalImage) =>
+              typeof img?.image_url === "string" && isBaseOrDefaultCatalogImageUrl(img.image_url),
+          )
+        ) {
+          hadRedundantOrBrokenRefs = true;
+        }
+        persistedTmp = filterAdminCustomAnimalImages(parsed);
       }
     }
 
-    if (persistedWorkspace.length > 0 || persistedTmp.length > 0 || hadBrokenMediaRefs) {
+    if (persistedWorkspace.length > 0 || persistedTmp.length > 0 || hadRedundantOrBrokenRefs) {
       mockStore.animal_images = mergeAnimalImagesPreserveCustom(
         mockStore.animal_images,
         persistedTmp,
         persistedWorkspace,
       );
-      if (hadBrokenMediaRefs) {
+      if (hadRedundantOrBrokenRefs) {
         saveServerAnimalImages();
       }
     }
@@ -349,16 +355,14 @@ function loadServerAnimalImages() {
 }
 
 function saveServerAnimalImages() {
+  const customOnly = filterAdminCustomAnimalImages(mockStore.animal_images);
   try {
-    const customOnly = mockStore.animal_images.filter(
-      (img) => !isDefaultCatalogImageUrl(img.image_url),
-    );
     fs.writeFileSync(WORKSPACE_ANIMAL_IMAGES_FILE, JSON.stringify(customOnly, null, 2));
   } catch {
     // ignore
   }
   try {
-    fs.writeFileSync(ANIMAL_IMAGES_FILE, JSON.stringify(mockStore.animal_images));
+    fs.writeFileSync(ANIMAL_IMAGES_FILE, JSON.stringify(customOnly));
   } catch {
     // ignore
   }
@@ -366,6 +370,7 @@ function saveServerAnimalImages() {
 
 export async function syncAnimalImagesWithSupabase() {
   try {
+    await ensureCustomCatalogLoaded();
     const { data, error } = await supabaseAdmin.from("animal_images").select("*");
     if (!error && Array.isArray(data)) {
       const cloudCustom: AnimalImage[] = [];
@@ -374,7 +379,7 @@ export async function syncAnimalImagesWithSupabase() {
         const animalNumber = Number(row["animal_number"]);
         const imageUrl = String(row["image_url"] || "");
         if (!gameId || !Number.isFinite(animalNumber) || !imageUrl) continue;
-        if (isDefaultCatalogImageUrl(imageUrl)) continue;
+        if (isBaseOrDefaultCatalogImageUrl(imageUrl)) continue;
         cloudCustom.push({
           id: String(row["id"] || `img-${gameId}-${animalNumber}`),
           game_id: gameId,
@@ -391,9 +396,7 @@ export async function syncAnimalImagesWithSupabase() {
         saveServerAnimalImages();
       }
 
-      const localCustom = mockStore.animal_images.filter(
-        (img) => !isDefaultCatalogImageUrl(img.image_url),
-      );
+      const localCustom = filterAdminCustomAnimalImages(mockStore.animal_images);
       for (const item of localCustom) {
         const existsInCloud = cloudCustom.some(
           (c) =>
@@ -423,36 +426,44 @@ export async function syncAnimalImagesWithSupabase() {
 
 function loadServerGames() {
   try {
-    if (fs.existsSync(GAMES_FILE)) {
-      const data = JSON.parse(fs.readFileSync(GAMES_FILE, "utf-8"));
-      if (Array.isArray(data) && data.length > 0) {
-        for (const savedGame of data) {
-          const idx = mockStore.games.findIndex(
-            (g) => g.id === savedGame.id || g.slug === savedGame.slug,
+    let rawData: unknown = null;
+    for (const f of [WORKSPACE_GAMES_FILE, GAMES_FILE]) {
+      if (fs.existsSync(f)) {
+        try {
+          rawData = JSON.parse(fs.readFileSync(f, "utf-8"));
+          if (Array.isArray(rawData) && rawData.length > 0) break;
+        } catch {
+          // ignore
+        }
+      }
+    }
+    if (Array.isArray(rawData) && rawData.length > 0) {
+      for (const savedGame of rawData) {
+        const idx = mockStore.games.findIndex(
+          (g) => g.id === savedGame.id || g.slug === savedGame.slug,
+        );
+        if (idx >= 0) {
+          const existing = mockStore.games[idx];
+          const defaultSchedule = getDefaultGameScheduleTimes(
+            existing?.slug ?? savedGame?.slug ?? "",
           );
-          if (idx >= 0) {
-            const existing = mockStore.games[idx];
-            const defaultSchedule = getDefaultGameScheduleTimes(
-              existing?.slug ?? savedGame?.slug ?? "",
-            );
-            mockStore.games[idx] = {
-              ...existing,
-              ...savedGame,
-              schedule_times:
-                Array.isArray(savedGame.schedule_times) && savedGame.schedule_times.length > 0
-                  ? savedGame.schedule_times
-                  : (existing?.schedule_times ?? defaultSchedule),
-            };
-          } else {
-            const defaultSchedule = getDefaultGameScheduleTimes(savedGame?.slug ?? "");
-            mockStore.games.push({
-              ...savedGame,
-              schedule_times:
-                Array.isArray(savedGame.schedule_times) && savedGame.schedule_times.length > 0
-                  ? savedGame.schedule_times
-                  : defaultSchedule,
-            });
-          }
+          mockStore.games[idx] = {
+            ...existing,
+            ...savedGame,
+            schedule_times:
+              Array.isArray(savedGame.schedule_times) && savedGame.schedule_times.length > 0
+                ? savedGame.schedule_times
+                : (existing?.schedule_times ?? defaultSchedule),
+          };
+        } else {
+          const defaultSchedule = getDefaultGameScheduleTimes(savedGame?.slug ?? "");
+          mockStore.games.push({
+            ...savedGame,
+            schedule_times:
+              Array.isArray(savedGame.schedule_times) && savedGame.schedule_times.length > 0
+                ? savedGame.schedule_times
+                : defaultSchedule,
+          });
         }
       }
     }
@@ -462,6 +473,25 @@ function loadServerGames() {
         mockStore.games.push({ ...initGame });
       }
     }
+    // Clean any broken external logos (e.g. from tuazar.com) and migrate legacy La Ricachona schedule
+    let needsSave = false;
+    for (const g of mockStore.games) {
+      if (isBrokenExternalLogo(g.logo_url)) {
+        g.logo_url = getGameLogo(g, g.color);
+        needsSave = true;
+      }
+      if (
+        (g.slug === "la-ricachona" || g.id === "3b92f700-0000-4000-8000-000000000011") &&
+        Array.isArray(g.schedule_times) &&
+        g.schedule_times.every((t) => String(t).endsWith(":00"))
+      ) {
+        g.schedule_times = getDefaultGameScheduleTimes("la-ricachona");
+        needsSave = true;
+      }
+    }
+    if (needsSave) {
+      saveServerGames();
+    }
   } catch {
     // ignore
   }
@@ -469,7 +499,9 @@ function loadServerGames() {
 
 function saveServerGames() {
   try {
-    fs.writeFileSync(GAMES_FILE, JSON.stringify(mockStore.games));
+    const json = JSON.stringify(mockStore.games, null, 2);
+    fs.writeFileSync(GAMES_FILE, json);
+    fs.writeFileSync(WORKSPACE_GAMES_FILE, json);
   } catch {
     // ignore
   }
@@ -532,13 +564,17 @@ export async function syncAppSettingsWithSupabase() {
 
 loadServerResults();
 loadServerTripleResults();
-loadServerAnimalImages();
 loadServerGames();
 loadServerAppSettings();
 loadServerLicenses();
+ensureCustomCatalogLoaded()
+  .then(() => {
+    loadServerAnimalImages();
+    return syncAnimalImagesWithSupabase();
+  })
+  .catch(() => {});
 syncLicensesWithSupabase().catch(() => {});
 syncAppSettingsWithSupabase().catch(() => {});
-syncAnimalImagesWithSupabase().catch(() => {});
 
 let lastAutoSyncTimestamp = 0;
 let isAutoSyncing = false;
@@ -675,18 +711,22 @@ async function triggerBackgroundSync(forceWait = false) {
             (img.game_id === latest.game_id || (gameObj && img.game_id === gameObj.slug)) &&
             img.animal_number === canonical.number,
         );
+        const alertAnimalImageUrl =
+          exactImg?.image_url && !isBaseOrDefaultCatalogImageUrl(exactImg.image_url)
+            ? exactImg.image_url
+            : canonical.imageUrl;
         const alertPayload = {
           id: `auto-${latest.id || `${latest.game_id}-${latest.draw_date}-${latest.draw_time}`}`,
           gameId: latest.game_id,
           gameName: gameObj?.name || "Lotería",
           gameColor: gameObj?.color || "#10b981",
-          gameLogoUrl: gameObj?.logo_url,
+          gameLogoUrl: getGameLogo(gameObj || latest.game_id),
           drawDate: latest.draw_date,
           drawTime: latest.draw_time,
           animalNumber: canonical.number,
           animalLabel: canonical.label,
           animalName: canonical.name,
-          animalImageUrl: exactImg?.image_url ?? canonical.imageUrl ?? null,
+          animalImageUrl: alertAnimalImageUrl ?? null,
         };
         try {
           fs.writeFileSync(LATEST_ALERT_FILE, JSON.stringify(alertPayload));
@@ -729,14 +769,126 @@ if (typeof setInterval !== "undefined") {
   }, AUTO_SYNC_INTERVAL_MS);
 }
 
+function serveOnDemandAnimalImage(animalImageParam: string, labelParam: string): Response {
+  const colonIdx = animalImageParam.lastIndexOf(":");
+  const rawGameKey =
+    colonIdx > 0 ? animalImageParam.slice(0, colonIdx).trim() : animalImageParam.trim();
+  const rawNumStr = colonIdx > 0 ? animalImageParam.slice(colonIdx + 1).trim() : "0";
+
+  const canonical = resolveCanonicalAnimal(rawGameKey, labelParam === "00" ? "00" : rawNumStr);
+  const gameObj = mockStore.games.find((g) => g.id === rawGameKey || g.slug === rawGameKey);
+  const candidateGameIds = new Set<string>([rawGameKey]);
+  if (gameObj) {
+    candidateGameIds.add(gameObj.id);
+    candidateGameIds.add(gameObj.slug);
+  }
+
+  const isRealImagePayload = (url?: string | null): url is string =>
+    Boolean(
+      url && (url.startsWith("data:") || url.startsWith("http://") || url.startsWith("https://")),
+    );
+
+  const isBallena = canonical.label === "00";
+  let matched = mockStore.animal_images.find(
+    (img) =>
+      candidateGameIds.has(img.game_id) &&
+      img.animal_number === canonical.number &&
+      isRealImagePayload(img.image_url),
+  );
+
+  if (!matched && isBallena) {
+    matched = mockStore.animal_images.find(
+      (img) =>
+        candidateGameIds.has(img.game_id) &&
+        (img.animal_number === 37 || img.animal_number === 76 || img.animal_number === 100) &&
+        isRealImagePayload(img.image_url),
+    );
+  }
+
+  // Fallback to shared reference catalogs in server RAM if this lottery delegates its animal art
+  if (!matched) {
+    const targetNum = isBallena ? 37 : canonical.number;
+    const fallbackGameIds =
+      targetNum <= 37
+        ? [
+            "ca8a0400-0000-4000-8000-000000000006", // La Granjita (full 0..37 set)
+            "7d21a00b-0dfa-4bdc-9edf-8115802df1d6", // Lotto Activo
+            "1e40af00-0000-4000-8000-000000000008", // Lotto Activo RD
+          ]
+        : targetNum <= 76
+          ? [
+              "01da9c54-392a-45e3-ab66-9a08befe7694", // Guácharo Activo (0..76)
+              "0519825d-e7ea-4e59-bf7d-cef2c832edd3", // El Guacharito (0..100)
+              "8f3aa087-6a0c-41a1-9ed3-5f6d5ed6918e", // Lotto Rey (0..100)
+            ]
+          : [
+              "0519825d-e7ea-4e59-bf7d-cef2c832edd3", // El Guacharito (0..100)
+              "8f3aa087-6a0c-41a1-9ed3-5f6d5ed6918e", // Lotto Rey (0..100)
+            ];
+
+    for (const fbGameId of fallbackGameIds) {
+      const fbNum =
+        isBallena && fbGameId === "01da9c54-392a-45e3-ab66-9a08befe7694"
+          ? 76
+          : isBallena &&
+              (fbGameId === "0519825d-e7ea-4e59-bf7d-cef2c832edd3" ||
+                fbGameId === "8f3aa087-6a0c-41a1-9ed3-5f6d5ed6918e")
+            ? 100
+            : targetNum;
+      matched = mockStore.animal_images.find(
+        (img) =>
+          img.game_id === fbGameId &&
+          img.animal_number === fbNum &&
+          isRealImagePayload(img.image_url),
+      );
+      if (matched) break;
+    }
+  }
+
+  const imageUrl = matched?.image_url;
+  if (!imageUrl) {
+    return new Response("Not found", { status: 404 });
+  }
+
+  if (imageUrl.startsWith("data:")) {
+    const match = imageUrl.match(/^data:([^;]+);base64,(.+)$/);
+    if (match && match[1] && match[2]) {
+      const mimeType = match[1];
+      const buffer = Buffer.from(match[2], "base64");
+      return new Response(buffer, {
+        status: 200,
+        headers: {
+          "Content-Type": mimeType,
+          "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
+        },
+      });
+    }
+  }
+
+  if (imageUrl.startsWith("http://") || imageUrl.startsWith("https://")) {
+    return Response.redirect(imageUrl, 302);
+  }
+
+  return new Response("Not found", { status: 404 });
+}
+
 export const Route = createFileRoute("/api/public/results/sync")({
   server: {
     handlers: {
-      GET: async () => {
-        loadServerResults();
-        loadServerTripleResults();
+      GET: async ({ request }) => {
+        await ensureCustomCatalogLoaded();
         loadServerAnimalImages();
         loadServerGames();
+
+        const reqUrl = new URL(request.url, "http://localhost");
+        const animalImageQuery = reqUrl.searchParams.get("animalImage");
+        if (animalImageQuery) {
+          const labelParam = reqUrl.searchParams.get("label") ?? "";
+          return serveOnDemandAnimalImage(animalImageQuery, labelParam);
+        }
+
+        loadServerResults();
+        loadServerTripleResults();
         loadServerLicenses();
         loadServerAppSettings();
         const serverToday = new Intl.DateTimeFormat("en-CA", {
@@ -772,6 +924,14 @@ export const Route = createFileRoute("/api/public/results/sync")({
         try {
           if (fs.existsSync(LATEST_ALERT_FILE)) {
             latestAlert = JSON.parse(fs.readFileSync(LATEST_ALERT_FILE, "utf-8"));
+            if (
+              latestAlert &&
+              typeof latestAlert.animalImageUrl === "string" &&
+              latestAlert.animalImageUrl.startsWith("data:") &&
+              isBaseOrDefaultCatalogImageUrl(latestAlert.animalImageUrl)
+            ) {
+              latestAlert.animalImageUrl = `/api/public/results/sync?animalImage=${encodeURIComponent(latestAlert.gameId)}:${latestAlert.animalNumber}&label=${encodeURIComponent(latestAlert.animalLabel || "")}`;
+            }
           }
         } catch {
           // ignore
@@ -783,7 +943,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
           results: mockStore.results,
           tripleResults: serverTripleResults,
           latestAlert,
-          animalImages: mockStore.animal_images,
+          animalImages: filterAdminCustomAnimalImages(mockStore.animal_images),
           games: mockStore.games,
           appSettings: mockStore.app_settings[0] || null,
           requireLicense: serverLicenseState.requireLicense,
@@ -1263,6 +1423,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
           }
 
           if (Array.isArray(animalImagesBatch) && animalImagesBatch.length > 0) {
+            await ensureCustomCatalogLoaded();
             const validBatch: AnimalImage[] = animalImagesBatch
               .filter(
                 (item: unknown) =>
@@ -1272,7 +1433,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
                   typeof (item as AnimalImage).animal_number === "number" &&
                   typeof (item as AnimalImage).image_url === "string" &&
                   Boolean((item as AnimalImage).image_url.trim()) &&
-                  !isDefaultCatalogImageUrl((item as AnimalImage).image_url),
+                  !isBaseOrDefaultCatalogImageUrl((item as AnimalImage).image_url),
               )
               .map((item: AnimalImage) => ({
                 id: item.id ?? `img-${item.game_id}-${item.animal_number}`,
@@ -1348,7 +1509,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
             status: "ok",
             results: mockStore.results,
             tripleResults: serverTripleResults,
-            animalImages: mockStore.animal_images,
+            animalImages: filterAdminCustomAnimalImages(mockStore.animal_images),
             games: mockStore.games,
             appSettings: mockStore.app_settings[0] || null,
             requireLicense: serverLicenseState.requireLicense,

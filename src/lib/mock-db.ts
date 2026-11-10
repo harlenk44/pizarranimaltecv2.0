@@ -25,6 +25,13 @@ import {
   getGameScheduleTimes,
   normalizeScheduleTime,
 } from "@/lib/game-schedules";
+import {
+  loadCustomAnimalCatalog,
+  getLoadedCustomAnimalImages,
+  isEmbeddedCatalogImageUrl,
+  EMBEDDED_CUSTOM_ANIMAL_IMAGES,
+} from "@/lib/custom-animal-catalog";
+import { getGameLogo } from "@/lib/game-logos";
 
 export interface MockStore {
   games: Game[];
@@ -58,7 +65,7 @@ export const INITIAL_GAMES: Game[] = [
     name: "LOTTO ACTIVO",
     slug: "lotto-activo",
     color: "#16a34a",
-    logo_url: "https://tuazar.com/in/loteria/logo_lottoactivo.png",
+    logo_url: getGameLogo("lotto-activo", "#16a34a"),
     display_order: 1,
     is_active: true,
     loading_mode: "automatic",
@@ -70,7 +77,7 @@ export const INITIAL_GAMES: Game[] = [
     name: "GUACHARO ACTIVO",
     slug: "guacharo",
     color: "#dc2626",
-    logo_url: "https://tuazar.com/in/loteria/logo_guacharoactivo.png",
+    logo_url: getGameLogo("guacharo", "#dc2626"),
     display_order: 2,
     is_active: true,
     loading_mode: "automatic",
@@ -82,7 +89,7 @@ export const INITIAL_GAMES: Game[] = [
     name: "EL GUACHARITO MILLONARIO",
     slug: "guacharito",
     color: "#eab308",
-    logo_url: "https://tuazar.com/in/loteria/logo_elguacharitomillonario.png",
+    logo_url: getGameLogo("guacharito", "#eab308"),
     display_order: 3,
     is_active: true,
     loading_mode: "automatic",
@@ -94,7 +101,7 @@ export const INITIAL_GAMES: Game[] = [
     name: "SELVA PLUS",
     slug: "selva-plus",
     color: "#22c55e",
-    logo_url: "https://tuazar.com/in/loteria/logo_selvaplus.png",
+    logo_url: getGameLogo("selva-plus", "#22c55e"),
     display_order: 4,
     is_active: true,
     loading_mode: "automatic",
@@ -106,7 +113,7 @@ export const INITIAL_GAMES: Game[] = [
     name: "LOTO CHAIMA",
     slug: "loto-chaim-a",
     color: "#7c3aed",
-    logo_url: "https://tuazar.com/in/loteria/logo_lotochaima.png",
+    logo_url: getGameLogo("loto-chaim-a", "#7c3aed"),
     display_order: 5,
     is_active: true,
     loading_mode: "automatic",
@@ -118,7 +125,7 @@ export const INITIAL_GAMES: Game[] = [
     name: "LA GRANJITA",
     slug: "granjita",
     color: "#eab308",
-    logo_url: "https://tuazar.com/in/loteria/logo_lagranjita.png",
+    logo_url: getGameLogo("granjita", "#eab308"),
     display_order: 6,
     is_active: true,
     loading_mode: "automatic",
@@ -130,7 +137,7 @@ export const INITIAL_GAMES: Game[] = [
     name: "MONJE MILLONARIO",
     slug: "monje-millonario",
     color: "#9333ea",
-    logo_url: "https://tuazar.com/in/loteria/logo_monjemillonario.webp",
+    logo_url: getGameLogo("monje-millonario", "#9333ea"),
     display_order: 7,
     is_active: true,
     loading_mode: "automatic",
@@ -142,7 +149,7 @@ export const INITIAL_GAMES: Game[] = [
     name: "LOTTO ACTIVO RD INTERNACIONAL",
     slug: "lotto-activo-internacional",
     color: "#dc2626",
-    logo_url: "https://tuazar.com/in/loteria/logo_lottoactivordinternacional.webp",
+    logo_url: getGameLogo("lotto-activo-internacional", "#dc2626"),
     display_order: 8,
     is_active: true,
     loading_mode: "automatic",
@@ -154,7 +161,7 @@ export const INITIAL_GAMES: Game[] = [
     name: "LOTOANIMALITO",
     slug: "lotoanimalito",
     color: "#0284c7",
-    logo_url: "https://toteback.atilax.io/storage/bases/1/0.png",
+    logo_url: getGameLogo("lotoanimalito", "#0284c7"),
     display_order: 9,
     is_active: true,
     loading_mode: "automatic",
@@ -166,11 +173,23 @@ export const INITIAL_GAMES: Game[] = [
     name: "LOTTOPANTERA",
     slug: "lottopantera",
     color: "#f97316",
-    logo_url: "https://toteback.atilax.io/storage/bases/2/40.png",
+    logo_url: getGameLogo("lottopantera", "#f97316"),
     display_order: 10,
     is_active: true,
     loading_mode: "automatic",
     schedule_times: [...DEFAULT_GAME_SCHEDULES["lottopantera"]],
+    created_at: new Date().toISOString(),
+  },
+  {
+    id: "3b92f700-0000-4000-8000-000000000011",
+    name: "LA RICACHONA",
+    slug: "la-ricachona",
+    color: "#eab308",
+    logo_url: getGameLogo("la-ricachona", "#eab308"),
+    display_order: 11,
+    is_active: true,
+    loading_mode: "automatic",
+    schedule_times: [...DEFAULT_GAME_SCHEDULES["la-ricachona"]],
     created_at: new Date().toISOString(),
   },
 ];
@@ -201,8 +220,44 @@ export function isDefaultCatalogImageUrl(url?: string | null): boolean {
   return (
     url.includes("tuazar.com/in/animalitos/") ||
     url.includes("toteback.atilax.io/storage/bases/") ||
-    url.includes("/api/media?file=")
+    url.includes("/api/media?file=") ||
+    url.includes("/api/public/results/sync?animalImage=")
   );
+}
+
+/**
+ * Retorna true si la URL es una URL externa por defecto O forma parte del catálogo base
+ * embebido (`custom-animal-catalog.json`). Solo retorna false para imágenes subidas o
+ * personalizadas explícitamente por el administrador.
+ */
+export function isBaseOrDefaultCatalogImageUrl(url?: string | null): boolean {
+  if (!url) return true;
+  return isDefaultCatalogImageUrl(url) || isEmbeddedCatalogImageUrl(url);
+}
+
+/**
+ * Filtra una lista de animal_images dejando únicamente las imágenes modificadas o
+ * personalizadas por el administrador (excluyendo el catálogo base de 7.5MB y las URLs externas por defecto).
+ */
+export function filterAdminCustomAnimalImages(
+  list?: MockStore["animal_images"] | null,
+): MockStore["animal_images"] {
+  if (!Array.isArray(list)) return [];
+  return list.filter(
+    (img) =>
+      Boolean(img) &&
+      typeof img.game_id === "string" &&
+      typeof img.animal_number === "number" &&
+      typeof img.image_url === "string" &&
+      !isBaseOrDefaultCatalogImageUrl(img.image_url),
+  );
+}
+
+function getAnimalImagePriorityTier(url?: string | null): number {
+  if (!url || url.includes("/api/media?file=")) return 0;
+  if (isDefaultCatalogImageUrl(url)) return 1;
+  if (isEmbeddedCatalogImageUrl(url)) return 2;
+  return 3; // Imagen personalizada por el administrador
 }
 
 /**
@@ -258,7 +313,7 @@ export function recoverCustomAnimalImagesFromLocalStorage(): MockStore["animal_i
             item?.game_id &&
             typeof item?.animal_number === "number" &&
             item?.image_url &&
-            !isDefaultCatalogImageUrl(item.image_url)
+            !isBaseOrDefaultCatalogImageUrl(item.image_url)
           ) {
             const mapKey = `${item.game_id}:${item.animal_number}`;
             recoveredMap.set(mapKey, {
@@ -283,7 +338,7 @@ export function recoverCustomAnimalImagesFromLocalStorage(): MockStore["animal_i
             item?.game_id &&
             typeof item?.animal_number === "number" &&
             item?.image_url &&
-            !isDefaultCatalogImageUrl(item.image_url)
+            !isBaseOrDefaultCatalogImageUrl(item.image_url)
           ) {
             const mapKey = `${item.game_id}:${item.animal_number}`;
             if (!recoveredMap.has(mapKey)) {
@@ -363,10 +418,9 @@ export function mergeAnimalImagesPreserveCustom(
           image_url: item.image_url,
         });
       } else {
-        const existingIsCustom = !isDefaultCatalogImageUrl(existing.image_url);
-        const incomingIsCustom = !isDefaultCatalogImageUrl(item.image_url);
-        // Si la entrante es personalizada, o si ninguna de las dos es personalizada, actualiza
-        if (incomingIsCustom || !existingIsCustom) {
+        const existingTier = getAnimalImagePriorityTier(existing.image_url);
+        const incomingTier = getAnimalImagePriorityTier(item.image_url);
+        if (incomingTier >= existingTier) {
           map.set(key, {
             id: item.id ?? existing.id ?? `img-${item.game_id}-${item.animal_number}`,
             game_id: item.game_id,
@@ -381,10 +435,55 @@ export function mergeAnimalImagesPreserveCustom(
   return Array.from(map.values());
 }
 
+let _ensureCatalogPromise: Promise<MockStore["animal_images"]> | null = null;
+
+/**
+ * Asegura la carga diferida del catálogo de 451 imágenes bajo demanda (asíncrono)
+ * e incorpora las miniaturas a mockStore.animal_images sin bloquear el bundle principal.
+ */
+export async function ensureCustomCatalogLoaded(): Promise<MockStore["animal_images"]> {
+  if (_ensureCatalogPromise) return _ensureCatalogPromise;
+
+  _ensureCatalogPromise = (async () => {
+    try {
+      const items = await loadCustomAnimalCatalog();
+      if (items.length > 0) {
+        const mapped: MockStore["animal_images"] = items.map((item) => ({
+          id: item.id ?? `img-${item.game_id}-${item.animal_number}`,
+          game_id: item.game_id,
+          animal_number: item.animal_number,
+          image_url: item.image_url,
+        }));
+        const merged = mergeAnimalImagesPreserveCustom(mockStore.animal_images, mapped);
+        mockStore.animal_images = merged;
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("pizarra:custom-images-loaded"));
+        }
+        return merged;
+      }
+    } catch (e) {
+      console.warn("Error cargando catálogo diferido de imágenes:", e);
+    }
+    return mockStore.animal_images;
+  })();
+
+  return _ensureCatalogPromise;
+}
+
 function buildInitialImages(): MockStore["animal_images"] {
   const defaultCatalogImages = buildDefaultCatalogImagesForAllGames();
+  const loadedCustom = getLoadedCustomAnimalImages();
+  const embeddedCustom: MockStore["animal_images"] = (
+    loadedCustom.length > 0 ? loadedCustom : EMBEDDED_CUSTOM_ANIMAL_IMAGES
+  ).map((item) => ({
+    id: item.id ?? `img-${item.game_id}-${item.animal_number}`,
+    game_id: item.game_id,
+    animal_number: item.animal_number,
+    image_url: item.image_url,
+  }));
+
   if (typeof window === "undefined") {
-    return defaultCatalogImages;
+    return mergeAnimalImagesPreserveCustom(defaultCatalogImages, embeddedCustom);
   }
 
   let savedList: MockStore["animal_images"] = [];
@@ -401,13 +500,19 @@ function buildInitialImages(): MockStore["animal_images"] {
   }
 
   const recoveredCustom = recoverCustomAnimalImagesFromLocalStorage();
-  const merged = mergeAnimalImagesPreserveCustom(defaultCatalogImages, savedList, recoveredCustom);
+  const merged = mergeAnimalImagesPreserveCustom(
+    defaultCatalogImages,
+    embeddedCustom,
+    savedList,
+    recoveredCustom,
+  );
 
   try {
-    if (recoveredCustom.length > 0) {
-      localStorage.setItem("pizarra_user_custom_animal_images_v2", JSON.stringify(recoveredCustom));
+    const adminCustomOnly = filterAdminCustomAnimalImages(recoveredCustom);
+    if (adminCustomOnly.length > 0) {
+      localStorage.setItem("pizarra_user_custom_animal_images_v2", JSON.stringify(adminCustomOnly));
+      localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(adminCustomOnly));
     }
-    localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(merged));
   } catch {
     // ignore
   }
@@ -512,11 +617,15 @@ function buildInitialGames(): Game[] {
             if (savedGame) {
               const effectiveMode =
                 savedGame.loading_mode ?? savedGame.mode ?? initial.loading_mode ?? "automatic";
-              return {
+              const mergedGame = {
                 ...initial,
                 ...savedGame,
                 loading_mode: effectiveMode,
                 mode: effectiveMode,
+              };
+              return {
+                ...mergedGame,
+                schedule_times: getGameScheduleTimes(mergedGame),
               };
             }
             return initial;
@@ -1136,10 +1245,10 @@ function createMockQueryBuilder(table: string) {
       }
       if (table === "animal_images" && typeof window !== "undefined") {
         try {
-          localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(storeList));
-          const customOnly = (storeList as unknown as MockStore["animal_images"]).filter(
-            (img) => img && img.image_url && !isDefaultCatalogImageUrl(img.image_url),
+          const customOnly = filterAdminCustomAnimalImages(
+            storeList as unknown as MockStore["animal_images"],
           );
+          localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(customOnly));
           localStorage.setItem("pizarra_user_custom_animal_images_v2", JSON.stringify(customOnly));
         } catch {
           // ignore
@@ -1173,6 +1282,9 @@ function createMockQueryBuilder(table: string) {
     ): Promise<TResult1 | TResult2> {
       if (table === "results" && mockStore.results.length === 0 && typeof window !== "undefined") {
         await syncTuazarDirectly();
+      }
+      if (table === "animal_images" && typeof window === "undefined") {
+        await ensureCustomCatalogLoaded();
       }
       const storeList = ((mockStore as unknown as Record<string, unknown[]>)[table] ??=
         []) as Record<string, unknown>[];
@@ -1222,10 +1334,10 @@ function createMockQueryBuilder(table: string) {
         }
         if (table === "animal_images" && typeof window !== "undefined") {
           try {
-            localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(remaining));
-            const customOnly = (remaining as unknown as MockStore["animal_images"]).filter(
-              (img) => img && img.image_url && !isDefaultCatalogImageUrl(img.image_url),
+            const customOnly = filterAdminCustomAnimalImages(
+              remaining as unknown as MockStore["animal_images"],
             );
+            localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(customOnly));
             localStorage.setItem(
               "pizarra_user_custom_animal_images_v2",
               JSON.stringify(customOnly),

@@ -41,8 +41,17 @@ import { getResponsiveBoardGridStyle, DEFAULT_CARDS_PER_SCREEN } from "@/lib/lic
 import {
   mergeAnimalImagesPreserveCustom,
   recoverCustomAnimalImagesFromLocalStorage,
-  isDefaultCatalogImageUrl,
+  filterAdminCustomAnimalImages,
 } from "@/lib/mock-db";
+import { getGameLogo } from "@/lib/game-logos";
+import {
+  getGameNeonColor,
+  getNeonFlexCardStyle,
+  getNeonLogoRingStyle,
+  getNeonTitleStyle,
+  getNeonHeroStyle,
+  getNeonBadgeStyle,
+} from "@/lib/neon-flex";
 
 interface BoardPageProps {
   onAdminClick: () => void;
@@ -87,7 +96,7 @@ function resolveAlertWithAnimalImage(
     animalName: canonical.name,
     animalLabel: canonical.label,
     animalImageUrl: resolvedUrl,
-    gameLogoUrl: item.gameLogoUrl ?? gameObj?.logo_url ?? null,
+    gameLogoUrl: getGameLogo(gameObj || item.gameName, item.gameColor || undefined),
   };
 }
 
@@ -140,7 +149,35 @@ interface BoardWindowPage {
 export default function BoardPage({ onAdminClick }: BoardPageProps) {
   const { profile, signOut } = useAuth();
   const { settings, updateSettings, refreshSettings } = useBoardSettings();
-  const { isGameAllowed, cardsPerScreen, transitionSeconds } = useLicenseContext();
+  const { isGameAllowed, cardsPerScreen, transitionSeconds, voiceConfig, designConfig } =
+    useLicenseContext();
+
+  const effectiveSettings = useMemo(() => {
+    if (!designConfig) return settings;
+    return {
+      ...settings,
+      ...(designConfig.useCustomDesign
+        ? {
+            background_color: designConfig.background_color ?? settings.background_color,
+            surface_color: designConfig.surface_color ?? settings.surface_color,
+            primary_color: designConfig.primary_color ?? settings.primary_color,
+            text_color: designConfig.text_color ?? settings.text_color,
+            card_color: designConfig.card_color ?? settings.card_color,
+            result_row_color: designConfig.result_row_color ?? settings.result_row_color,
+            font_family: designConfig.font_family ?? settings.font_family,
+            animal_scale: designConfig.animal_scale ?? settings.animal_scale,
+            hero_card_scale: designConfig.hero_card_scale ?? settings.hero_card_scale,
+            logo_size: designConfig.logo_size ?? settings.logo_size,
+          }
+        : {}),
+      card_style: designConfig.card_style ?? settings.card_style ?? "neon",
+      game_colors: {
+        ...(settings.game_colors ?? {}),
+        ...(designConfig.game_colors ?? {}),
+      },
+    };
+  }, [settings, designConfig]);
+
   const [games, setGames] = useState<Game[]>([]);
   const [resultsMap, setResultsMap] = useState<Record<string, Result[]>>({});
   const [animalImages, setAnimalImages] = useState<AnimalImageMap>({});
@@ -182,6 +219,27 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     }
     return true;
   });
+
+  useEffect(() => {
+    if (voiceConfig) {
+      setVoiceEnabled(voiceConfig.enabled);
+      try {
+        localStorage.setItem("lottery_voice_enabled", String(voiceConfig.enabled));
+        localStorage.setItem(
+          "lottery_voice_settings",
+          JSON.stringify({
+            engine: voiceConfig.engine,
+            voiceUri: "",
+            rate: voiceConfig.rate,
+            pitch: 1.02,
+            playChime: voiceConfig.playChime,
+          }),
+        );
+      } catch {
+        // ignore
+      }
+    }
+  }, [voiceConfig]);
   const isInitialLoadRef = useRef(true);
   const prevSignaturesRef = useRef<Map<string, string>>(new Map());
   const lastAlertAnnouncedIdRef = useRef<string | null>(() => {
@@ -316,7 +374,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           }
         }
 
-        // Sync animal images into mockStore & localStorage so all TVs have them, preserving custom admin images
+        // Sync custom admin animal images into mockStore & localStorage without loading the 7.5MB base catalog in client RAM
         {
           const { mockStore } = await import("@/lib/mock-db");
           const localCustom = recoverCustomAnimalImagesFromLocalStorage();
@@ -328,14 +386,12 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
               localCustom,
             );
             mockStore.animal_images = merged;
-            const customOnly = merged.filter((img) => !isDefaultCatalogImageUrl(img.image_url));
+            const customOnly = filterAdminCustomAnimalImages(merged);
             try {
-              localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(merged));
-              if (customOnly.length > 0) {
-                localStorage.setItem(
-                  "pizarra_user_custom_animal_images_v2",
-                  JSON.stringify(customOnly),
-                );
+              const serialized = JSON.stringify(customOnly);
+              if (localStorage.getItem("pizarra_user_custom_animal_images_v2") !== serialized) {
+                localStorage.setItem("pizarra_user_custom_animal_images_v2", serialized);
+                localStorage.setItem("pizarra_custom_animal_images", serialized);
               }
             } catch {
               // ignore
@@ -548,7 +604,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
                 gameId: gameObj.id,
                 gameName: gameObj.name,
                 gameColor: gameObj.color,
-                gameLogoUrl: gameObj.logo_url,
+                gameLogoUrl: getGameLogo(gameObj),
                 drawDate: effectiveRes.draw_date,
                 drawTime: effectiveRes.draw_time,
                 animalNumber: resolvedForAlert.number,
@@ -684,7 +740,10 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         fetchAll();
       }
     };
-    window.addEventListener("storage", onStorage);
+    const onCustomImagesLoaded = () => {
+      fetchAll();
+    };
+    window.addEventListener("pizarra:custom-images-loaded", onCustomImagesLoaded);
 
     // Subscribe to Supabase Realtime changes on animal_images & animal_entries
     const realtimeChannel = supabase
@@ -700,6 +759,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     return () => {
       bc?.close();
       window.removeEventListener("storage", onStorage);
+      window.removeEventListener("pizarra:custom-images-loaded", onCustomImagesLoaded);
       supabase.removeChannel(realtimeChannel);
     };
   }, [enqueueUniqueAlert, fetchAll, scheduleHardReload, refreshSettings, updateSettings]);
@@ -763,7 +823,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           gameId: g.id,
           gameName: g.name,
           gameColor: g.color,
-          gameLogoUrl: g.logo_url,
+          gameLogoUrl: getGameLogo(g),
           drawDate: r.draw_date,
           drawTime: r.draw_time,
           animalNumber: r.animal_number,
@@ -782,7 +842,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           gameId: g.id,
           gameName: g.name,
           gameColor: g.color,
-          gameLogoUrl: g.logo_url,
+          gameLogoUrl: getGameLogo(g),
           drawDate: lotteryDate(),
           drawTime: "10:00:00",
           animalNumber: 4,
@@ -983,23 +1043,23 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     <div
       className="full-screen-board h-screen w-screen overflow-hidden flex flex-col font-sans"
       style={{
-        backgroundColor: settings.background_color || "#000000",
-        color: settings.text_color || "#ffffff",
-        fontFamily: settings.font_family || "inherit",
+        backgroundColor: effectiveSettings.background_color || "#000000",
+        color: effectiveSettings.text_color || "#ffffff",
+        fontFamily: effectiveSettings.font_family || "inherit",
       }}
     >
       {/* Header */}
       <header
         className="board-fluid-header shrink-0 flex items-center justify-between"
         style={{
-          backgroundColor: settings.surface_color || "transparent",
+          backgroundColor: effectiveSettings.surface_color || "transparent",
         }}
       >
         {/* Left Title & Window Tabs */}
         <div className="flex items-center gap-3 lg:gap-4 flex-wrap">
           <h1
             className="text-lg sm:text-xl lg:text-2xl font-black tracking-tight font-sans truncate max-w-[280px] sm:max-w-none"
-            style={{ color: settings.text_color || "#ffffff" }}
+            style={{ color: effectiveSettings.text_color || "#ffffff" }}
           >
             {currentWindow.title}
           </h1>
@@ -1179,7 +1239,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       <div className="flex-1 min-h-0 min-w-0 w-full flex flex-row overflow-hidden">
         <main
           className="board-fluid-main w-3/4 flex-1 min-h-0 min-w-0 h-full overflow-hidden"
-          style={{ backgroundColor: settings.background_color || "#000000" }}
+          style={{ backgroundColor: effectiveSettings.background_color || "#000000" }}
         >
           {currentWindow.type === "triples" ? (
             <TriplesBoard
@@ -1207,7 +1267,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
                   animalImages={animalImages}
                   animalNames={animalNames}
                   animalLabels={animalLabels}
-                  settings={settings}
+                  settings={effectiveSettings}
                   cardCount={currentWindow.animalCards?.length ?? 8}
                 />
               ))}
@@ -1283,6 +1343,12 @@ function GameCard({
   settings: ReturnType<typeof useBoardSettings>["settings"];
   cardCount?: number;
 }) {
+  const styleMode = settings.card_style ?? "neon";
+  const neonColor = getGameNeonColor(
+    game.slug || game.id || game.name,
+    game.color,
+    settings.game_colors,
+  );
   const scheduleTimes = buildFullSchedule(game, game.latest_results || []);
   const validSlots = new Set(scheduleTimes.map((t) => t.substring(0, 5).replace(/^0/, "")));
   const validResults = (game.latest_results || [])
@@ -1312,40 +1378,31 @@ function GameCard({
   return (
     <div
       className="fluid-game-card h-full w-full min-h-0 min-w-0 overflow-hidden flex flex-col justify-between"
-      style={{
-        backgroundColor: settings.card_color || "#000000",
-        borderColor: game.color,
-        boxShadow: `0 0 15px ${game.color}15`,
-      }}
+      style={getNeonFlexCardStyle(neonColor, settings.card_color || "#000000", styleMode)}
     >
       {/* Top Header */}
       <div className="fluid-card-header shrink-0">
-        {game.logo_url ? (
-          <div
-            className="rounded-full border border-slate-800 bg-slate-900 flex items-center justify-center overflow-hidden shrink-0 fluid-logo-wrapper"
-            style={{ width: "var(--display-logo)", height: "var(--display-logo)" }}
-          >
-            <img
-              src={game.logo_url}
-              alt={game.name}
-              className="w-full h-full object-contain max-h-full max-w-full p-0.5"
-            />
-          </div>
-        ) : (
-          <div
-            className="rounded-full flex items-center justify-center text-xs font-bold shrink-0 fluid-logo-wrapper"
-            style={{
-              backgroundColor: `${game.color}20`,
-              color: game.color,
-              width: "var(--display-logo)",
-              height: "var(--display-logo)",
+        <div
+          className="rounded-full bg-slate-900 flex items-center justify-center overflow-hidden shrink-0 fluid-logo-wrapper"
+          style={{
+            width: "var(--display-logo)",
+            height: "var(--display-logo)",
+            ...getNeonLogoRingStyle(neonColor, styleMode),
+          }}
+        >
+          <img
+            src={getGameLogo(game, neonColor)}
+            alt={game.name}
+            loading="lazy"
+            decoding="async"
+            onError={(e) => {
+              e.currentTarget.src = getGameLogo(game.slug || game.name, neonColor);
             }}
-          >
-            🎯
-          </div>
-        )}
+            className="w-full h-full object-contain max-h-full max-w-full p-0.5"
+          />
+        </div>
         <div className="flex-1 min-w-0">
-          <h2 className="fluid-game-title truncate" style={{ color: game.color }}>
+          <h2 className="fluid-game-title truncate" style={getNeonTitleStyle(neonColor, styleMode)}>
             {game.name}
           </h2>
           <p className="fluid-game-subtitle font-mono truncate">
@@ -1359,13 +1416,17 @@ function GameCard({
       {/* Hero Center Display (Customized by result_row_color, --display-hero-scale, --display-animal-scale and --card-avatar-scale) */}
       <div
         className="fluid-hero-banner shrink-0 min-h-0 overflow-hidden"
-        style={{
-          backgroundColor: settings.result_row_color || "rgba(15, 23, 42, 0.8)",
-        }}
+        style={getNeonHeroStyle(
+          neonColor,
+          settings.result_row_color || "rgba(15, 23, 42, 0.8)",
+          styleMode,
+        )}
       >
         <div
-          className="fluid-hero-avatar rounded-xl bg-slate-950/90 border border-slate-700/80 flex items-center justify-center shrink-0 overflow-hidden shadow-inner p-1"
+          className="fluid-hero-avatar rounded-xl bg-slate-950/90 border flex items-center justify-center shrink-0 overflow-hidden shadow-inner p-1"
           style={{
+            borderColor: `${neonColor}80`,
+            boxShadow: styleMode === "neon" ? `0 0 10px ${neonColor}33` : "none",
             width:
               "calc(clamp(2.2rem, min(5.5vh, 4vw), 4.8rem) * var(--display-animal-scale, 1) * var(--card-avatar-scale, 1))",
             height:
@@ -1386,8 +1447,8 @@ function GameCard({
 
         <div className="flex-1 text-right min-w-0 overflow-hidden">
           <div
-            className="h-1.5 w-10 sm:w-14 rounded-full ml-auto mb-1 shadow-sm"
-            style={{ backgroundColor: game.color }}
+            className="h-1.5 w-10 sm:w-14 rounded-full ml-auto mb-1"
+            style={getNeonBadgeStyle(neonColor, styleMode)}
           />
           {latestResult ? (
             <div className="truncate">
@@ -1458,7 +1519,7 @@ function GameCard({
                     )}
                     <div className="flex flex-col items-center justify-center min-w-0 leading-none">
                       <span
-                        style={{ color: game.color }}
+                        style={{ color: neonColor, textShadow: `0 0 8px ${neonColor}80` }}
                         className="fluid-cell-result font-black leading-none"
                       >
                         {displayNum}
@@ -1476,7 +1537,10 @@ function GameCard({
                   </div>
                 ) : (
                   <div className="fluid-cell-result truncate w-full">
-                    <span style={{ color: game.color }} className="font-black">
+                    <span
+                      style={{ color: neonColor, textShadow: `0 0 8px ${neonColor}80` }}
+                      className="font-black"
+                    >
                       {displayNum}
                     </span>
                   </div>

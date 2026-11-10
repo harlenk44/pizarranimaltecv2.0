@@ -6,7 +6,10 @@ import { Calendar, ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
 import AdBanner from "@/components/AdBanner";
 import AnimalMedia from "@/components/AnimalMedia";
 import { useBoardSettings } from "@/context/BoardSettingsContext";
+import { useLicenseContext } from "@/components/LicenseGate";
 import { lotteryDate } from "@/lib/lottery-date";
+import { getGameNeonColor, getNeonLogoRingStyle, getNeonTitleStyle } from "@/lib/neon-flex";
+import { getGameLogo } from "@/lib/game-logos";
 
 type AnimalImageMap = Record<string, string>;
 type AnimalNameMap = Record<string, string>;
@@ -57,6 +60,15 @@ export default function WeeklyBoard({ onClose }: WeeklyBoardProps) {
   const [loading, setLoading] = useState(true);
   const [weekStart, setWeekStart] = useState<Date>(currentLotteryWeek);
   const { settings } = useBoardSettings();
+  const { designConfig } = useLicenseContext();
+  const styleMode = designConfig?.card_style ?? settings.card_style ?? "neon";
+  const mergedGameColors = useMemo(
+    () => ({
+      ...(settings.game_colors ?? {}),
+      ...(designConfig?.game_colors ?? {}),
+    }),
+    [settings.game_colors, designConfig?.game_colors],
+  );
 
   const weekDays = useMemo(
     () => Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)),
@@ -226,50 +238,73 @@ export default function WeeklyBoard({ onClose }: WeeklyBoardProps) {
                   })}
                 </div>
 
-                {games.map((game, gameIdx) => (
-                  <div
-                    key={game.id}
-                    className={`display-week-grid ${gameIdx < games.length - 1 ? "border-b border-slate-800" : ""}`}
-                  >
+                {games.map((game, gameIdx) => {
+                  const neonColor = getGameNeonColor(
+                    game.slug || game.id || game.name,
+                    game.color,
+                    mergedGameColors,
+                  );
+                  return (
                     <div
-                      className="px-3 py-2 border-r border-slate-700 flex items-center gap-2 min-h-[112px]"
-                      style={{ borderLeft: `4px solid ${game.color}` }}
+                      key={game.id}
+                      className={`display-week-grid ${gameIdx < games.length - 1 ? "border-b border-slate-800" : ""}`}
                     >
-                      <div className="min-w-0">
-                        {game.logo_url && (
-                          <img
-                            src={game.logo_url}
-                            alt={`Logo ${game.name}`}
-                            className="display-logo mb-2"
-                          />
-                        )}
-                        <div
-                          className="display-game-title font-black uppercase leading-tight"
-                          style={{ color: game.color }}
-                        >
-                          {game.name}
-                        </div>
-                        <div className="text-[9px] text-slate-600 uppercase tracking-wider mt-1">
-                          Resultados
+                      <div
+                        className="px-3 py-2 border-r border-slate-700 flex items-center gap-2 min-h-[112px]"
+                        style={{
+                          borderLeft: `4px solid ${neonColor}`,
+                          boxShadow:
+                            styleMode === "neon" ? `inset 4px 0 14px ${neonColor}33` : "none",
+                        }}
+                      >
+                        <div className="min-w-0">
+                          <div
+                            className="display-logo mb-2 rounded-full overflow-hidden p-0.5 bg-slate-950/80 shrink-0"
+                            style={getNeonLogoRingStyle(neonColor, styleMode)}
+                          >
+                            <img
+                              src={getGameLogo(game, neonColor)}
+                              alt={`Logo ${game.name}`}
+                              loading="lazy"
+                              decoding="async"
+                              onError={(e) => {
+                                e.currentTarget.src = getGameLogo(
+                                  game.slug || game.name,
+                                  neonColor,
+                                );
+                              }}
+                              className="w-full h-full object-contain"
+                            />
+                          </div>
+                          <div
+                            className="display-game-title font-black uppercase leading-tight"
+                            style={getNeonTitleStyle(neonColor, styleMode)}
+                          >
+                            {game.name}
+                          </div>
+                          <div className="text-[9px] text-slate-500 uppercase tracking-wider mt-1">
+                            Resultados
+                          </div>
                         </div>
                       </div>
+                      {weekDays.map((day) => {
+                        const dayISO = dateToISO(day);
+                        return (
+                          <WeeklyGridCell
+                            key={`${game.id}-${dayISO}`}
+                            game={game}
+                            neonColor={neonColor}
+                            dayResults={resultsByGameDay[`${game.id}|${dayISO}`] ?? []}
+                            animalImages={animalImages}
+                            animalNames={animalNames}
+                            animalLabels={animalLabels}
+                            isToday={dayISO === lotteryDate()}
+                          />
+                        );
+                      })}
                     </div>
-                    {weekDays.map((day) => {
-                      const dayISO = dateToISO(day);
-                      return (
-                        <WeeklyGridCell
-                          key={`${game.id}-${dayISO}`}
-                          game={game}
-                          dayResults={resultsByGameDay[`${game.id}|${dayISO}`] ?? []}
-                          animalImages={animalImages}
-                          animalNames={animalNames}
-                          animalLabels={animalLabels}
-                          isToday={dayISO === lotteryDate()}
-                        />
-                      );
-                    })}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           </div>
@@ -281,6 +316,7 @@ export default function WeeklyBoard({ onClose }: WeeklyBoardProps) {
 
 function WeeklyGridCell({
   game,
+  neonColor,
   dayResults,
   animalImages,
   animalNames,
@@ -288,6 +324,7 @@ function WeeklyGridCell({
   isToday,
 }: {
   game: Game;
+  neonColor: string;
   dayResults: Result[];
   animalImages: AnimalImageMap;
   animalNames: AnimalNameMap;
@@ -322,7 +359,12 @@ function WeeklyGridCell({
                     emojiClassName="display-animal-emoji"
                   />
                 </div>
-                <span className="display-number font-black tabular-nums">{displayLabel}</span>
+                <span
+                  className="display-number font-black tabular-nums"
+                  style={{ color: neonColor, textShadow: `0 0 6px ${neonColor}80` }}
+                >
+                  {displayLabel}
+                </span>
                 <span className="display-name font-bold">{displayName}</span>
               </div>
             );

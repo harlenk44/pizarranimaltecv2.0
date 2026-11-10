@@ -1,6 +1,6 @@
 {
   "id": "global",
-  "background_color": "#123456",
+  "background_color": "#000000",
   "surface_color": "#0f172a",
   "primary_color": "#2563eb",
   "text_color": "#f8fafc",
@@ -15,5 +15,7 @@
   "font_size_scale": 100,
   "hero_card_scale": 100,
   "animal_scale": 100,
-  "updated_at": "2026-11-07T03:25:18.647Z"
+  "card_style": "neon",
+  "game_colors": {},
+  "updated_at": "2026-11-10T14:40:14.904Z"
 }

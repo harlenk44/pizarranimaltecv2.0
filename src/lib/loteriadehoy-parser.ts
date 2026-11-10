@@ -32,6 +32,7 @@ export const LOTERIADEHOY_GAME_MAPPINGS: Readonly<
     className: "lottoactivordint",
     title: "LOTTO ACTIVO RD INTERNACIONAL",
   },
+  "la-ricachona": { className: "laricachona", title: "LA RICACHONA" },
 };
 
 export function classifyLoteriaDeHoyGame(identifier: string): string | null {
@@ -72,7 +73,11 @@ export function classifyLoteriaDeHoyGame(identifier: string): string | null {
   if (clean.includes("chaima")) {
     return "loto-chaim-a";
   }
-  // 8. Standard Lotto Activo (only if not monje and not rd/internacional)
+  // 8. La Ricachona
+  if (clean.includes("ricachona")) {
+    return "la-ricachona";
+  }
+  // 9. Standard Lotto Activo (only if not monje and not rd/internacional)
   if (clean === "lottoactivo" || clean === "lottoactivo1" || clean.startsWith("lottoactivo")) {
     return "lotto-activo";
   }

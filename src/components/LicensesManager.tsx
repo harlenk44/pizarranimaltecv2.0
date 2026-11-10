@@ -21,6 +21,9 @@ import {
   CheckSquare,
   Square,
   X,
+  Volume2,
+  VolumeX,
+  Sparkles,
 } from "lucide-react";
 import type { ClientLicense } from "@/lib/types";
 import LicenseGate from "@/components/LicenseGate";
@@ -34,7 +37,10 @@ import {
   PRODUCTS_PER_SCREEN_OPTIONS,
   DEFAULT_TRANSITION_SECONDS,
   TRANSITION_SECONDS_OPTIONS,
+  DEFAULT_CLIENT_VOICE_CONFIG,
   type CardsPerScreenOption,
+  type ClientVoiceConfig,
+  type ClientDesignConfig,
 } from "@/lib/license-lotteries";
 
 function generateRandomPin(): string {
@@ -83,8 +89,12 @@ export default function LicensesManager() {
   const [formTransitionSeconds, setFormTransitionSeconds] = useState<number>(
     DEFAULT_TRANSITION_SECONDS,
   );
+  const [formVoiceConfig, setFormVoiceConfig] = useState<ClientVoiceConfig>(
+    DEFAULT_CLIENT_VOICE_CONFIG,
+  );
+  const [formCardStyle, setFormCardStyle] = useState<"global" | "neon" | "solid">("global");
 
-  // Edit lotteries & cards per screen modal state
+  // Edit lotteries, voice & design modal state
   const [editingLicense, setEditingLicense] = useState<ClientLicense | null>(null);
   const [editingLotteries, setEditingLotteries] = useState<string[]>([]);
   const [editingCardsPerScreen, setEditingCardsPerScreen] =
@@ -92,6 +102,10 @@ export default function LicensesManager() {
   const [editingTransitionSeconds, setEditingTransitionSeconds] = useState<number>(
     DEFAULT_TRANSITION_SECONDS,
   );
+  const [editingVoiceConfig, setEditingVoiceConfig] = useState<ClientVoiceConfig>(
+    DEFAULT_CLIENT_VOICE_CONFIG,
+  );
+  const [editingDesignConfig, setEditingDesignConfig] = useState<ClientDesignConfig>({});
 
   // Copy feedback
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -283,9 +297,8 @@ export default function LicensesManager() {
   };
 
   const handleOpenEditLotteries = (lic: ClientLicense) => {
-    const { allowedLotteries, cardsPerScreen, transitionSeconds } = parseClientLicenseName(
-      lic.client_name,
-    );
+    const { allowedLotteries, cardsPerScreen, transitionSeconds, voiceConfig, designConfig } =
+      parseClientLicenseName(lic.client_name);
     setEditingLicense(lic);
     setEditingLotteries(
       allowedLotteries && allowedLotteries.length > 0
@@ -294,6 +307,8 @@ export default function LicensesManager() {
     );
     setEditingCardsPerScreen(cardsPerScreen ?? DEFAULT_CARDS_PER_SCREEN);
     setEditingTransitionSeconds(transitionSeconds ?? DEFAULT_TRANSITION_SECONDS);
+    setEditingVoiceConfig(voiceConfig ?? DEFAULT_CLIENT_VOICE_CONFIG);
+    setEditingDesignConfig(designConfig ?? {});
   };
 
   const handleSaveEditLotteries = async () => {
@@ -305,16 +320,19 @@ export default function LicensesManager() {
       ALL_AVAILABLE_LOTTERIES.length,
       editingCardsPerScreen,
       editingTransitionSeconds,
+      editingVoiceConfig,
+      editingDesignConfig,
     );
     const cardsLabel =
       editingCardsPerScreen === "TODAS" ? "Todas" : `${editingCardsPerScreen} por pantalla`;
+    const voiceLabel = editingVoiceConfig.enabled ? "Voz Activa" : "Voz Silenciada";
     await runLicenseAction(
       {
         type: "update_lotteries",
         id: editingLicense.id,
         client_name: packedName,
       },
-      `Configuración actualizada para ${cleanName} (${editingLotteries.length}/${ALL_AVAILABLE_LOTTERIES.length} loterías · ${cardsLabel} · ${editingTransitionSeconds}s rotación)`,
+      `Configuración actualizada para ${cleanName} (${editingLotteries.length}/${ALL_AVAILABLE_LOTTERIES.length} loterías · ${cardsLabel} · ${voiceLabel})`,
     );
     setEditingLicense(null);
   };
@@ -323,15 +341,16 @@ export default function LicensesManager() {
     lic: ClientLicense,
     newCards: CardsPerScreenOption,
   ) => {
-    const { cleanName, allowedLotteries, transitionSeconds } = parseClientLicenseName(
-      lic.client_name,
-    );
+    const { cleanName, allowedLotteries, transitionSeconds, voiceConfig, designConfig } =
+      parseClientLicenseName(lic.client_name);
     const packedName = formatClientLicenseName(
       cleanName,
       allowedLotteries,
       ALL_AVAILABLE_LOTTERIES.length,
       newCards,
       transitionSeconds,
+      voiceConfig,
+      designConfig,
     );
     const cardsLabel = newCards === "TODAS" ? "Todas" : `${newCards} productos por pantalla`;
     await runLicenseAction(
@@ -345,13 +364,16 @@ export default function LicensesManager() {
   };
 
   const handleQuickChangeTransitionSeconds = async (lic: ClientLicense, newSeconds: number) => {
-    const { cleanName, allowedLotteries, cardsPerScreen } = parseClientLicenseName(lic.client_name);
+    const { cleanName, allowedLotteries, cardsPerScreen, voiceConfig, designConfig } =
+      parseClientLicenseName(lic.client_name);
     const packedName = formatClientLicenseName(
       cleanName,
       allowedLotteries,
       ALL_AVAILABLE_LOTTERIES.length,
       cardsPerScreen,
       newSeconds,
+      voiceConfig,
+      designConfig,
     );
     await runLicenseAction(
       {
@@ -363,11 +385,46 @@ export default function LicensesManager() {
     );
   };
 
+  const handleQuickToggleVoice = async (lic: ClientLicense) => {
+    const {
+      cleanName,
+      allowedLotteries,
+      cardsPerScreen,
+      transitionSeconds,
+      voiceConfig,
+      designConfig,
+    } = parseClientLicenseName(lic.client_name);
+    const nextVoice: ClientVoiceConfig = {
+      ...(voiceConfig ?? DEFAULT_CLIENT_VOICE_CONFIG),
+      enabled: !(voiceConfig?.enabled ?? true),
+    };
+    const packedName = formatClientLicenseName(
+      cleanName,
+      allowedLotteries,
+      ALL_AVAILABLE_LOTTERIES.length,
+      cardsPerScreen,
+      transitionSeconds,
+      nextVoice,
+      designConfig,
+    );
+    await runLicenseAction(
+      {
+        type: "update_lotteries",
+        id: lic.id,
+        client_name: packedName,
+      },
+      `${cleanName}: locución de voz ${nextVoice.enabled ? "ACTIVADA" : "DESACTIVADA"}`,
+    );
+  };
+
   const handleCreateLicense = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!clientName.trim()) return;
     const days =
       durationDays === "unlimited" ? null : Math.max(1, Math.min(30, Number(durationDays) || 30));
+
+    const initialDesign: ClientDesignConfig | null =
+      formCardStyle === "global" ? null : { card_style: formCardStyle };
 
     const packedName = formatClientLicenseName(
       clientName.trim(),
@@ -375,6 +432,8 @@ export default function LicensesManager() {
       ALL_AVAILABLE_LOTTERIES.length,
       formCardsPerScreen,
       formTransitionSeconds,
+      formVoiceConfig,
+      initialDesign,
     );
 
     const cardsLabel =
@@ -398,6 +457,8 @@ export default function LicensesManager() {
     setFormLotteries(ALL_AVAILABLE_LOTTERIES.map((l) => l.id));
     setFormCardsPerScreen(DEFAULT_CARDS_PER_SCREEN);
     setFormTransitionSeconds(DEFAULT_TRANSITION_SECONDS);
+    setFormVoiceConfig(DEFAULT_CLIENT_VOICE_CONFIG);
+    setFormCardStyle("global");
     setShowForm(false);
   };
 
@@ -777,6 +838,99 @@ export default function LicensesManager() {
             </div>
           </div>
 
+          {/* Control de Voz y Estilo Visual para el Nuevo Cliente */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-4 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  {formVoiceConfig.enabled ? (
+                    <Volume2 className="w-4 h-4 text-emerald-400" />
+                  ) : (
+                    <VolumeX className="w-4 h-4 text-red-400" />
+                  )}
+                  <span className="text-xs font-bold text-white uppercase tracking-wider">
+                    Control de Voz por Usuario (PIN)
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setFormVoiceConfig((prev) => ({ ...prev, enabled: !prev.enabled }))
+                  }
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition cursor-pointer ${
+                    formVoiceConfig.enabled
+                      ? "bg-emerald-950/70 border-emerald-600/60 text-emerald-300"
+                      : "bg-red-950/60 border-red-700/60 text-red-300"
+                  }`}
+                >
+                  {formVoiceConfig.enabled ? "Locución: ACTIVA" : "Locución: DESACTIVADA"}
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <select
+                  value={formVoiceConfig.engine}
+                  onChange={(e) =>
+                    setFormVoiceConfig((prev) => ({
+                      ...prev,
+                      engine: e.target.value as ClientVoiceConfig["engine"],
+                    }))
+                  }
+                  className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-emerald-500"
+                >
+                  <option value="agency_voice">Voz Agencia (Repetición)</option>
+                  <option value="online_hd">Voz HD Corta de Radio</option>
+                  <option value="browser">Voz Nativa Smart TV</option>
+                </select>
+                <select
+                  value={String(formVoiceConfig.rate)}
+                  onChange={(e) =>
+                    setFormVoiceConfig((prev) => ({
+                      ...prev,
+                      rate: Number(e.target.value) || 0.98,
+                    }))
+                  }
+                  className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs font-mono text-emerald-300 focus:outline-none focus:border-emerald-500"
+                >
+                  <option value="0.9">Velocidad 0.90x (Pausada)</option>
+                  <option value="0.98">Velocidad 0.98x (Normal)</option>
+                  <option value="1.05">Velocidad 1.05x (Ágil)</option>
+                  <option value="1.15">Velocidad 1.15x (Rápida)</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-4 space-y-2.5">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-amber-400" />
+                <span className="text-xs font-bold text-white uppercase tracking-wider">
+                  Acabado Visual de Tarjetas (Neón vs. Sólido)
+                </span>
+              </div>
+              <div className="grid grid-cols-3 gap-1.5">
+                {(
+                  [
+                    { id: "global", label: "🌐 Global" },
+                    { id: "neon", label: "⚡ Estilo Neón" },
+                    { id: "solid", label: "🎨 Estilo Normal" },
+                  ] as const
+                ).map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => setFormCardStyle(item.id)}
+                    className={`py-2 px-2 rounded-lg text-xs font-bold border transition cursor-pointer ${
+                      formCardStyle === item.id
+                        ? "bg-blue-600/30 border-blue-400 text-white"
+                        : "bg-slate-900 border-slate-800 text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
           {/* Loterías Permitidas Selector */}
           <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-4 space-y-3">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800/80 pb-2.5">
@@ -979,13 +1133,21 @@ export default function LicensesManager() {
                     ? lic.bound_device_ids.length
                     : 0;
 
-                  const { cleanName, allowedLotteries, cardsPerScreen, transitionSeconds } =
-                    parseClientLicenseName(lic.client_name);
+                  const {
+                    cleanName,
+                    allowedLotteries,
+                    cardsPerScreen,
+                    transitionSeconds,
+                    voiceConfig,
+                    designConfig,
+                  } = parseClientLicenseName(lic.client_name);
                   const isAll =
                     !allowedLotteries || allowedLotteries.length >= ALL_AVAILABLE_LOTTERIES.length;
                   const totalAllowedCount = allowedLotteries
                     ? allowedLotteries.length
                     : ALL_AVAILABLE_LOTTERIES.length;
+                  const isVoiceOn = voiceConfig?.enabled ?? true;
+                  const customCardStyle = designConfig?.card_style;
 
                   return (
                     <tr key={lic.id} className="hover:bg-slate-800/30 transition">
@@ -1068,6 +1230,33 @@ export default function LicensesManager() {
                               ))}
                             </select>
                           </div>
+
+                          {/* Botón rápido de Voz por Usuario */}
+                          <button
+                            type="button"
+                            disabled={saving}
+                            onClick={() => handleQuickToggleVoice(lic)}
+                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold border transition cursor-pointer ${
+                              isVoiceOn
+                                ? "bg-emerald-950/50 text-emerald-300 border-emerald-700/50 hover:bg-emerald-900/50"
+                                : "bg-red-950/50 text-red-300 border-red-700/50 hover:bg-red-900/50"
+                            }`}
+                            title="Activar o desactivar la locución de voz para este cliente"
+                          >
+                            {isVoiceOn ? (
+                              <Volume2 className="w-3 h-3 text-emerald-400" />
+                            ) : (
+                              <VolumeX className="w-3 h-3 text-red-400" />
+                            )}
+                            <span>{isVoiceOn ? "Voz ON" : "Voz OFF"}</span>
+                          </button>
+
+                          {customCardStyle && (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold border bg-amber-950/50 text-amber-300 border-amber-700/50">
+                              <Sparkles className="w-3 h-3 text-amber-400" />
+                              {customCardStyle === "neon" ? "Estilo Neón" : "Estilo Normal"}
+                            </span>
+                          )}
 
                           <button
                             type="button"
@@ -1419,6 +1608,116 @@ export default function LicensesManager() {
                     </button>
                   );
                 })}
+              </div>
+            </div>
+
+            {/* Control de Voz y Estilo de Tarjeta por Usuario en el Modal */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    {editingVoiceConfig.enabled ? (
+                      <Volume2 className="w-4 h-4 text-emerald-400" />
+                    ) : (
+                      <VolumeX className="w-4 h-4 text-red-400" />
+                    )}
+                    <span className="text-xs font-bold text-white uppercase tracking-wider">
+                      Voz de Sorteos (PIN)
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setEditingVoiceConfig((prev) => ({
+                        ...prev,
+                        enabled: !prev.enabled,
+                      }))
+                    }
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition cursor-pointer ${
+                      editingVoiceConfig.enabled
+                        ? "bg-emerald-600/20 border-emerald-500 text-emerald-300"
+                        : "bg-red-950/60 border-red-700 text-red-300"
+                    }`}
+                  >
+                    {editingVoiceConfig.enabled ? "🔊 Activa" : "🔇 Silenciada"}
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <select
+                    value={editingVoiceConfig.engine}
+                    onChange={(e) =>
+                      setEditingVoiceConfig((prev) => ({
+                        ...prev,
+                        engine: e.target.value as ClientVoiceConfig["engine"],
+                      }))
+                    }
+                    className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none focus:border-emerald-500"
+                  >
+                    <option value="agency_voice">Voz Agencia</option>
+                    <option value="online_hd">Voz HD Corta</option>
+                    <option value="browser">Voz Nativa TV</option>
+                  </select>
+                  <select
+                    value={String(editingVoiceConfig.rate)}
+                    onChange={(e) =>
+                      setEditingVoiceConfig((prev) => ({
+                        ...prev,
+                        rate: Number(e.target.value) || 0.98,
+                      }))
+                    }
+                    className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-xs font-mono text-emerald-300 focus:outline-none focus:border-emerald-500"
+                  >
+                    <option value="0.9">0.90x (Pausada)</option>
+                    <option value="0.98">0.98x (Normal)</option>
+                    <option value="1.05">1.05x (Ágil)</option>
+                    <option value="1.15">1.15x (Rápida)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3.5 space-y-2.5">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-amber-400" />
+                  <span className="text-xs font-bold text-white uppercase tracking-wider">
+                    Estilo de Tarjeta (Neón vs. Sólido)
+                  </span>
+                </div>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {(
+                    [
+                      { id: undefined, label: "🌐 Global" },
+                      { id: "neon", label: "⚡ Neón" },
+                      { id: "solid", label: "🎨 Normal" },
+                    ] as const
+                  ).map((opt) => {
+                    const active = editingDesignConfig.card_style === opt.id;
+                    return (
+                      <button
+                        key={String(opt.id ?? "global")}
+                        type="button"
+                        onClick={() =>
+                          setEditingDesignConfig((prev) => {
+                            const next = { ...prev };
+                            if (!opt.id) {
+                              delete next.card_style;
+                            } else {
+                              next.card_style = opt.id;
+                            }
+                            return next;
+                          })
+                        }
+                        className={`py-1.5 px-2 rounded-lg text-xs font-bold border transition cursor-pointer ${
+                          active
+                            ? "bg-amber-600/30 border-amber-400 text-white"
+                            : "bg-slate-900 border-slate-800 text-slate-400 hover:text-white"
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             </div>
 

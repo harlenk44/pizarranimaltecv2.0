@@ -21,6 +21,8 @@ interface AnimalMediaProps {
   number: number;
   className?: string;
   emojiClassName?: string;
+  loading?: "lazy" | "eager";
+  decoding?: "async" | "sync" | "auto";
 }
 
 export default function AnimalMedia({
@@ -29,6 +31,8 @@ export default function AnimalMedia({
   number,
   className = "w-full h-full object-contain",
   emojiClassName = "text-2xl",
+  loading = "lazy",
+  decoding = "async",
 }: AnimalMediaProps) {
   const [hasError, setHasError] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -89,5 +93,14 @@ export default function AnimalMedia({
     );
   }
 
-  return <img src={mediaUrl} alt={name} onError={() => setHasError(true)} className={className} />;
+  return (
+    <img
+      src={mediaUrl}
+      alt={name}
+      loading={loading}
+      decoding={decoding}
+      onError={() => setHasError(true)}
+      className={className}
+    />
+  );
 }

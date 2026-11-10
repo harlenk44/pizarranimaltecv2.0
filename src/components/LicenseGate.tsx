@@ -16,6 +16,8 @@ import {
   DEFAULT_CARDS_PER_SCREEN,
   DEFAULT_TRANSITION_SECONDS,
   type CardsPerScreenOption,
+  type ClientVoiceConfig,
+  type ClientDesignConfig,
 } from "@/lib/license-lotteries";
 
 export interface LicenseContextValue {
@@ -24,6 +26,8 @@ export interface LicenseContextValue {
   allowedLotteries: string[] | null;
   cardsPerScreen: CardsPerScreenOption;
   transitionSeconds: number;
+  voiceConfig: ClientVoiceConfig | null;
+  designConfig: ClientDesignConfig | null;
   isGameAllowed: (gameIdOrSlug?: string | null) => boolean;
 }
 
@@ -33,6 +37,8 @@ export const LicenseContext = createContext<LicenseContextValue>({
   allowedLotteries: null,
   cardsPerScreen: DEFAULT_CARDS_PER_SCREEN,
   transitionSeconds: DEFAULT_TRANSITION_SECONDS,
+  voiceConfig: null,
+  designConfig: null,
   isGameAllowed: () => true,
 });
 
@@ -59,6 +65,60 @@ export function getOrCreateDeviceId(): string {
   }
 }
 
+/**
+ * Detects if the current instance is executing strictly within a development or
+ * AI Studio sandbox preview environment.
+ *
+ * Strict security constraints:
+ * - Native Android TV APKs, WebViews, Capacitor, or Cordova apps will ALWAYS return false.
+ * - Packaged local files (file://) will ALWAYS return false.
+ * - Custom production domains or client premises will ALWAYS return false.
+ * - Only local development (localhost, 127.0.0.1) or official cloud preview hostnames return true.
+ */
+function isDevelopmentPreviewEnvironment(): boolean {
+  if (typeof window === "undefined") return false;
+
+  // 1. Strict APK and native container rejection
+  const win = window as unknown as {
+    Android?: unknown;
+    Capacitor?: unknown;
+    cordova?: unknown;
+  };
+  if (win.Android || win.Capacitor || win.cordova) return false;
+  if (window.location.protocol === "file:") return false;
+
+  const ua = window.navigator?.userAgent || "";
+  // Exclude embedded WebViews used in native agency TV APKs
+  if (/\bwv\b/i.test(ua) || /Android.*Version\/[0-9]/i.test(ua)) {
+    return false;
+  }
+
+  // 2. Localhost and development hostnames
+  const hostname = window.location.hostname.toLowerCase();
+  const isLocalDev =
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "0.0.0.0" ||
+    hostname.endsWith(".local");
+
+  // 3. AI Studio preview cloud runner hostnames
+  const isAiStudioSandbox =
+    hostname.includes(".run.app") ||
+    hostname.includes(".googleusercontent.com") ||
+    hostname.includes("aistudio") ||
+    hostname.includes("webcontainer");
+
+  if (isLocalDev || (import.meta.env.DEV && isLocalDev)) {
+    return true;
+  }
+
+  if (isAiStudioSandbox) {
+    return true;
+  }
+
+  return false;
+}
+
 interface LicenseGateProps {
   children: ReactNode;
   isAdmin: boolean;
@@ -78,7 +138,20 @@ export default function LicenseGate({
   const [activatedPin, setActivatedPin] = useState<string>(() => {
     if (typeof window === "undefined") return "";
     try {
-      return localStorage.getItem(ACTIVATED_PIN_STORAGE_KEY) || "";
+      const saved = localStorage.getItem(ACTIVATED_PIN_STORAGE_KEY) || "";
+      if (saved) return saved;
+
+      // In development or preview sandbox, auto-apply the master PIN so the preview loads directly
+      if (isDevelopmentPreviewEnvironment()) {
+        try {
+          localStorage.setItem(ACTIVATED_PIN_STORAGE_KEY, "291007");
+        } catch {
+          // ignore storage error
+        }
+        return "291007";
+      }
+
+      return "";
     } catch {
       return "";
     }
@@ -146,7 +219,24 @@ export default function LicenseGate({
   useEffect(() => {
     syncLicenseState();
     const timer = setInterval(syncLicenseState, 10000);
-    return () => clearInterval(timer);
+    let bc: BroadcastChannel | null = null;
+    try {
+      bc = new BroadcastChannel("pizarra_lottery_channel");
+      bc.onmessage = (event) => {
+        if (
+          event.data?.type === "LICENSES_UPDATED" ||
+          event.data?.type === "APP_SETTINGS_UPDATED"
+        ) {
+          syncLicenseState();
+        }
+      };
+    } catch {
+      // ignore
+    }
+    return () => {
+      clearInterval(timer);
+      bc?.close();
+    };
   }, [syncLicenseState]);
 
   // Listen for custom event when user clicks "Licencia" button on the board header to open PIN screen
@@ -195,6 +285,8 @@ export default function LicenseGate({
     parsedLicenseInfo?.cardsPerScreen ?? DEFAULT_CARDS_PER_SCREEN;
   const transitionSeconds: number =
     parsedLicenseInfo?.transitionSeconds ?? DEFAULT_TRANSITION_SECONDS;
+  const voiceConfig = parsedLicenseInfo?.voiceConfig ?? null;
+  const designConfig = parsedLicenseInfo?.designConfig ?? null;
 
   const isGameAllowed = useCallback(
     (gameIdOrSlug?: string | null) => {
@@ -209,6 +301,8 @@ export default function LicenseGate({
     allowedLotteries,
     cardsPerScreen,
     transitionSeconds,
+    voiceConfig,
+    designConfig,
     isGameAllowed,
   };
 

@@ -495,7 +495,13 @@ export default function AdsStudioManager() {
                 {mediaType === "video" ? (
                   <video src={imageUrl} className="w-full h-36 object-cover" muted controls />
                 ) : (
-                  <img src={imageUrl} alt="Vista previa" className="w-full h-36 object-cover" />
+                  <img
+                    src={imageUrl}
+                    alt="Vista previa"
+                    loading="lazy"
+                    decoding="async"
+                    className="w-full h-36 object-cover"
+                  />
                 )}
                 <button
                   type="button"
@@ -601,7 +607,13 @@ export default function AdsStudioManager() {
                   {ad.media_type === "video" ? (
                     <video src={ad.image_url} className="w-full h-full object-cover" muted />
                   ) : (
-                    <img src={ad.image_url} alt={ad.title} className="w-full h-full object-cover" />
+                    <img
+                      src={ad.image_url}
+                      alt={ad.title}
+                      loading="lazy"
+                      decoding="async"
+                      className="w-full h-full object-cover"
+                    />
                   )}
                 </div>
 

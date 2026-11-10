@@ -101,7 +101,7 @@ describe("Multiloterias Integration and Catalog", () => {
     const defaultImg = resolveCanonicalAnimal("granjita", 12, "Caballo");
     expect(defaultImg.name).toBe("Caballo");
     expect(defaultImg.label).toBe("12");
-    expect(defaultImg.imageUrl).toBe("https://tuazar.com/in/animalitos/la_granjita/12.png");
+    expect(defaultImg.imageUrl).toBe("/api/public/results/sync?animalImage=granjita:12&label=12");
 
     const customMap = { "granjita:12": "/custom/caballo.png" };
     const customImg = resolveCanonicalAnimal("granjita", 12, "Caballo", customMap);

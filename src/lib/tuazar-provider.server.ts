@@ -39,6 +39,7 @@ export const TUAZAR_GAME_NAMES: Readonly<Record<string, string>> = {
   granjita: "LA GRANJITA",
   "monje-millonario": "MONJE MILLONARIO",
   "lotto-activo-internacional": "LOTTO ACTIVO RD INTERNACIONAL",
+  "la-ricachona": "LA RICACHONA",
 };
 
 let ldhSnapshot: { at: number; page: Promise<LoteriaDeHoyPage> } | null = null;
@@ -128,6 +129,11 @@ export function createTuazarProvider(tuazarGameName: string, gameSlug?: string):
       const catalogEntries = entries ?? [];
       const scheduledTimes = getGameScheduleTimes(targetSlug ?? game.slug);
       const validScheduleSet = new Set(scheduledTimes.map((t) => normalizeScheduleTime(t) ?? t));
+      if (targetSlug === "la-ricachona" || game.slug === "la-ricachona") {
+        for (const t of getGameScheduleTimes("la-ricachona")) {
+          validScheduleSet.add(normalizeScheduleTime(t) ?? t);
+        }
+      }
 
       // 2. Primary Source: LoteriaDeHoy (faster updates, structured HTML)
       if (ldhMeta) {

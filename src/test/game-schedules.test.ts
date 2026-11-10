@@ -62,4 +62,34 @@ describe("game-schedules helper", () => {
     expect(normalizeScheduleTime("09:30:00")).toBe("09:30");
     expect(normalizeScheduleTime("invalid")).toBeNull();
   });
+
+  it("provides correct official draw times for La Ricachona (:10 minutes) and migrates legacy :00 schedules", () => {
+    const times = getDefaultGameScheduleTimes("la-ricachona");
+    expect(times).toEqual([
+      "08:10",
+      "09:10",
+      "10:10",
+      "11:10",
+      "12:10",
+      "13:10",
+      "14:10",
+      "15:10",
+      "16:10",
+      "17:10",
+      "18:10",
+      "19:10",
+    ]);
+
+    const legacyRicachona: Game = {
+      id: "3b92f700-0000-4000-8000-000000000011",
+      name: "LA RICACHONA",
+      slug: "la-ricachona",
+      color: "#eab308",
+      display_order: 11,
+      is_active: true,
+      schedule_times: ["08:00", "09:00", "10:00"],
+      created_at: new Date().toISOString(),
+    };
+    expect(getGameScheduleTimes(legacyRicachona)).toEqual(DEFAULT_GAME_SCHEDULES["la-ricachona"]);
+  });
 });

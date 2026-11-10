@@ -90,16 +90,93 @@ export function normalizeTransitionSeconds(raw: unknown): number {
   return DEFAULT_TRANSITION_SECONDS;
 }
 
+export interface ClientVoiceConfig {
+  enabled: boolean;
+  engine: "agency_voice" | "online_hd" | "browser";
+  rate: number;
+  playChime: boolean;
+}
+
+export const DEFAULT_CLIENT_VOICE_CONFIG: ClientVoiceConfig = {
+  enabled: true,
+  engine: "agency_voice",
+  rate: 0.98,
+  playChime: true,
+};
+
+export interface ClientDesignConfig {
+  useCustomDesign?: boolean;
+  card_style?: "neon" | "solid";
+  background_color?: string;
+  surface_color?: string;
+  primary_color?: string;
+  text_color?: string;
+  card_color?: string;
+  result_row_color?: string;
+  font_family?: string;
+  animal_scale?: number;
+  hero_card_scale?: number;
+  logo_size?: number;
+  game_colors?: Record<string, string>;
+}
+
+function sanitizeVoiceConfig(raw: unknown): ClientVoiceConfig | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  const engineRaw = obj.engine;
+  const engine: ClientVoiceConfig["engine"] =
+    engineRaw === "browser" || engineRaw === "online_hd" || engineRaw === "agency_voice"
+      ? engineRaw
+      : "agency_voice";
+  return {
+    enabled: typeof obj.enabled === "boolean" ? obj.enabled : true,
+    engine,
+    rate: typeof obj.rate === "number" ? Math.max(0.7, Math.min(1.3, obj.rate)) : 0.98,
+    playChime: typeof obj.playChime === "boolean" ? obj.playChime : true,
+  };
+}
+
+function sanitizeDesignConfig(raw: unknown): ClientDesignConfig | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  const cardStyle: "neon" | "solid" = obj.card_style === "solid" ? "solid" : "neon";
+  const gameColorsRaw = obj.game_colors;
+  const gameColors: Record<string, string> = {};
+  if (gameColorsRaw && typeof gameColorsRaw === "object" && !Array.isArray(gameColorsRaw)) {
+    for (const [k, v] of Object.entries(gameColorsRaw as Record<string, unknown>)) {
+      if (typeof v === "string" && v.trim()) {
+        gameColors[k] = v.trim();
+      }
+    }
+  }
+  return {
+    useCustomDesign: Boolean(obj.useCustomDesign),
+    card_style: cardStyle,
+    background_color: typeof obj.background_color === "string" ? obj.background_color : undefined,
+    surface_color: typeof obj.surface_color === "string" ? obj.surface_color : undefined,
+    primary_color: typeof obj.primary_color === "string" ? obj.primary_color : undefined,
+    text_color: typeof obj.text_color === "string" ? obj.text_color : undefined,
+    card_color: typeof obj.card_color === "string" ? obj.card_color : undefined,
+    result_row_color: typeof obj.result_row_color === "string" ? obj.result_row_color : undefined,
+    font_family: typeof obj.font_family === "string" ? obj.font_family : undefined,
+    animal_scale: typeof obj.animal_scale === "number" ? obj.animal_scale : undefined,
+    hero_card_scale: typeof obj.hero_card_scale === "number" ? obj.hero_card_scale : undefined,
+    logo_size: typeof obj.logo_size === "number" ? obj.logo_size : undefined,
+    game_colors: Object.keys(gameColors).length > 0 ? gameColors : undefined,
+  };
+}
+
 /**
- * Parses client_name to extract clean display name, allowed lotteries array, cardsPerScreen, and transitionSeconds.
- * If rawName has no "||" delimiter, allowedLotteries is null (unrestricted access to all lotteries),
- * cardsPerScreen defaults to 8, and transitionSeconds defaults to 25.
+ * Parses client_name to extract clean display name, allowed lotteries array, cardsPerScreen,
+ * transitionSeconds, voiceConfig, and designConfig.
  */
 export function parseClientLicenseName(rawName?: string | null): {
   cleanName: string;
   allowedLotteries: string[] | null;
   cardsPerScreen: CardsPerScreenOption;
   transitionSeconds: number;
+  voiceConfig: ClientVoiceConfig | null;
+  designConfig: ClientDesignConfig | null;
 } {
   if (!rawName) {
     return {
@@ -107,6 +184,8 @@ export function parseClientLicenseName(rawName?: string | null): {
       allowedLotteries: null,
       cardsPerScreen: DEFAULT_CARDS_PER_SCREEN,
       transitionSeconds: DEFAULT_TRANSITION_SECONDS,
+      voiceConfig: null,
+      designConfig: null,
     };
   }
 
@@ -117,6 +196,8 @@ export function parseClientLicenseName(rawName?: string | null): {
       allowedLotteries: null,
       cardsPerScreen: DEFAULT_CARDS_PER_SCREEN,
       transitionSeconds: DEFAULT_TRANSITION_SECONDS,
+      voiceConfig: null,
+      designConfig: null,
     };
   }
 
@@ -130,6 +211,8 @@ export function parseClientLicenseName(rawName?: string | null): {
       allowedLotteries: null,
       cardsPerScreen: DEFAULT_CARDS_PER_SCREEN,
       transitionSeconds: DEFAULT_TRANSITION_SECONDS,
+      voiceConfig: null,
+      designConfig: null,
     };
   }
 
@@ -142,6 +225,8 @@ export function parseClientLicenseName(rawName?: string | null): {
         allowedLotteries: sanitized.length > 0 ? sanitized : null,
         cardsPerScreen: DEFAULT_CARDS_PER_SCREEN,
         transitionSeconds: DEFAULT_TRANSITION_SECONDS,
+        voiceConfig: null,
+        designConfig: null,
       };
     }
 
@@ -163,11 +248,16 @@ export function parseClientLicenseName(rawName?: string | null): {
         obj.tiempoTransicion ?? obj.transitionSeconds ?? DEFAULT_TRANSITION_SECONDS,
       );
 
+      const voiceConfig = sanitizeVoiceConfig(obj.voz ?? obj.voiceConfig ?? null);
+      const designConfig = sanitizeDesignConfig(obj.diseno ?? obj.designConfig ?? null);
+
       return {
         cleanName,
         allowedLotteries,
         cardsPerScreen,
         transitionSeconds,
+        voiceConfig,
+        designConfig,
       };
     }
   } catch {
@@ -183,6 +273,8 @@ export function parseClientLicenseName(rawName?: string | null): {
         allowedLotteries: items,
         cardsPerScreen: DEFAULT_CARDS_PER_SCREEN,
         transitionSeconds: DEFAULT_TRANSITION_SECONDS,
+        voiceConfig: null,
+        designConfig: null,
       };
     }
   }
@@ -192,12 +284,14 @@ export function parseClientLicenseName(rawName?: string | null): {
     allowedLotteries: null,
     cardsPerScreen: DEFAULT_CARDS_PER_SCREEN,
     transitionSeconds: DEFAULT_TRANSITION_SECONDS,
+    voiceConfig: null,
+    designConfig: null,
   };
 }
 
 /**
- * Formats clean client name with selected allowed lotteries, cardsPerScreen, and transitionSeconds.
- * Preserves 100% backward compatibility with existing licenses when cardsPerScreen is 8 and transition is 25s.
+ * Formats clean client name with selected allowed lotteries, cardsPerScreen, transitionSeconds,
+ * voiceConfig, and designConfig.
  */
 export function formatClientLicenseName(
   cleanName: string,
@@ -205,6 +299,8 @@ export function formatClientLicenseName(
   totalAvailableCount?: number,
   cardsPerScreen: CardsPerScreenOption = DEFAULT_CARDS_PER_SCREEN,
   transitionSeconds: number = DEFAULT_TRANSITION_SECONDS,
+  voiceConfig?: ClientVoiceConfig | null,
+  designConfig?: ClientDesignConfig | null,
 ): string {
   const name = cleanName.trim() || "Cliente";
   const normalizedCards = normalizeCardsPerScreen(cardsPerScreen);
@@ -214,9 +310,19 @@ export function formatClientLicenseName(
     allowedLotteries.length === 0 ||
     Boolean(totalAvailableCount && allowedLotteries.length >= totalAvailableCount);
 
+  const hasCustomVoice = Boolean(voiceConfig);
+  const hasCustomDesign = Boolean(
+    designConfig &&
+    (designConfig.useCustomDesign ||
+      designConfig.card_style === "solid" ||
+      (designConfig.game_colors && Object.keys(designConfig.game_colors).length > 0)),
+  );
+
   if (
     normalizedCards === DEFAULT_CARDS_PER_SCREEN &&
-    normalizedTransition === DEFAULT_TRANSITION_SECONDS
+    normalizedTransition === DEFAULT_TRANSITION_SECONDS &&
+    !hasCustomVoice &&
+    !hasCustomDesign
   ) {
     if (isAllLotteries) {
       return name;
@@ -224,11 +330,20 @@ export function formatClientLicenseName(
     return `${name}||${JSON.stringify(allowedLotteries)}`;
   }
 
-  return `${name}||${JSON.stringify({
+  const payloadObj: Record<string, unknown> = {
     loterias: isAllLotteries ? "TODAS" : allowedLotteries,
     tarjetasPorPantalla: normalizedCards,
     tiempoTransicion: normalizedTransition,
-  })}`;
+  };
+
+  if (voiceConfig) {
+    payloadObj.voz = voiceConfig;
+  }
+  if (designConfig && hasCustomDesign) {
+    payloadObj.diseno = designConfig;
+  }
+
+  return `${name}||${JSON.stringify(payloadObj)}`;
 }
 
 /**

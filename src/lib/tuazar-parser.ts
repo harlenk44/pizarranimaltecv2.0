@@ -73,6 +73,7 @@ export function normalizeName(input: string): string {
   if (norm === "HORMIGUERO") return "OSO HORMIGUERO";
   if (norm === "PAVOREAL") return "PAVO REAL";
   if (norm === "PUERCO ESPIN") return "PUERCOESPIN";
+  if (norm === "RICACHONA") return "LA RICACHONA";
   return norm;
 }
 
