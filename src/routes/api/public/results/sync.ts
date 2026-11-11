@@ -18,7 +18,7 @@ import fs from "fs";
 import path from "path";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { resolveCanonicalAnimal, parseCanonicalAnimalNumber } from "@/lib/official-animals";
-import { getGameLogo, isBrokenExternalLogo } from "@/lib/game-logos";
+import { getGameLogo, isBrokenExternalLogo, isCustomUploadedGameLogo } from "@/lib/game-logos";
 
 const RESULTS_FILE = "/tmp/lottery_results.json";
 const TRIPLE_RESULTS_FILE = "/tmp/lottery_triples_results.json";
@@ -27,12 +27,23 @@ const ANIMAL_IMAGES_FILE = "/tmp/lottery_animal_images.json";
 const WORKSPACE_ANIMAL_IMAGES_FILE = path.join(process.cwd(), "animal_images.persisted.json");
 const GAMES_FILE = "/tmp/lottery_games.json";
 const WORKSPACE_GAMES_FILE = path.join(process.cwd(), "games.persisted.json");
+const GAME_LOGOS_FILE = "/tmp/lottery_game_logos.json";
+const WORKSPACE_GAME_LOGOS_FILE = path.join(process.cwd(), "game_logos.persisted.json");
 const APP_SETTINGS_FILE = "/tmp/lottery_app_settings.json";
 const WORKSPACE_APP_SETTINGS_FILE = path.join(process.cwd(), "app_settings.persisted.json");
 const TMP_CLIENT_LICENSES_FILE = "/tmp/lottery_client_licenses_v2.json";
 const WORKSPACE_CLIENT_LICENSES_FILE = path.join(process.cwd(), "client_licenses.persisted.json");
 
 let serverTripleResults: TripleResult[] = [];
+const serverCustomGameLogos: Record<string, string> = {};
+let serverCustomGameLogosVersion = 1;
+let serverGamesVersion = 1;
+let serverAnimalImagesVersion = 1;
+let serverAppSettingsVersion = 1;
+let serverLicensesVersion = 1;
+let serverLatestAlert: Record<string, unknown> | null = null;
+let serverDataInitialized = false;
+let initialAutoSyncDone = false;
 
 function loadServerTripleResults() {
   try {
@@ -155,6 +166,7 @@ function loadServerLicenses() {
 
 function saveServerLicenses() {
   try {
+    serverLicensesVersion++;
     const serialized = JSON.stringify(serverLicenseState, null, 2);
     // Persist to workspace project file so it survives container restarts
     fs.writeFileSync(WORKSPACE_CLIENT_LICENSES_FILE, serialized);
@@ -355,6 +367,7 @@ function loadServerAnimalImages() {
 }
 
 function saveServerAnimalImages() {
+  serverAnimalImagesVersion++;
   const customOnly = filterAdminCustomAnimalImages(mockStore.animal_images);
   try {
     fs.writeFileSync(WORKSPACE_ANIMAL_IMAGES_FILE, JSON.stringify(customOnly, null, 2));
@@ -424,8 +437,43 @@ export async function syncAnimalImagesWithSupabase() {
   }
 }
 
+function loadServerGameLogos() {
+  try {
+    for (const f of [WORKSPACE_GAME_LOGOS_FILE, GAME_LOGOS_FILE]) {
+      if (fs.existsSync(f)) {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(f, "utf-8"));
+          if (parsed && typeof parsed === "object") {
+            for (const [k, v] of Object.entries(parsed)) {
+              if (typeof v === "string" && isCustomUploadedGameLogo(v)) {
+                serverCustomGameLogos[k.trim().toLowerCase()] = v;
+              }
+            }
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function saveServerGameLogos() {
+  try {
+    serverCustomGameLogosVersion++;
+    const json = JSON.stringify(serverCustomGameLogos, null, 2);
+    fs.writeFileSync(WORKSPACE_GAME_LOGOS_FILE, json);
+    fs.writeFileSync(GAME_LOGOS_FILE, json);
+  } catch {
+    // ignore
+  }
+}
+
 function loadServerGames() {
   try {
+    loadServerGameLogos();
     let rawData: unknown = null;
     for (const f of [WORKSPACE_GAMES_FILE, GAMES_FILE]) {
       if (fs.existsSync(f)) {
@@ -437,8 +485,22 @@ function loadServerGames() {
         }
       }
     }
+    let logosUpdated = false;
     if (Array.isArray(rawData) && rawData.length > 0) {
       for (const savedGame of rawData) {
+        if (savedGame && isCustomUploadedGameLogo(savedGame.logo_url)) {
+          const idKey = savedGame.id ? String(savedGame.id).trim().toLowerCase() : "";
+          const slugKey = savedGame.slug ? String(savedGame.slug).trim().toLowerCase() : "";
+          if (idKey && serverCustomGameLogos[idKey] !== savedGame.logo_url) {
+            serverCustomGameLogos[idKey] = savedGame.logo_url;
+            logosUpdated = true;
+          }
+          if (slugKey && serverCustomGameLogos[slugKey] !== savedGame.logo_url) {
+            serverCustomGameLogos[slugKey] = savedGame.logo_url;
+            logosUpdated = true;
+          }
+        }
+
         const idx = mockStore.games.findIndex(
           (g) => g.id === savedGame.id || g.slug === savedGame.slug,
         );
@@ -447,9 +509,16 @@ function loadServerGames() {
           const defaultSchedule = getDefaultGameScheduleTimes(
             existing?.slug ?? savedGame?.slug ?? "",
           );
+          const preservedLogo = isCustomUploadedGameLogo(savedGame.logo_url)
+            ? savedGame.logo_url
+            : isCustomUploadedGameLogo(existing?.logo_url)
+              ? existing!.logo_url
+              : (savedGame.logo_url ?? existing?.logo_url ?? null);
+
           mockStore.games[idx] = {
             ...existing,
             ...savedGame,
+            logo_url: preservedLogo,
             schedule_times:
               Array.isArray(savedGame.schedule_times) && savedGame.schedule_times.length > 0
                 ? savedGame.schedule_times
@@ -467,16 +536,27 @@ function loadServerGames() {
         }
       }
     }
+    if (logosUpdated) {
+      saveServerGameLogos();
+    }
     // Ensure all catalog games from INITIAL_GAMES are present
     for (const initGame of INITIAL_GAMES) {
       if (!mockStore.games.some((g) => g.id === initGame.id || g.slug === initGame.slug)) {
         mockStore.games.push({ ...initGame });
       }
     }
-    // Clean any broken external logos (e.g. from tuazar.com) and migrate legacy La Ricachona schedule
+    // Apply custom game logos from serverCustomGameLogos, clean broken external logos, and migrate legacy La Ricachona schedule
     let needsSave = false;
     for (const g of mockStore.games) {
-      if (isBrokenExternalLogo(g.logo_url)) {
+      const idKey = (g.id || "").trim().toLowerCase();
+      const slugKey = (g.slug || "").trim().toLowerCase();
+      const customLogo = serverCustomGameLogos[idKey] || serverCustomGameLogos[slugKey];
+      if (customLogo && isCustomUploadedGameLogo(customLogo)) {
+        if (g.logo_url !== customLogo) {
+          g.logo_url = customLogo;
+          needsSave = true;
+        }
+      } else if (isBrokenExternalLogo(g.logo_url)) {
         g.logo_url = getGameLogo(g, g.color);
         needsSave = true;
       }
@@ -499,9 +579,52 @@ function loadServerGames() {
 
 function saveServerGames() {
   try {
+    serverGamesVersion++;
+    for (const g of mockStore.games) {
+      if (isCustomUploadedGameLogo(g.logo_url)) {
+        if (g.id) serverCustomGameLogos[g.id.trim().toLowerCase()] = g.logo_url;
+        if (g.slug) serverCustomGameLogos[g.slug.trim().toLowerCase()] = g.logo_url;
+      }
+    }
+    saveServerGameLogos();
     const json = JSON.stringify(mockStore.games, null, 2);
     fs.writeFileSync(GAMES_FILE, json);
     fs.writeFileSync(WORKSPACE_GAMES_FILE, json);
+  } catch {
+    // ignore
+  }
+}
+
+export async function syncGamesWithSupabase() {
+  try {
+    loadServerGames();
+    const { data, error } = await supabaseAdmin.from("games").select("*");
+    if (!error && Array.isArray(data)) {
+      let changed = false;
+      for (const row of data as Array<Record<string, unknown>>) {
+        const id = String(row["id"] || "").trim();
+        const slug = String(row["slug"] || "").trim();
+        const logoUrl = typeof row["logo_url"] === "string" ? row["logo_url"] : null;
+        if (logoUrl && isCustomUploadedGameLogo(logoUrl)) {
+          if (id && serverCustomGameLogos[id.toLowerCase()] !== logoUrl) {
+            serverCustomGameLogos[id.toLowerCase()] = logoUrl;
+            changed = true;
+          }
+          if (slug && serverCustomGameLogos[slug.toLowerCase()] !== logoUrl) {
+            serverCustomGameLogos[slug.toLowerCase()] = logoUrl;
+            changed = true;
+          }
+          const gameObj = mockStore.games.find((g) => g.id === id || g.slug === slug);
+          if (gameObj && gameObj.logo_url !== logoUrl) {
+            gameObj.logo_url = logoUrl;
+            changed = true;
+          }
+        }
+      }
+      if (changed) {
+        saveServerGames();
+      }
+    }
   } catch {
     // ignore
   }
@@ -530,6 +653,7 @@ function loadServerAppSettings() {
 
 function saveServerAppSettings() {
   try {
+    serverAppSettingsVersion++;
     const current = mockStore.app_settings[0] || { id: "global" };
     const serialized = JSON.stringify(current, null, 2);
     fs.writeFileSync(WORKSPACE_APP_SETTINGS_FILE, serialized);
@@ -537,6 +661,25 @@ function saveServerAppSettings() {
   } catch {
     // ignore
   }
+}
+
+export function ensureServerDataInitialized() {
+  if (serverDataInitialized) return;
+  loadServerAnimalImages();
+  loadServerGameLogos();
+  loadServerGames();
+  loadServerResults();
+  loadServerTripleResults();
+  loadServerLicenses();
+  loadServerAppSettings();
+  try {
+    if (fs.existsSync(LATEST_ALERT_FILE)) {
+      serverLatestAlert = JSON.parse(fs.readFileSync(LATEST_ALERT_FILE, "utf-8"));
+    }
+  } catch {
+    // ignore
+  }
+  serverDataInitialized = true;
 }
 
 export async function syncAppSettingsWithSupabase() {
@@ -575,6 +718,7 @@ ensureCustomCatalogLoaded()
   .catch(() => {});
 syncLicensesWithSupabase().catch(() => {});
 syncAppSettingsWithSupabase().catch(() => {});
+syncGamesWithSupabase().catch(() => {});
 
 let lastAutoSyncTimestamp = 0;
 let isAutoSyncing = false;
@@ -876,9 +1020,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
   server: {
     handlers: {
       GET: async ({ request }) => {
-        await ensureCustomCatalogLoaded();
-        loadServerAnimalImages();
-        loadServerGames();
+        ensureServerDataInitialized();
 
         const reqUrl = new URL(request.url, "http://localhost");
         const animalImageQuery = reqUrl.searchParams.get("animalImage");
@@ -887,10 +1029,12 @@ export const Route = createFileRoute("/api/public/results/sync")({
           return serveOnDemandAnimalImage(animalImageQuery, labelParam);
         }
 
-        loadServerResults();
-        loadServerTripleResults();
-        loadServerLicenses();
-        loadServerAppSettings();
+        const clientLogosVer = reqUrl.searchParams.get("logosVersion");
+        const clientGamesVer = reqUrl.searchParams.get("gamesVersion");
+        const clientImagesVer = reqUrl.searchParams.get("imagesVersion");
+        const clientSettingsVer = reqUrl.searchParams.get("settingsVersion");
+        const isPoll = reqUrl.searchParams.get("poll") === "1" || clientGamesVer !== null;
+
         const serverToday = new Intl.DateTimeFormat("en-CA", {
           timeZone: "America/Caracas",
           year: "numeric",
@@ -898,44 +1042,46 @@ export const Route = createFileRoute("/api/public/results/sync")({
           day: "2-digit",
         }).format(new Date());
 
-        const monjeGame = mockStore.games.find((g) => g.slug === "monje-millonario");
-        const monjeCount = monjeGame
-          ? mockStore.results.filter(
-              (r) => r.game_id === monjeGame.id && r.draw_date === serverToday,
-            ).length
-          : 0;
         const todayResultsCount = mockStore.results.filter(
           (r) => r.draw_date === serverToday,
         ).length;
 
-        const needsImmediateSync =
-          todayResultsCount === 0 ||
-          serverTripleResults.length === 0 ||
-          (monjeGame && monjeCount < 6);
-
-        if (needsImmediateSync) {
-          await triggerBackgroundSync(true);
-        } else {
-          // Asynchronous continuous sync in background
-          triggerBackgroundSync(false).catch(() => {});
+        // Only trigger initial background sync once on server boot if results for today are empty
+        if (!initialAutoSyncDone && (todayResultsCount === 0 || serverTripleResults.length === 0)) {
+          initialAutoSyncDone = true;
+          triggerBackgroundSync(true).catch(() => {});
         }
 
-        let latestAlert = null;
-        try {
-          if (fs.existsSync(LATEST_ALERT_FILE)) {
-            latestAlert = JSON.parse(fs.readFileSync(LATEST_ALERT_FILE, "utf-8"));
-            if (
-              latestAlert &&
-              typeof latestAlert.animalImageUrl === "string" &&
-              latestAlert.animalImageUrl.startsWith("data:") &&
-              isBaseOrDefaultCatalogImageUrl(latestAlert.animalImageUrl)
-            ) {
-              latestAlert.animalImageUrl = `/api/public/results/sync?animalImage=${encodeURIComponent(latestAlert.gameId)}:${latestAlert.animalNumber}&label=${encodeURIComponent(latestAlert.animalLabel || "")}`;
+        let latestAlert = serverLatestAlert;
+        if (!latestAlert) {
+          try {
+            if (fs.existsSync(LATEST_ALERT_FILE)) {
+              latestAlert = JSON.parse(fs.readFileSync(LATEST_ALERT_FILE, "utf-8"));
+              serverLatestAlert = latestAlert;
             }
+          } catch {
+            // ignore
           }
-        } catch {
-          // ignore
         }
+        if (
+          latestAlert &&
+          typeof latestAlert.animalImageUrl === "string" &&
+          latestAlert.animalImageUrl.startsWith("data:") &&
+          isBaseOrDefaultCatalogImageUrl(latestAlert.animalImageUrl)
+        ) {
+          latestAlert = {
+            ...latestAlert,
+            animalImageUrl: `/api/public/results/sync?animalImage=${encodeURIComponent(String(latestAlert.gameId))}:${latestAlert.animalNumber}&label=${encodeURIComponent(String(latestAlert.animalLabel || ""))}`,
+          };
+        }
+
+        const shouldSendLogos =
+          !clientLogosVer || clientLogosVer !== String(serverCustomGameLogosVersion);
+        const shouldSendGames = !clientGamesVer || clientGamesVer !== String(serverGamesVersion);
+        const shouldSendImages =
+          !clientImagesVer || clientImagesVer !== String(serverAnimalImagesVersion);
+        const shouldSendSettings =
+          !clientSettingsVer || clientSettingsVer !== String(serverAppSettingsVersion);
 
         return Response.json({
           status: "ok",
@@ -943,13 +1089,20 @@ export const Route = createFileRoute("/api/public/results/sync")({
           results: mockStore.results,
           tripleResults: serverTripleResults,
           latestAlert,
-          animalImages: filterAdminCustomAnimalImages(mockStore.animal_images),
-          games: mockStore.games,
-          appSettings: mockStore.app_settings[0] || null,
+          logosVersion: serverCustomGameLogosVersion,
+          gamesVersion: serverGamesVersion,
+          imagesVersion: serverAnimalImagesVersion,
+          settingsVersion: serverAppSettingsVersion,
+          animalImages: shouldSendImages
+            ? filterAdminCustomAnimalImages(mockStore.animal_images)
+            : null,
+          games: shouldSendGames ? mockStore.games : null,
+          customGameLogos: shouldSendLogos ? serverCustomGameLogos : null,
+          appSettings: shouldSendSettings ? mockStore.app_settings[0] || null : null,
           requireLicense: serverLicenseState.requireLicense,
-          clientLicenses: serverLicenseState.licenses,
-          deletedIds: serverLicenseState.deletedIds || [],
-          deletedPins: serverLicenseState.deletedPins || [],
+          clientLicenses: isPoll ? null : serverLicenseState.licenses,
+          deletedIds: isPoll ? null : serverLicenseState.deletedIds || [],
+          deletedPins: isPoll ? null : serverLicenseState.deletedPins || [],
         });
       },
       POST: async ({ request }) => {
@@ -991,6 +1144,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
       },
       PUT: async ({ request }) => {
         try {
+          loadServerGames();
           loadServerLicenses();
           loadServerTripleResults();
           loadServerAnimalImages();
@@ -1005,6 +1159,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
             animalImagesBatch,
             deleteAnimalImage,
             gameUpdate,
+            customGameLogosBatch,
             licenseAction,
             appSettings,
           } = body;
@@ -1369,9 +1524,20 @@ export const Route = createFileRoute("/api/public/results/sync")({
           }
 
           if (gameUpdate) {
-            const { id, loading_mode, mode, schedule_times, color, name, is_active, logo_url } =
-              gameUpdate;
-            const targetGame = mockStore.games.find((g) => g.id === id);
+            const {
+              id,
+              slug,
+              loading_mode,
+              mode,
+              schedule_times,
+              color,
+              name,
+              is_active,
+              logo_url,
+            } = gameUpdate;
+            const targetGame = mockStore.games.find(
+              (g) => g.id === id || (slug && g.slug === slug),
+            );
             if (targetGame) {
               if (mode !== undefined || loading_mode !== undefined) {
                 const effectiveMode = (mode ?? loading_mode ?? "automatic") as
@@ -1385,7 +1551,66 @@ export const Route = createFileRoute("/api/public/results/sync")({
               if (color !== undefined) targetGame.color = color;
               if (name !== undefined) targetGame.name = name;
               if (is_active !== undefined) targetGame.is_active = is_active;
-              if (logo_url !== undefined) targetGame.logo_url = logo_url;
+              if (logo_url !== undefined) {
+                const idKey = targetGame.id.trim().toLowerCase();
+                const slugKey = (targetGame.slug || "").trim().toLowerCase();
+                if (logo_url && isCustomUploadedGameLogo(logo_url)) {
+                  serverCustomGameLogos[idKey] = logo_url;
+                  if (slugKey) serverCustomGameLogos[slugKey] = logo_url;
+                  targetGame.logo_url = logo_url;
+                } else {
+                  delete serverCustomGameLogos[idKey];
+                  if (slugKey) delete serverCustomGameLogos[slugKey];
+                  targetGame.logo_url = getGameLogo(
+                    {
+                      id: targetGame.id,
+                      slug: targetGame.slug,
+                      name: targetGame.name,
+                      color: targetGame.color,
+                    },
+                    targetGame.color,
+                  );
+                }
+              }
+              saveServerGames();
+              try {
+                await supabaseAdmin
+                  .from("games")
+                  .update({
+                    ...(color !== undefined ? { color: targetGame.color } : {}),
+                    ...(name !== undefined ? { name: targetGame.name } : {}),
+                    ...(is_active !== undefined ? { is_active: targetGame.is_active } : {}),
+                    ...(logo_url !== undefined ? { logo_url: targetGame.logo_url } : {}),
+                  })
+                  .eq("id", targetGame.id);
+              } catch {
+                // ignore
+              }
+            }
+          }
+
+          if (customGameLogosBatch && typeof customGameLogosBatch === "object") {
+            let anyLogoAdded = false;
+            for (const [k, v] of Object.entries(customGameLogosBatch as Record<string, unknown>)) {
+              const cleanKey = k.trim().toLowerCase();
+              if (cleanKey && typeof v === "string" && isCustomUploadedGameLogo(v)) {
+                if (serverCustomGameLogos[cleanKey] !== v) {
+                  serverCustomGameLogos[cleanKey] = v;
+                  anyLogoAdded = true;
+                }
+                const targetGame = mockStore.games.find(
+                  (g) =>
+                    g.id.toLowerCase() === cleanKey ||
+                    g.slug.toLowerCase() === cleanKey ||
+                    g.name.toLowerCase() === cleanKey,
+                );
+                if (targetGame && targetGame.logo_url !== v) {
+                  targetGame.logo_url = v;
+                  anyLogoAdded = true;
+                }
+              }
+            }
+            if (anyLogoAdded) {
               saveServerGames();
             }
           }
@@ -1498,6 +1723,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
           }
 
           if (alert) {
+            serverLatestAlert = alert as Record<string, unknown>;
             try {
               fs.writeFileSync(LATEST_ALERT_FILE, JSON.stringify(alert));
             } catch {
@@ -1511,6 +1737,11 @@ export const Route = createFileRoute("/api/public/results/sync")({
             tripleResults: serverTripleResults,
             animalImages: filterAdminCustomAnimalImages(mockStore.animal_images),
             games: mockStore.games,
+            customGameLogos: serverCustomGameLogos,
+            logosVersion: serverCustomGameLogosVersion,
+            gamesVersion: serverGamesVersion,
+            imagesVersion: serverAnimalImagesVersion,
+            settingsVersion: serverAppSettingsVersion,
             appSettings: mockStore.app_settings[0] || null,
             requireLicense: serverLicenseState.requireLicense,
             clientLicenses: serverLicenseState.licenses,

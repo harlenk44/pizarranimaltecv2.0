@@ -22,7 +22,13 @@ import AdsStudioManager from "@/components/AdsStudioManager";
 import { deleteAdFromStore } from "@/lib/ads-service";
 import TriplesAdminManager from "@/components/TriplesAdminManager";
 import { CLASSIC_COLOR_PALETTE, NEON_COLOR_PALETTE } from "@/lib/neon-flex";
-import { getGameLogo } from "@/lib/game-logos";
+import {
+  getGameLogo,
+  saveCustomGameLogo,
+  mergeCustomGameLogosMap,
+  getCustomGameLogosMap,
+  isCustomUploadedGameLogo,
+} from "@/lib/game-logos";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -72,7 +78,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import AnimalMedia, { isVideoMedia } from "@/components/AnimalMedia";
-import { mockStore } from "@/lib/mock-db";
+import { mockStore, mergeGamesPreserveCustomLogos } from "@/lib/mock-db";
 
 interface AnimalListItem {
   number: number;
@@ -119,20 +125,42 @@ export default function AdminPage({ onBack }: AdminPageProps) {
       }
     }
 
-    const { data } = await supabase.from("games").select("*").order("display_order");
-    let loaded = (data ?? []) as Game[];
-    if (localGames.length > 0) {
-      loaded = loaded.map((g) => {
-        const match = localGames.find((lg) => lg.id === g.id || lg.slug === g.slug);
-        if (match) {
-          const effectiveMode =
-            match.loading_mode ?? match.mode ?? g.loading_mode ?? g.mode ?? "automatic";
-          return { ...g, ...match, loading_mode: effectiveMode, mode: effectiveMode };
+    let serverGames: Game[] = [];
+    try {
+      const syncRes = await fetch("/api/public/results/sync");
+      if (syncRes.ok) {
+        const syncData = await syncRes.json();
+        if (syncData?.customGameLogos && typeof syncData.customGameLogos === "object") {
+          mergeCustomGameLogosMap(syncData.customGameLogos as Record<string, string>);
         }
-        return g;
-      });
+        if (Array.isArray(syncData?.games)) {
+          serverGames = syncData.games as Game[];
+        }
+      }
+    } catch {
+      // ignore
     }
-    setGames(loaded);
+
+    const { data } = await supabase.from("games").select("*").order("display_order");
+    const dbGames = (data ?? []) as Game[];
+    const merged = mergeGamesPreserveCustomLogos(dbGames, serverGames, localGames);
+    mockStore.games = merged;
+    if (typeof window !== "undefined") {
+      try {
+        localStorage.setItem("pizarra_persisted_games", JSON.stringify(merged));
+      } catch {
+        // ignore
+      }
+      const customLogosMap = getCustomGameLogosMap();
+      if (Object.keys(customLogosMap).length > 0) {
+        fetch("/api/public/results/sync", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ customGameLogosBatch: customLogosMap }),
+        }).catch(() => {});
+      }
+    }
+    setGames(merged);
     setLoading(false);
   }, []);
 
@@ -893,12 +921,30 @@ function GamesManager({ games, onRefresh }: { games: Game[]; onRefresh: () => vo
 
   async function handleColorChange(game: Game, newColor: string) {
     await supabase.from("games").update({ color: newColor }).eq("id", game.id);
+    if (typeof window !== "undefined") {
+      try {
+        const raw = localStorage.getItem("pizarra_persisted_games");
+        const storedGames: Game[] = raw ? JSON.parse(raw) : [];
+        const idx = storedGames.findIndex((g: Game) => g.id === game.id);
+        const preservedLogo = isCustomUploadedGameLogo(game.logo_url)
+          ? game.logo_url
+          : getGameLogo(game, newColor);
+        if (idx >= 0) {
+          storedGames[idx] = { ...storedGames[idx]!, color: newColor, logo_url: preservedLogo };
+        } else {
+          storedGames.push({ ...game, color: newColor, logo_url: preservedLogo });
+        }
+        localStorage.setItem("pizarra_persisted_games", JSON.stringify(storedGames));
+      } catch {
+        // ignore
+      }
+    }
     try {
       await fetch("/api/public/results/sync", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          gameUpdate: { id: game.id, color: newColor },
+          gameUpdate: { id: game.id, slug: game.slug, color: newColor },
         }),
       });
     } catch {
@@ -914,25 +960,96 @@ function GamesManager({ games, onRefresh }: { games: Game[]; onRefresh: () => vo
     onRefresh();
   }
 
+  async function compressLogoFileToDataUrl(file: File): Promise<string> {
+    const rawDataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+
+    if (file.type === "image/svg+xml" || rawDataUrl.length < 60_000) {
+      return rawDataUrl;
+    }
+
+    return new Promise<string>((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const maxDim = 256;
+          let w = img.naturalWidth || img.width || maxDim;
+          let h = img.naturalHeight || img.height || maxDim;
+          if (w > maxDim || h > maxDim) {
+            if (w >= h) {
+              h = Math.round((h * maxDim) / w);
+              w = maxDim;
+            } else {
+              w = Math.round((w * maxDim) / h);
+              h = maxDim;
+            }
+          }
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.max(1, w);
+          canvas.height = Math.max(1, h);
+          const ctx = canvas.getContext("2d");
+          if (!ctx) {
+            resolve(rawDataUrl);
+            return;
+          }
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          const webpUrl = canvas.toDataURL("image/webp", 0.88);
+          if (webpUrl && webpUrl.startsWith("data:image/webp")) {
+            resolve(webpUrl);
+          } else {
+            resolve(canvas.toDataURL("image/png"));
+          }
+        } catch {
+          resolve(rawDataUrl);
+        }
+      };
+      img.onerror = () => resolve(rawDataUrl);
+      img.src = rawDataUrl;
+    });
+  }
+
   async function handleLogoUpload(game: Game, file: File) {
     setUploadingLogo(game.id);
     setError(null);
     try {
-      const reader = new FileReader();
-      const dataUrl = await new Promise<string>((resolve, reject) => {
-        reader.onload = () => resolve(reader.result as string);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
+      const dataUrl = await compressLogoFileToDataUrl(file);
 
+      // 1. Save immediately in dedicated custom logos map (memory + localStorage)
+      saveCustomGameLogo(game, dataUrl);
+
+      // 2. Update in pizarra_persisted_games and mockStore
+      if (typeof window !== "undefined") {
+        try {
+          const raw = localStorage.getItem("pizarra_persisted_games");
+          const storedGames: Game[] = raw ? JSON.parse(raw) : [...mockStore.games];
+          const idx = storedGames.findIndex((g: Game) => g.id === game.id || g.slug === game.slug);
+          if (idx >= 0) {
+            storedGames[idx] = { ...storedGames[idx]!, logo_url: dataUrl };
+          } else {
+            storedGames.push({ ...game, logo_url: dataUrl });
+          }
+          localStorage.setItem("pizarra_persisted_games", JSON.stringify(storedGames));
+        } catch {
+          // ignore
+        }
+      }
+
+      // 3. Update in Supabase / mock database
       await supabase.from("games").update({ logo_url: dataUrl }).eq("id", game.id);
 
+      // 4. Persist to server backend (game_logos.persisted.json + games.persisted.json)
       try {
         await fetch("/api/public/results/sync", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            gameUpdate: { id: game.id, logo_url: dataUrl },
+            gameUpdate: { id: game.id, slug: game.slug, logo_url: dataUrl },
+            customGameLogosBatch: getCustomGameLogosMap(),
           }),
         });
       } catch {
@@ -947,6 +1064,7 @@ function GamesManager({ games, onRefresh }: { games: Game[]; onRefresh: () => vo
         // ignore
       }
 
+      toast.success(`Logo de ${game.name} guardado permanentemente`);
       onRefresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "No se pudo subir el logo");
@@ -955,14 +1073,30 @@ function GamesManager({ games, onRefresh }: { games: Game[]; onRefresh: () => vo
   }
 
   async function handleLogoRemove(game: Game) {
+    saveCustomGameLogo(game, null);
     const fallback = getGameLogo(game.slug || game.name, game.color);
+
+    if (typeof window !== "undefined") {
+      try {
+        const raw = localStorage.getItem("pizarra_persisted_games");
+        const storedGames: Game[] = raw ? JSON.parse(raw) : [...mockStore.games];
+        const idx = storedGames.findIndex((g: Game) => g.id === game.id || g.slug === game.slug);
+        if (idx >= 0) {
+          storedGames[idx] = { ...storedGames[idx]!, logo_url: fallback };
+        }
+        localStorage.setItem("pizarra_persisted_games", JSON.stringify(storedGames));
+      } catch {
+        // ignore
+      }
+    }
+
     await supabase.from("games").update({ logo_url: fallback }).eq("id", game.id);
     try {
       await fetch("/api/public/results/sync", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          gameUpdate: { id: game.id, logo_url: fallback },
+          gameUpdate: { id: game.id, slug: game.slug, logo_url: fallback },
         }),
       });
     } catch {

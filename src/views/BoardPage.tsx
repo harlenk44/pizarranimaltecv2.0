@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef, useMemo } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo, memo } from "react";
 import { supabase } from "@/lib/supabase";
 import { getEmojiForNumber } from "@/lib/animals";
 import type { Game, Result, GameWithResults, AnimalImage, AnimalEntry } from "@/lib/types";
@@ -42,8 +42,14 @@ import {
   mergeAnimalImagesPreserveCustom,
   recoverCustomAnimalImagesFromLocalStorage,
   filterAdminCustomAnimalImages,
+  mergeGamesPreserveCustomLogos,
 } from "@/lib/mock-db";
-import { getGameLogo } from "@/lib/game-logos";
+import {
+  getGameLogo,
+  getCustomGameLogosMap,
+  mergeCustomGameLogosMap,
+  isCustomUploadedGameLogo,
+} from "@/lib/game-logos";
 import {
   getGameNeonColor,
   getNeonFlexCardStyle,
@@ -120,6 +126,31 @@ function formatBoardDate(d: Date): string {
   return `${capitalize(weekday)}, ${day} De ${capitalize(month)}`;
 }
 
+const BoardLiveClock = memo(function BoardLiveClock() {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  return (
+    <div className="text-right">
+      <div className="text-lg sm:text-2xl lg:text-3xl font-mono font-black text-emerald-400 tracking-tight tabular-nums leading-none">
+        {now.toLocaleTimeString("es-VE", {
+          timeZone: LOTTERY_TIMEZONE,
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+          hour12: false,
+        })}
+      </div>
+      <div className="text-[10px] sm:text-xs font-semibold opacity-90 mt-0.5">
+        {formatBoardDate(now)}
+      </div>
+    </div>
+  );
+});
+
 function buildFullSchedule(gameOrSlug: Game | string, _results: Result[]): string[] {
   return getGameScheduleTimes(gameOrSlug);
 }
@@ -184,8 +215,19 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
   const [animalNames, setAnimalNames] = useState<AnimalNameMap>({});
   const [animalLabels, setAnimalLabels] = useState<AnimalLabelMap>({});
   const [loading, setLoading] = useState(true);
-  const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
-  const [clock, setClock] = useState(new Date());
+  const lastUpdateRef = useRef<Date>(new Date());
+  const lastLogosVersionRef = useRef<number>(0);
+  const lastGamesVersionRef = useRef<number>(0);
+  const lastImagesVersionRef = useRef<number>(0);
+  const lastSettingsVersionRef = useRef<number>(0);
+  const lastResultsMapJsonRef = useRef<string>("");
+  const lastTripleResultsJsonRef = useRef<string>("");
+  const gamesLoadedRef = useRef<boolean>(false);
+  const mediaLoadedRef = useRef<boolean>(false);
+  const cachedGamesDataRef = useRef<Game[]>([]);
+  const cachedImgMapRef = useRef<AnimalImageMap>({});
+  const cachedNameMapRef = useRef<AnimalNameMap>({});
+  const cachedLabelMapRef = useRef<AnimalLabelMap>({});
   const [activePageIndex, setActivePageIndex] = useState<number>(0);
   const [rotationProgress, setRotationProgress] = useState<number>(0);
   const [timerResetKey, setTimerResetKey] = useState<number>(() => Date.now());
@@ -342,16 +384,32 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     // 1. Sync from server backend to get latest results, alerts, and custom animal videos/images
     let serverSyncedResults: Result[] = [];
     let serverSyncedTriples: TripleResult[] = [];
+    let syncData: Record<string, unknown> | null = null;
     try {
-      const syncRes = await fetch("/api/public/results/sync");
+      const q = new URLSearchParams();
+      q.set("poll", "1");
+      if (lastLogosVersionRef.current) q.set("logosVersion", String(lastLogosVersionRef.current));
+      if (lastGamesVersionRef.current) q.set("gamesVersion", String(lastGamesVersionRef.current));
+      if (lastImagesVersionRef.current)
+        q.set("imagesVersion", String(lastImagesVersionRef.current));
+      if (lastSettingsVersionRef.current)
+        q.set("settingsVersion", String(lastSettingsVersionRef.current));
+
+      const syncRes = await fetch(`/api/public/results/sync?${q.toString()}`);
       if (syncRes.ok) {
-        const syncData = await syncRes.json();
+        syncData = await syncRes.json();
+
+        if (syncData?.logosVersion) lastLogosVersionRef.current = Number(syncData.logosVersion);
+        if (syncData?.gamesVersion) lastGamesVersionRef.current = Number(syncData.gamesVersion);
+        if (syncData?.imagesVersion) lastImagesVersionRef.current = Number(syncData.imagesVersion);
+        if (syncData?.settingsVersion)
+          lastSettingsVersionRef.current = Number(syncData.settingsVersion);
 
         // Sync all latest results from server into client mockStore & storage
         if (Array.isArray(syncData?.results) && syncData.results.length > 0) {
-          serverSyncedResults = syncData.results;
+          serverSyncedResults = syncData.results as Result[];
           const { mockStore, saveResultsToStorage } = await import("@/lib/mock-db");
-          mockStore.results = syncData.results;
+          mockStore.results = syncData.results as Result[];
           if (typeof saveResultsToStorage === "function") {
             saveResultsToStorage();
           } else {
@@ -363,22 +421,26 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           }
         }
 
-        // Sync triples results from server into client state & localStorage
+        // Sync triples results from server only if changed
         if (Array.isArray(syncData?.tripleResults)) {
-          serverSyncedTriples = syncData.tripleResults;
-          setTripleResults(syncData.tripleResults);
-          try {
-            localStorage.setItem("pizarra_triple_results", JSON.stringify(syncData.tripleResults));
-          } catch {
-            // ignore
+          serverSyncedTriples = syncData.tripleResults as TripleResult[];
+          const tJson = JSON.stringify(syncData.tripleResults);
+          if (lastTripleResultsJsonRef.current !== tJson) {
+            lastTripleResultsJsonRef.current = tJson;
+            setTripleResults(syncData.tripleResults as TripleResult[]);
+            try {
+              localStorage.setItem("pizarra_triple_results", tJson);
+            } catch {
+              // ignore
+            }
           }
         }
 
-        // Sync custom admin animal images into mockStore & localStorage without loading the 7.5MB base catalog in client RAM
-        {
+        // Sync custom admin animal images into mockStore & localStorage ONLY if server sent them (version changed)
+        if (Array.isArray(syncData?.animalImages)) {
           const { mockStore } = await import("@/lib/mock-db");
           const localCustom = recoverCustomAnimalImagesFromLocalStorage();
-          const serverImages = Array.isArray(syncData?.animalImages) ? syncData.animalImages : [];
+          const serverImages = syncData.animalImages as AnimalImage[];
           if (serverImages.length > 0 || localCustom.length > 0) {
             const merged = mergeAnimalImagesPreserveCustom(
               mockStore.animal_images,
@@ -396,13 +458,24 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
             } catch {
               // ignore
             }
-            // If browser has valid custom images missing from server, restore them to server & Supabase
-            if (localCustom.length > 0 && serverImages.length < customOnly.length) {
-              fetch("/api/public/results/sync", {
-                method: "PUT",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ animalImagesBatch: customOnly }),
-              }).catch(() => {});
+          }
+        }
+
+        // Sync custom game logos and games configuration ONLY if server sent them (version changed)
+        if (syncData?.customGameLogos && typeof syncData.customGameLogos === "object") {
+          const { mockStore } = await import("@/lib/mock-db");
+          const serverLogosMap = syncData.customGameLogos as Record<string, string>;
+          mergeCustomGameLogosMap(serverLogosMap);
+
+          if (Array.isArray(syncData?.games) && syncData.games.length > 0) {
+            mockStore.games = mergeGamesPreserveCustomLogos(
+              mockStore.games,
+              syncData.games as Game[],
+            );
+            try {
+              localStorage.setItem("pizarra_persisted_games", JSON.stringify(mockStore.games));
+            } catch {
+              // ignore
             }
           }
         }
@@ -427,7 +500,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         }
 
         // If server broadcasted a latestAlert, announce it only if this draw hasn't been alerted yet
-        if (syncData?.latestAlert && syncData.latestAlert.id) {
+        if (syncData?.latestAlert && (syncData.latestAlert as Record<string, unknown>).id) {
           const alert = syncData.latestAlert as ResultAlertItem;
           const enqueued = enqueueUniqueAlert(alert);
           if (enqueued) {
@@ -439,103 +512,127 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       // server route may be temporarily busy
     }
 
-    const { data: gamesData } = await supabase
-      .from("games")
-      .select("*")
-      .eq("is_active", true)
-      .order("display_order");
+    let loadedGames = cachedGamesDataRef.current;
+    if (!gamesLoadedRef.current || (Array.isArray(syncData?.games) && syncData.games.length > 0)) {
+      const { data: gamesData } = await supabase
+        .from("games")
+        .select("*")
+        .eq("is_active", true)
+        .order("display_order");
 
-    if (!gamesData) return;
-    setGames(gamesData as Game[]);
+      if (gamesData && gamesData.length > 0) {
+        cachedGamesDataRef.current = gamesData as Game[];
+        loadedGames = gamesData as Game[];
+        getCustomGameLogosMap();
+        const gamesWithLogos = (gamesData as Game[]).map((g) => ({
+          ...g,
+          logo_url: getGameLogo(g, g.color),
+        }));
+        setGames(gamesWithLogos);
+        gamesLoadedRef.current = true;
+      }
+    }
+
+    if (!loadedGames || loadedGames.length === 0) return;
+
+    let imgMap = cachedImgMapRef.current;
+    let nameMap = cachedNameMapRef.current;
+    let labelMap = cachedLabelMapRef.current;
+
+    const shouldRefreshMedia = !mediaLoadedRef.current || Array.isArray(syncData?.animalImages);
+    if (shouldRefreshMedia) {
+      const [imagesData, entriesData] = await Promise.all([
+        supabase.from("animal_images").select("*"),
+        supabase.from("animal_entries").select("*"),
+      ]);
+
+      imgMap = {};
+      const localRecoveredCustom = recoverCustomAnimalImagesFromLocalStorage();
+      let localCachedImages: AnimalImage[] = [];
+      if (typeof window !== "undefined") {
+        try {
+          const localRaw = localStorage.getItem("pizarra_custom_animal_images");
+          if (localRaw) {
+            const parsed = JSON.parse(localRaw);
+            if (Array.isArray(parsed)) localCachedImages = parsed;
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      const combinedImages: AnimalImage[] = mergeAnimalImagesPreserveCustom(
+        (imagesData.data ?? []) as AnimalImage[],
+        localCachedImages,
+        localRecoveredCustom,
+      );
+
+      for (const img of combinedImages) {
+        if (!img?.image_url) continue;
+        imgMap[`${img.game_id}:${img.animal_number}`] = img.image_url;
+        const matchedGame = loadedGames.find((g) => g.id === img.game_id || g.slug === img.game_id);
+        if (matchedGame) {
+          imgMap[`${matchedGame.id}:${img.animal_number}`] = img.image_url;
+          imgMap[`${matchedGame.slug}:${img.animal_number}`] = img.image_url;
+        }
+      }
+      cachedImgMapRef.current = imgMap;
+      animalImagesRef.current = imgMap;
+      setAnimalImages(imgMap);
+
+      nameMap = {};
+      labelMap = {};
+      for (const entry of (entriesData.data ?? []) as AnimalEntry[]) {
+        nameMap[`${entry.game_id}:${entry.number}`] = entry.name;
+        if (entry.label) labelMap[`${entry.game_id}:${entry.number}`] = entry.label;
+        const matchedGame = loadedGames.find(
+          (g) => g.id === entry.game_id || g.slug === entry.game_id,
+        );
+        if (matchedGame) {
+          nameMap[`${matchedGame.id}:${entry.number}`] = entry.name;
+          nameMap[`${matchedGame.slug}:${entry.number}`] = entry.name;
+          if (entry.label) {
+            labelMap[`${matchedGame.id}:${entry.number}`] = entry.label;
+            labelMap[`${matchedGame.slug}:${entry.number}`] = entry.label;
+          }
+        }
+      }
+      cachedNameMapRef.current = nameMap;
+      cachedLabelMapRef.current = labelMap;
+      setAnimalNames(nameMap);
+      setAnimalLabels(labelMap);
+      mediaLoadedRef.current = true;
+    }
 
     const today = lotteryDate();
 
-    const [resultsPromises, imagesData, entriesData] = await Promise.all([
-      Promise.all(
-        (gamesData as Game[]).map(async (g) => {
-          // If serverSyncedResults has fresh results for this game today, prioritize them immediately
-          const matching = serverSyncedResults.filter(
-            (r) => r.game_id === g.id && r.draw_date === today,
-          );
-          if (matching.length > 0) {
-            matching.sort((a, b) => a.draw_time.localeCompare(b.draw_time));
-            return { gameId: g.id, results: matching };
-          }
-
-          const { data } = await supabase
-            .from("results")
-            .select("*")
-            .eq("game_id", g.id)
-            .eq("draw_date", today)
-            .order("draw_time", { ascending: true });
-          return { gameId: g.id, results: (data ?? []) as Result[] };
-        }),
-      ),
-      supabase.from("animal_images").select("*"),
-      supabase.from("animal_entries").select("*"),
-    ]);
-
-    const map: Record<string, Result[]> = {};
-    const imgMap: AnimalImageMap = {};
-    const loadedGames = gamesData as Game[];
-    const localRecoveredCustom = recoverCustomAnimalImagesFromLocalStorage();
-
-    let localCachedImages: AnimalImage[] = [];
-    if (typeof window !== "undefined") {
-      try {
-        const localRaw = localStorage.getItem("pizarra_custom_animal_images");
-        if (localRaw) {
-          const parsed = JSON.parse(localRaw);
-          if (Array.isArray(parsed)) localCachedImages = parsed;
+    const resultsPromises = await Promise.all(
+      loadedGames.map(async (g) => {
+        // If serverSyncedResults has fresh results for this game today, prioritize them immediately
+        const matching = serverSyncedResults.filter(
+          (r) => r.game_id === g.id && r.draw_date === today,
+        );
+        if (matching.length > 0) {
+          matching.sort((a, b) => a.draw_time.localeCompare(b.draw_time));
+          return { gameId: g.id, results: matching };
         }
-      } catch {
-        // ignore
-      }
-    }
 
-    const combinedImages: AnimalImage[] = mergeAnimalImagesPreserveCustom(
-      (imagesData.data ?? []) as AnimalImage[],
-      localCachedImages,
-      localRecoveredCustom,
+        const { data } = await supabase
+          .from("results")
+          .select("*")
+          .eq("game_id", g.id)
+          .eq("draw_date", today)
+          .order("draw_time", { ascending: true });
+        return { gameId: g.id, results: (data ?? []) as Result[] };
+      }),
     );
 
-    for (const img of combinedImages) {
-      if (!img?.image_url) continue;
-      imgMap[`${img.game_id}:${img.animal_number}`] = img.image_url;
-      const matchedGame = loadedGames.find((g) => g.id === img.game_id || g.slug === img.game_id);
-      if (matchedGame) {
-        imgMap[`${matchedGame.id}:${img.animal_number}`] = img.image_url;
-        imgMap[`${matchedGame.slug}:${img.animal_number}`] = img.image_url;
-      }
-    }
-    animalImagesRef.current = imgMap;
-    setAnimalImages(imgMap);
-
-    const nameMap: AnimalNameMap = {};
-    const labelMap: AnimalLabelMap = {};
-    for (const entry of (entriesData.data ?? []) as AnimalEntry[]) {
-      nameMap[`${entry.game_id}:${entry.number}`] = entry.name;
-      if (entry.label) labelMap[`${entry.game_id}:${entry.number}`] = entry.label;
-      const matchedGame = loadedGames.find(
-        (g) => g.id === entry.game_id || g.slug === entry.game_id,
-      );
-      if (matchedGame) {
-        nameMap[`${matchedGame.id}:${entry.number}`] = entry.name;
-        nameMap[`${matchedGame.slug}:${entry.number}`] = entry.name;
-        if (entry.label) {
-          labelMap[`${matchedGame.id}:${entry.number}`] = entry.label;
-          labelMap[`${matchedGame.slug}:${entry.number}`] = entry.label;
-        }
-      }
-    }
-    setAnimalNames(nameMap);
-    setAnimalLabels(labelMap);
-
+    const map: Record<string, Result[]> = {};
     const newAlerts: ResultAlertItem[] = [];
     const prevResultsByGame = resultsMapRef.current;
 
     for (const r of resultsPromises) {
-      const gameObj = (gamesData as Game[]).find((g) => g.id === r.gameId);
+      const gameObj = loadedGames.find((g) => g.id === r.gameId);
       if (!gameObj) {
         map[r.gameId] = r.results;
         continue;
@@ -621,8 +718,12 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
 
       map[r.gameId] = frozenGameResults;
     }
-    resultsMapRef.current = map;
-    setResultsMap(map);
+    const mapJson = JSON.stringify(map);
+    if (lastResultsMapJsonRef.current !== mapJson) {
+      lastResultsMapJsonRef.current = mapJson;
+      resultsMapRef.current = map;
+      setResultsMap(map);
+    }
 
     // Check newly synced Triples results for real-time alert and voice announcements
     const todaysTriples = serverSyncedTriples.filter((tr) => tr.draw_date === today);
@@ -681,7 +782,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       if (anyEnqueued && lastNew) scheduleHardReload(lastNew.id);
     }
 
-    setLastUpdate(new Date());
+    lastUpdateRef.current = new Date();
     setLoading(false);
   }, [enqueueUniqueAlert, scheduleHardReload, updateSettings]);
 
@@ -737,10 +838,12 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         e.key === "pizarra_custom_animal_images" ||
         e.key === "pizarra_user_custom_animal_images_v2"
       ) {
+        mediaLoadedRef.current = false;
         fetchAll();
       }
     };
     const onCustomImagesLoaded = () => {
+      mediaLoadedRef.current = false;
       fetchAll();
     };
     window.addEventListener("pizarra:custom-images-loaded", onCustomImagesLoaded);
@@ -749,9 +852,15 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     const realtimeChannel = supabase
       .channel("board-animal-media-sync")
       .on("postgres_changes", { event: "*", schema: "public", table: "animal_images" }, () => {
+        mediaLoadedRef.current = false;
         fetchAll();
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "animal_entries" }, () => {
+        mediaLoadedRef.current = false;
+        fetchAll();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "games" }, () => {
+        gamesLoadedRef.current = false;
         fetchAll();
       })
       .subscribe();
@@ -793,11 +902,6 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     const interval = setInterval(fetchAll, 5000);
     return () => clearInterval(interval);
   }, [fetchAll]);
-
-  useEffect(() => {
-    const timer = setInterval(() => setClock(new Date()), 1000);
-    return () => clearInterval(timer);
-  }, []);
 
   const handleTestAlert = () => {
     const allResults: { res: Result; game: Game }[] = [];
@@ -1136,20 +1240,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
 
         {/* Right Clock & Controls */}
         <div className="flex items-center gap-3 sm:gap-5">
-          <div className="text-right">
-            <div className="text-lg sm:text-2xl lg:text-3xl font-mono font-black text-emerald-400 tracking-tight tabular-nums leading-none">
-              {clock.toLocaleTimeString("es-VE", {
-                timeZone: LOTTERY_TIMEZONE,
-                hour: "2-digit",
-                minute: "2-digit",
-                second: "2-digit",
-                hour12: false,
-              })}
-            </div>
-            <div className="text-[10px] sm:text-xs font-semibold opacity-90 mt-0.5">
-              {formatBoardDate(clock)}
-            </div>
-          </div>
+          <BoardLiveClock />
 
           <div className="flex items-center gap-1.5 sm:gap-2">
             <button

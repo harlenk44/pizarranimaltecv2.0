@@ -622,10 +622,169 @@ export function generateGenericGameLogo(name: string, color: string = "#3b82f6")
 `);
 }
 
+export const CUSTOM_GAME_LOGOS_STORAGE_KEY = "pizarra_custom_game_logos_v1";
+
+const OFFICIAL_LOGO_VALUES = new Set<string>(Object.values(OFFICIAL_GAME_LOGOS));
+
+let memoryCustomGameLogos: Record<string, string> = {};
+let memoryLogosInitialized = false;
+
+/**
+ * Retorna true si la URL corresponde a uno de los logos vectoriales SVG por defecto del catálogo
+ * (y por tanto NO es un logo personalizado subido por el usuario).
+ */
+export function isDefaultSvgGameLogo(url?: string | null): boolean {
+  if (!url || typeof url !== "string") return true;
+  const trimmed = url.trim();
+  if (!trimmed) return true;
+  if (OFFICIAL_LOGO_VALUES.has(trimmed)) return true;
+  if (
+    trimmed.startsWith("data:image/svg+xml;utf8,") &&
+    decodeURIComponent(trimmed).includes("gen_grad_")
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Retorna true únicamente si la URL es un logo personalizado subido por el administrador
+ * (excluyendo URLs rotas de tuazar.com y los SVGs predeterminados del catálogo).
+ */
+export function isCustomUploadedGameLogo(url?: string | null): boolean {
+  if (!url || typeof url !== "string") return false;
+  if (isBrokenExternalLogo(url)) return false;
+  if (isDefaultSvgGameLogo(url)) return false;
+  return true;
+}
+
+/**
+ * Carga y sincroniza el mapa de logos personalizados desde localStorage y pizarra_persisted_games.
+ */
+export function getCustomGameLogosMap(): Record<string, string> {
+  if (typeof window === "undefined") {
+    return memoryCustomGameLogos;
+  }
+
+  if (!memoryLogosInitialized) {
+    memoryLogosInitialized = true;
+    try {
+      const raw = localStorage.getItem(CUSTOM_GAME_LOGOS_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") {
+          for (const [k, v] of Object.entries(parsed)) {
+            if (typeof v === "string" && isCustomUploadedGameLogo(v)) {
+              memoryCustomGameLogos[k.trim().toLowerCase()] = v;
+            }
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    // También recuperar cualquier logo personalizado que esté guardado en pizarra_persisted_games
+    try {
+      const savedGamesRaw = localStorage.getItem("pizarra_persisted_games");
+      if (savedGamesRaw) {
+        const savedGames = JSON.parse(savedGamesRaw);
+        if (Array.isArray(savedGames)) {
+          let addedAny = false;
+          for (const g of savedGames) {
+            if (g && isCustomUploadedGameLogo(g.logo_url)) {
+              if (g.id) memoryCustomGameLogos[String(g.id).trim().toLowerCase()] = g.logo_url;
+              if (g.slug) memoryCustomGameLogos[String(g.slug).trim().toLowerCase()] = g.logo_url;
+              if (g.name) memoryCustomGameLogos[String(g.name).trim().toLowerCase()] = g.logo_url;
+              addedAny = true;
+            }
+          }
+          if (addedAny) {
+            localStorage.setItem(
+              CUSTOM_GAME_LOGOS_STORAGE_KEY,
+              JSON.stringify(memoryCustomGameLogos),
+            );
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return memoryCustomGameLogos;
+}
+
+/**
+ * Guarda o elimina un logo personalizado subido por el usuario en memoria y localStorage.
+ */
+export function saveCustomGameLogo(
+  game: { id?: string; slug?: string; name?: string },
+  logoUrl: string | null,
+): void {
+  const map = getCustomGameLogosMap();
+  const keys = [game.id, game.slug, game.name]
+    .filter((k): k is string => Boolean(k && k.trim()))
+    .map((k) => k.trim().toLowerCase());
+
+  if (logoUrl && isCustomUploadedGameLogo(logoUrl)) {
+    for (const k of keys) {
+      map[k] = logoUrl;
+    }
+  } else {
+    for (const k of keys) {
+      delete map[k];
+    }
+  }
+
+  memoryCustomGameLogos = { ...map };
+  if (typeof window !== "undefined") {
+    try {
+      localStorage.setItem(CUSTOM_GAME_LOGOS_STORAGE_KEY, JSON.stringify(memoryCustomGameLogos));
+    } catch {
+      // ignore
+    }
+  }
+}
+
+/**
+ * Combina logos personalizados recibidos del servidor sin perder los que ya existen localmente.
+ */
+export function mergeCustomGameLogosMap(
+  incoming?: Record<string, string> | null,
+): Record<string, string> {
+  const map = getCustomGameLogosMap();
+  if (!incoming || typeof incoming !== "object") return map;
+
+  let changed = false;
+  for (const [k, v] of Object.entries(incoming)) {
+    const cleanKey = k.trim().toLowerCase();
+    if (cleanKey && typeof v === "string" && isCustomUploadedGameLogo(v)) {
+      if (map[cleanKey] !== v) {
+        map[cleanKey] = v;
+        changed = true;
+      }
+    }
+  }
+
+  if (changed) {
+    memoryCustomGameLogos = { ...map };
+    if (typeof window !== "undefined") {
+      try {
+        localStorage.setItem(CUSTOM_GAME_LOGOS_STORAGE_KEY, JSON.stringify(memoryCustomGameLogos));
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  return memoryCustomGameLogos;
+}
+
 /**
  * Obtiene el logotipo garantizado para cualquier juego:
- * Si tiene una imagen personalizada válida (data URL, upload de Supabase o URL externa no rota), la usa.
- * Si es una URL de tuazar.com rota o está vacía, devuelve el logo oficial vectorial SVG incorporado.
+ * 1. Si existe un logo personalizado subido por el administrador en el mapa persistente o en el objeto, lo usa SIEMPRE.
+ * 2. Si no tiene logo personalizado o es una URL rota, devuelve el logo oficial vectorial SVG incorporado.
  */
 export function getGameLogo(
   gameOrSlugOrId?:
@@ -660,16 +819,31 @@ export function getGameLogo(
     color = gameOrSlugOrId.color ?? fallbackColor;
   }
 
-  // Si tiene un logo personalizado válido (que NO sea de tuazar.com), lo respetamos
-  if (customLogo && !isBrokenExternalLogo(customLogo)) {
-    return customLogo;
-  }
-
-  // Buscar en el catálogo oficial por id, slug o nombre normalizado
   const cleanId = id.trim().toLowerCase();
   const cleanSlug = slug.trim().toLowerCase();
   const cleanName = name.trim().toLowerCase();
 
+  // 1. Si el objeto trae directamente un logo personalizado subido por el usuario, lo registramos y devolvemos
+  if (customLogo && isCustomUploadedGameLogo(customLogo)) {
+    return customLogo;
+  }
+
+  // 2. Buscar en el almacén persistente de logos subidos por el usuario (por id, slug o nombre)
+  const customMap = getCustomGameLogosMap();
+  const persistedCustom =
+    (cleanId ? customMap[cleanId] : undefined) ||
+    (cleanSlug ? customMap[cleanSlug] : undefined) ||
+    (cleanName ? customMap[cleanName] : undefined);
+  if (persistedCustom && isCustomUploadedGameLogo(persistedCustom)) {
+    return persistedCustom;
+  }
+
+  // 3. Si customLogo es válido (p. ej. SVG oficial ya asignado), usarlo
+  if (customLogo && !isBrokenExternalLogo(customLogo)) {
+    return customLogo;
+  }
+
+  // 4. Buscar en el catálogo oficial por id, slug o nombre normalizado
   const official =
     OFFICIAL_GAME_LOGOS[cleanSlug] ||
     OFFICIAL_GAME_LOGOS[cleanId] ||

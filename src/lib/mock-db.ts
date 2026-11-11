@@ -31,7 +31,7 @@ import {
   isEmbeddedCatalogImageUrl,
   EMBEDDED_CUSTOM_ANIMAL_IMAGES,
 } from "@/lib/custom-animal-catalog";
-import { getGameLogo } from "@/lib/game-logos";
+import { getGameLogo, isCustomUploadedGameLogo, saveCustomGameLogo } from "@/lib/game-logos";
 
 export interface MockStore {
   games: Game[];
@@ -602,6 +602,79 @@ function buildInitialSettings(): AppSettings[] {
 
 export const GAMES_STORAGE_KEY = "pizarra_persisted_games";
 
+export function mergeGamesPreserveCustomLogos(
+  baseList: Game[],
+  ...incomingLists: Array<Game[] | undefined | null>
+): Game[] {
+  const map = new Map<string, Game>();
+  for (const g of baseList) {
+    if (!g || !g.id) continue;
+    map.set(g.id, {
+      ...g,
+      logo_url: getGameLogo(g, g.color),
+    });
+  }
+
+  for (const list of incomingLists) {
+    if (!Array.isArray(list)) continue;
+    for (const incoming of list) {
+      if (!incoming || (!incoming.id && !incoming.slug)) continue;
+      const existing =
+        (incoming.id ? map.get(incoming.id) : undefined) ||
+        Array.from(map.values()).find((g) => g.slug === incoming.slug);
+
+      if (existing) {
+        const effectiveMode =
+          incoming.loading_mode ??
+          incoming.mode ??
+          existing.loading_mode ??
+          existing.mode ??
+          "automatic";
+        const bestLogo = isCustomUploadedGameLogo(incoming.logo_url)
+          ? incoming.logo_url
+          : isCustomUploadedGameLogo(existing.logo_url)
+            ? existing.logo_url
+            : getGameLogo({ ...existing, ...incoming }, incoming.color ?? existing.color);
+
+        if (isCustomUploadedGameLogo(bestLogo)) {
+          saveCustomGameLogo(
+            { id: existing.id, slug: existing.slug, name: existing.name },
+            bestLogo,
+          );
+        }
+
+        const merged: Game = {
+          ...existing,
+          ...incoming,
+          id: existing.id,
+          loading_mode: effectiveMode,
+          mode: effectiveMode,
+          logo_url: bestLogo,
+        };
+        merged.schedule_times = getGameScheduleTimes(merged);
+        map.set(existing.id, merged);
+      } else if (incoming.id) {
+        const bestLogo = isCustomUploadedGameLogo(incoming.logo_url)
+          ? incoming.logo_url
+          : getGameLogo(incoming, incoming.color);
+        if (isCustomUploadedGameLogo(bestLogo)) {
+          saveCustomGameLogo(
+            { id: incoming.id, slug: incoming.slug, name: incoming.name },
+            bestLogo,
+          );
+        }
+        map.set(incoming.id, {
+          ...incoming,
+          logo_url: bestLogo,
+          schedule_times: getGameScheduleTimes(incoming),
+        });
+      }
+    }
+  }
+
+  return Array.from(map.values()).sort((a, b) => (a.display_order ?? 99) - (b.display_order ?? 99));
+}
+
 function buildInitialGames(): Game[] {
   let list = [...INITIAL_GAMES];
   if (typeof window !== "undefined") {
@@ -610,38 +683,17 @@ function buildInitialGames(): Game[] {
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          list = list.map((initial) => {
-            const savedGame = parsed.find(
-              (p: Game) => p.id === initial.id || p.slug === initial.slug,
-            );
-            if (savedGame) {
-              const effectiveMode =
-                savedGame.loading_mode ?? savedGame.mode ?? initial.loading_mode ?? "automatic";
-              const mergedGame = {
-                ...initial,
-                ...savedGame,
-                loading_mode: effectiveMode,
-                mode: effectiveMode,
-              };
-              return {
-                ...mergedGame,
-                schedule_times: getGameScheduleTimes(mergedGame),
-              };
-            }
-            return initial;
-          });
-          for (const p of parsed) {
-            if (!list.some((g) => g.id === p.id)) {
-              list.push(p);
-            }
-          }
+          list = mergeGamesPreserveCustomLogos(list, parsed);
         }
       }
     } catch {
       // ignore
     }
   }
-  return list;
+  return list.map((g) => ({
+    ...g,
+    logo_url: getGameLogo(g, g.color),
+  }));
 }
 
 function buildInitialLicenses(): LicenseInfo[] {
@@ -1370,11 +1422,27 @@ function createMockQueryBuilder(table: string) {
         const updatedRows: Record<string, unknown>[] = [];
         for (const item of storeList) {
           if (filters.every((f) => f(item))) {
+            const prevLogo = item["logo_url"] as string | null | undefined;
             Object.assign(item, updatePayload);
             if (updatePayload["loading_mode"] || updatePayload["mode"]) {
               const m = (updatePayload["mode"] ?? updatePayload["loading_mode"]) as string;
               item["loading_mode"] = m;
               item["mode"] = m;
+            }
+            if (table === "games") {
+              const gameItem = item as unknown as Game;
+              if ("logo_url" in updatePayload) {
+                const newLogo = updatePayload["logo_url"] as string | null;
+                if (isCustomUploadedGameLogo(newLogo)) {
+                  saveCustomGameLogo(gameItem, newLogo);
+                } else {
+                  saveCustomGameLogo(gameItem, null);
+                }
+              } else if (isCustomUploadedGameLogo(prevLogo)) {
+                item["logo_url"] = prevLogo;
+              } else {
+                item["logo_url"] = getGameLogo(gameItem, gameItem.color);
+              }
             }
             updatedRows.push(item);
           }
