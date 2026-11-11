@@ -7,8 +7,7 @@ import {
   filterAdminCustomAnimalImages,
   ensureCustomCatalogLoaded,
 } from "@/lib/mock-db";
-import type { ClientLicense, AnimalImage } from "@/lib/types";
-import { TRIPLE_GAMES, buildTripleAlertItem, type TripleResult } from "@/lib/triples";
+import { type ClientLicense, type AnimalImage, sanitizeAppSettingsForSupabase } from "@/lib/types";
 import {
   getDefaultGameScheduleTimes,
   getGameScheduleTimes,
@@ -19,6 +18,7 @@ import path from "path";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { resolveCanonicalAnimal, parseCanonicalAnimalNumber } from "@/lib/official-animals";
 import { getGameLogo, isBrokenExternalLogo, isCustomUploadedGameLogo } from "@/lib/game-logos";
+import { TRIPLE_GAMES, buildTripleAlertItem, type TripleResult } from "@/lib/triples";
 
 const RESULTS_FILE = "/tmp/lottery_results.json";
 const TRIPLE_RESULTS_FILE = "/tmp/lottery_triples_results.json";
@@ -663,8 +663,11 @@ function saveServerAppSettings() {
   }
 }
 
+let backgroundSchedulerStarted = false;
+
 export function ensureServerDataInitialized() {
   if (serverDataInitialized) return;
+  serverDataInitialized = true;
   loadServerAnimalImages();
   loadServerGameLogos();
   loadServerGames();
@@ -679,7 +682,26 @@ export function ensureServerDataInitialized() {
   } catch {
     // ignore
   }
-  serverDataInitialized = true;
+
+  ensureCustomCatalogLoaded()
+    .then(() => {
+      loadServerAnimalImages();
+      return syncAnimalImagesWithSupabase();
+    })
+    .catch(() => {});
+  syncLicensesWithSupabase().catch(() => {});
+  syncAppSettingsWithSupabase().catch(() => {});
+  syncGamesWithSupabase().catch(() => {});
+
+  if (!backgroundSchedulerStarted && typeof setInterval !== "undefined") {
+    backgroundSchedulerStarted = true;
+    const timer = setInterval(() => {
+      triggerBackgroundSync(false).catch(() => {});
+    }, AUTO_SYNC_INTERVAL_MS);
+    if (timer && typeof (timer as NodeJS.Timeout).unref === "function") {
+      (timer as NodeJS.Timeout).unref();
+    }
+  }
 }
 
 export async function syncAppSettingsWithSupabase() {
@@ -691,34 +713,24 @@ export async function syncAppSettingsWithSupabase() {
       .maybeSingle();
 
     if (!error && data) {
-      const merged = { ...mockStore.app_settings[0], ...(data as AppSettings), id: "global" };
-      mockStore.app_settings = [merged];
+      const merged = {
+        ...mockStore.app_settings[0],
+        ...(data as Record<string, unknown>),
+        id: "global",
+      };
+      mockStore.app_settings = [merged as (typeof mockStore.app_settings)[0]];
       saveServerAppSettings();
     } else if (!error && !data && mockStore.app_settings[0]) {
-      await supabaseAdmin.from("app_settings").upsert({
+      const sanitizedDb = sanitizeAppSettingsForSupabase({
         ...mockStore.app_settings[0],
         id: "global",
       });
+      await supabaseAdmin.from("app_settings").upsert(sanitizedDb, { onConflict: "id" });
     }
   } catch {
     // ignore
   }
 }
-
-loadServerResults();
-loadServerTripleResults();
-loadServerGames();
-loadServerAppSettings();
-loadServerLicenses();
-ensureCustomCatalogLoaded()
-  .then(() => {
-    loadServerAnimalImages();
-    return syncAnimalImagesWithSupabase();
-  })
-  .catch(() => {});
-syncLicensesWithSupabase().catch(() => {});
-syncAppSettingsWithSupabase().catch(() => {});
-syncGamesWithSupabase().catch(() => {});
 
 let lastAutoSyncTimestamp = 0;
 let isAutoSyncing = false;
@@ -904,13 +916,6 @@ async function triggerBackgroundSync(forceWait = false) {
   } finally {
     isAutoSyncing = false;
   }
-}
-
-// Background scheduler so external lotteries are checked continuously even between active page polls
-if (typeof setInterval !== "undefined") {
-  setInterval(() => {
-    triggerBackgroundSync(false).catch(() => {});
-  }, AUTO_SYNC_INTERVAL_MS);
 }
 
 function serveOnDemandAnimalImage(animalImageParam: string, labelParam: string): Response {
@@ -1712,13 +1717,10 @@ export const Route = createFileRoute("/api/public/results/sync")({
             mockStore.app_settings = [merged];
             saveServerAppSettings();
             try {
-              await supabaseAdmin.from("app_settings").upsert({
-                ...merged,
-                id: "global",
-                updated_at: new Date().toISOString(),
-              });
-            } catch {
-              // ignore
+              const sanitizedDb = sanitizeAppSettingsForSupabase(merged);
+              await supabaseAdmin.from("app_settings").upsert(sanitizedDb, { onConflict: "id" });
+            } catch (err) {
+              console.warn("[sync.ts] Supabase app_settings upsert error:", err);
             }
           }
 

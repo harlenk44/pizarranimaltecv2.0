@@ -375,8 +375,9 @@ export default function ResultAlertModal({
                   brandColor,
                 )}
                 alt={currentAlert.gameName}
-                loading="lazy"
+                loading="eager"
                 decoding="async"
+                fetchPriority="high"
                 onError={(e) => {
                   e.currentTarget.src = getGameLogo(currentAlert.gameName, brandColor);
                 }}
@@ -535,6 +536,8 @@ export default function ResultAlertModal({
                 number={currentAlert.animalNumber}
                 className="w-full h-full object-contain filter drop-shadow-2xl"
                 emojiClassName="text-8xl sm:text-9xl select-none"
+                loading="eager"
+                fetchPriority="high"
               />
             </div>
 

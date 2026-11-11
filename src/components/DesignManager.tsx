@@ -43,7 +43,7 @@ import {
   type ClientVoiceConfig,
   type ClientDesignConfig,
 } from "@/lib/license-lotteries";
-import type { AppSettings, ClientLicense } from "@/lib/types";
+import { type AppSettings, type ClientLicense, sanitizeAppSettingsForSupabase } from "@/lib/types";
 
 export default function DesignManager() {
   const { settings, refreshSettings, updateSettings } = useBoardSettings();
@@ -123,20 +123,36 @@ export default function DesignManager() {
   }, []);
 
   const persistSettings = useCallback(async (payload: AppSettings) => {
+    const sanitized = sanitizeAppSettingsForSupabase(payload);
+    console.log("[BoardDesign:DesignManager] Sincronizando diseño Global...", {
+      sanitized_db: sanitized,
+      full_payload: payload,
+    });
+
     try {
-      await supabase.from("app_settings").upsert(payload, { onConflict: "id" });
-    } catch {
-      // ignore
+      const { error } = await supabase.from("app_settings").upsert(sanitized, { onConflict: "id" });
+      if (error) {
+        console.warn("[BoardDesign:DesignManager] Aviso en Supabase app_settings upsert:", error);
+      } else {
+        console.log("[BoardDesign:DesignManager] Guardado exitoso en tabla Supabase app_settings");
+      }
+    } catch (err) {
+      console.warn("[BoardDesign:DesignManager] Excepción al guardar en Supabase:", err);
     }
+
     try {
       await fetch("/api/public/results/sync", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ appSettings: payload }),
       });
-    } catch {
-      // ignore
+      console.log(
+        "[BoardDesign:DesignManager] Guardado exitoso en endpoint de sincronización del servidor",
+      );
+    } catch (err) {
+      console.warn("[BoardDesign:DesignManager] Error en PUT sync:", err);
     }
+
     try {
       const bc = new BroadcastChannel("pizarra_lottery_channel");
       bc.postMessage({ type: "APP_SETTINGS_UPDATED", settings: payload });
@@ -203,6 +219,7 @@ export default function DesignManager() {
       setUserDesignDraft((prev) => ({
         ...prev,
         [key]: value,
+        useCustomDesign: true,
       }));
       return;
     }
@@ -230,6 +247,7 @@ export default function DesignManager() {
     if (isUserMode) {
       setUserDesignDraft((prev) => ({
         ...prev,
+        useCustomDesign: true,
         game_colors: {
           ...(prev.game_colors ?? {}),
           [gameSlug]: hexColor,
@@ -252,6 +270,7 @@ export default function DesignManager() {
         delete nextMap[gameSlug];
         return {
           ...prev,
+          useCustomDesign: true,
           game_colors: nextMap,
         };
       });
@@ -273,6 +292,10 @@ export default function DesignManager() {
 
     if (isUserMode && selectedLicense) {
       const parsed = parseClientLicenseName(selectedLicense.client_name);
+      const designPayload = {
+        ...userDesignDraft,
+        useCustomDesign: true,
+      };
       const packedName = formatClientLicenseName(
         parsed.cleanName,
         parsed.allowedLotteries,
@@ -280,7 +303,17 @@ export default function DesignManager() {
         parsed.cardsPerScreen,
         parsed.transitionSeconds,
         userVoiceDraft,
-        userDesignDraft,
+        designPayload,
+      );
+
+      console.log(
+        "[BoardDesign:DesignManager] Guardando diseño para cliente PIN",
+        selectedLicense.pin_code,
+        {
+          cliente: parsed.cleanName,
+          diseno: designPayload,
+          client_name_empaquetado: packedName,
+        },
       );
 
       try {
@@ -288,8 +321,11 @@ export default function DesignManager() {
           .from("client_licenses")
           .update({ client_name: packedName })
           .eq("id", selectedLicense.id);
-      } catch {
-        // ignore
+      } catch (err) {
+        console.warn(
+          "[BoardDesign:DesignManager] Error actualizando client_licenses en Supabase:",
+          err,
+        );
       }
 
       try {

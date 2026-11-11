@@ -149,8 +149,20 @@ function sanitizeDesignConfig(raw: unknown): ClientDesignConfig | null {
       }
     }
   }
+  const hasExplicitOrInferredDesign = Boolean(
+    obj.useCustomDesign ||
+    obj.background_color ||
+    obj.surface_color ||
+    obj.primary_color ||
+    obj.text_color ||
+    obj.card_color ||
+    obj.result_row_color ||
+    obj.card_style === "solid" ||
+    Object.keys(gameColors).length > 0,
+  );
+
   return {
-    useCustomDesign: Boolean(obj.useCustomDesign),
+    useCustomDesign: hasExplicitOrInferredDesign,
     card_style: cardStyle,
     background_color: typeof obj.background_color === "string" ? obj.background_color : undefined,
     surface_color: typeof obj.surface_color === "string" ? obj.surface_color : undefined,
@@ -314,6 +326,12 @@ export function formatClientLicenseName(
   const hasCustomDesign = Boolean(
     designConfig &&
     (designConfig.useCustomDesign ||
+      designConfig.background_color ||
+      designConfig.surface_color ||
+      designConfig.primary_color ||
+      designConfig.text_color ||
+      designConfig.card_color ||
+      designConfig.result_row_color ||
       designConfig.card_style === "solid" ||
       (designConfig.game_colors && Object.keys(designConfig.game_colors).length > 0)),
   );
@@ -340,7 +358,10 @@ export function formatClientLicenseName(
     payloadObj.voz = voiceConfig;
   }
   if (designConfig && hasCustomDesign) {
-    payloadObj.diseno = designConfig;
+    payloadObj.diseno = {
+      ...designConfig,
+      useCustomDesign: true,
+    };
   }
 
   return `${name}||${JSON.stringify(payloadObj)}`;

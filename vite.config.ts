@@ -12,11 +12,11 @@ export default defineConfig({
       host: "0.0.0.0",
       port: 3000,
       warmup: {
-        clientFiles: ["./src/router.tsx", "./src/routes/**/*.tsx", "./src/views/**/*.tsx"],
+        clientFiles: ["./src/router.tsx", "./src/routes/index.tsx"],
       },
     },
     optimizeDeps: {
-      entries: ["src/**/*.{ts,tsx}"],
+      entries: ["src/router.tsx", "src/routes/index.tsx"],
       include: [
         "react",
         "react-dom",

@@ -50,19 +50,27 @@ export default function TriplesBoard({ results, loading = false, games }: Triple
 
   const effectiveSettings = useMemo(() => {
     if (!designConfig) return settings;
+    const isCustom = Boolean(
+      designConfig.useCustomDesign ||
+      designConfig.background_color ||
+      designConfig.surface_color ||
+      designConfig.primary_color ||
+      designConfig.text_color ||
+      designConfig.card_color ||
+      designConfig.result_row_color ||
+      designConfig.card_style ||
+      (designConfig.game_colors && Object.keys(designConfig.game_colors).length > 0),
+    );
+    if (!isCustom) return settings;
     return {
       ...settings,
-      ...(designConfig.useCustomDesign
-        ? {
-            background_color: designConfig.background_color ?? settings.background_color,
-            surface_color: designConfig.surface_color ?? settings.surface_color,
-            primary_color: designConfig.primary_color ?? settings.primary_color,
-            text_color: designConfig.text_color ?? settings.text_color,
-            card_color: designConfig.card_color ?? settings.card_color,
-            result_row_color: designConfig.result_row_color ?? settings.result_row_color,
-            font_family: designConfig.font_family ?? settings.font_family,
-          }
-        : {}),
+      background_color: designConfig.background_color ?? settings.background_color,
+      surface_color: designConfig.surface_color ?? settings.surface_color,
+      primary_color: designConfig.primary_color ?? settings.primary_color,
+      text_color: designConfig.text_color ?? settings.text_color,
+      card_color: designConfig.card_color ?? settings.card_color,
+      result_row_color: designConfig.result_row_color ?? settings.result_row_color,
+      font_family: designConfig.font_family ?? settings.font_family,
       card_style: designConfig.card_style ?? settings.card_style ?? "neon",
       game_colors: {
         ...(settings.game_colors ?? {}),
@@ -161,7 +169,10 @@ function TripleGameCard({
   return (
     <div
       className="fluid-game-card h-full w-full min-h-0 min-w-0 overflow-hidden flex flex-col justify-between"
-      style={getNeonFlexCardStyle(neonColor, settings.card_color || "#000000", styleMode)}
+      style={{
+        ...getNeonFlexCardStyle(neonColor, settings.card_color || "#0f172a", styleMode),
+        color: settings.text_color || "#ffffff",
+      }}
     >
       {/* Top Header */}
       <div className="fluid-card-header shrink-0">
@@ -176,8 +187,9 @@ function TripleGameCard({
           <img
             src={getGameLogo(game, neonColor)}
             alt={game.name}
-            loading="lazy"
+            loading="eager"
             decoding="async"
+            fetchPriority="high"
             onError={(e) => {
               e.currentTarget.src = getGameLogo(game.slug || game.name, neonColor);
             }}
@@ -311,15 +323,25 @@ function TripleGameCard({
               <div
                 key={timeSlot}
                 className={`fluid-schedule-cell h-full w-full min-h-0 min-w-0 overflow-hidden transition !flex-row items-center justify-between !px-2.5 ${
-                  res ? "border-slate-700/90 shadow-sm" : "border-slate-800/80 opacity-80"
+                  res ? "shadow-sm" : "opacity-85"
                 }`}
                 style={{
                   backgroundColor: res
                     ? settings.result_row_color || "rgba(15, 23, 42, 0.9)"
-                    : "rgba(2, 6, 23, 0.6)",
+                    : settings.card_color
+                      ? `${settings.card_color}cc`
+                      : "rgba(2, 6, 23, 0.6)",
+                  borderColor: res
+                    ? `${neonColor}66`
+                    : settings.card_color
+                      ? `${settings.card_color}88`
+                      : "rgba(51, 65, 85, 0.5)",
                 }}
               >
-                <div className="fluid-cell-time whitespace-nowrap font-bold text-slate-300 shrink-0">
+                <div
+                  className="fluid-cell-time whitespace-nowrap font-bold shrink-0"
+                  style={{ color: settings.text_color ? `${settings.text_color}cc` : "#cbd5e1" }}
+                >
                   {formatTime(timeSlot)}
                 </div>
                 <div className="font-mono tabular-nums flex items-center justify-end gap-1.5 sm:gap-2 min-w-0">
@@ -388,15 +410,25 @@ function TripleGameCard({
             <div
               key={timeSlot}
               className={`fluid-schedule-cell h-full w-full min-h-0 min-w-0 overflow-hidden transition flex flex-col items-center justify-center px-0.5 ${
-                res ? "border-slate-700/90 shadow-sm" : "border-slate-800/80 opacity-80"
+                res ? "shadow-sm" : "opacity-85"
               }`}
               style={{
                 backgroundColor: res
                   ? settings.result_row_color || "rgba(15, 23, 42, 0.9)"
-                  : "rgba(2, 6, 23, 0.6)",
+                  : settings.card_color
+                    ? `${settings.card_color}cc`
+                    : "rgba(2, 6, 23, 0.6)",
+                borderColor: res
+                  ? `${neonColor}66`
+                  : settings.card_color
+                    ? `${settings.card_color}88`
+                    : "rgba(51, 65, 85, 0.5)",
               }}
             >
-              <div className="fluid-cell-time truncate w-full text-center">
+              <div
+                className="fluid-cell-time truncate w-full text-center"
+                style={{ color: settings.text_color ? `${settings.text_color}b3` : "#94a3b8" }}
+              >
                 {formatTime(timeSlot)}
               </div>
               <div className="fluid-cell-result w-full text-center font-mono tabular-nums">

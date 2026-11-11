@@ -1,6 +1,11 @@
 import { createContext, useContext, useEffect, useState, useCallback, type ReactNode } from "react";
 import { supabase } from "@/lib/supabase";
-import { DEFAULT_APP_SETTINGS, type AppSettings } from "@/lib/types";
+import {
+  DEFAULT_APP_SETTINGS,
+  type AppSettings,
+  sanitizeAppSettingsForSupabase,
+  parseAppSettingsFromSupabase,
+} from "@/lib/types";
 
 interface BoardSettingsContextType {
   settings: AppSettings;
@@ -37,9 +42,10 @@ export function BoardSettingsProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<AppSettings>(getInitialSettings);
 
   const refreshSettings = useCallback(async () => {
-    let cloudData: AppSettings | null = null;
+    let cloudData: Partial<AppSettings> | null = null;
+    let serverData: Partial<AppSettings> | null = null;
 
-    // 1. Fetch from Supabase
+    // 1. Fetch from Supabase app_settings table
     try {
       const { data, error } = await supabase
         .from("app_settings")
@@ -48,25 +54,30 @@ export function BoardSettingsProvider({ children }: { children: ReactNode }) {
         .maybeSingle();
 
       if (!error && data) {
-        cloudData = data as AppSettings;
+        cloudData = parseAppSettingsFromSupabase(data as Record<string, unknown>);
+        console.log(
+          "[BoardDesign:Context] Datos recibidos de tabla Supabase app_settings:",
+          cloudData,
+        );
+      } else if (error) {
+        console.warn("[BoardDesign:Context] Aviso al consultar Supabase app_settings:", error);
+      }
+    } catch (err) {
+      console.warn("[BoardDesign:Context] Excepción al consultar Supabase:", err);
+    }
+
+    // 2. Fetch from server sync endpoint (app_settings.persisted.json)
+    try {
+      const res = await fetch("/api/public/results/sync");
+      if (res.ok) {
+        const syncJson = await res.json();
+        if (syncJson?.appSettings && typeof syncJson.appSettings === "object") {
+          serverData = syncJson.appSettings as AppSettings;
+          console.log("[BoardDesign:Context] Datos recibidos de sync endpoint:", serverData);
+        }
       }
     } catch {
       // ignore
-    }
-
-    // 2. Fetch from server sync endpoint if Supabase is offline or returns nothing
-    if (!cloudData) {
-      try {
-        const res = await fetch("/api/public/results/sync");
-        if (res.ok) {
-          const syncJson = await res.json();
-          if (syncJson?.appSettings && typeof syncJson.appSettings === "object") {
-            cloudData = syncJson.appSettings as AppSettings;
-          }
-        }
-      } catch {
-        // ignore
-      }
     }
 
     let localData: AppSettings | null = null;
@@ -79,40 +90,67 @@ export function BoardSettingsProvider({ children }: { children: ReactNode }) {
       }
     }
 
-    if (cloudData && localData) {
-      const cloudTime = cloudData.updated_at ? new Date(cloudData.updated_at).getTime() : 0;
-      const localTime = localData.updated_at ? new Date(localData.updated_at).getTime() : 0;
+    // Determine the most authoritative and newest timestamp across sources
+    const cloudTime = cloudData?.updated_at ? new Date(cloudData.updated_at).getTime() : 0;
+    const serverTime = serverData?.updated_at ? new Date(serverData.updated_at).getTime() : 0;
+    const localTime = localData?.updated_at ? new Date(localData.updated_at).getTime() : 0;
 
-      let merged: AppSettings;
-      if (localTime > cloudTime) {
-        // Local settings are newer: preserve them and sync to cloud/server
-        merged = { ...DEFAULT_APP_SETTINGS, ...cloudData, ...localData, id: "global" };
-        fetch("/api/public/results/sync", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ appSettings: merged }),
-        }).catch(() => {});
-        supabase
-          .from("app_settings")
-          .upsert(merged, { onConflict: "id" })
-          .catch(() => {});
-      } else {
-        // Cloud settings are newer or equal
-        merged = { ...DEFAULT_APP_SETTINGS, ...localData, ...cloudData, id: "global" };
-      }
+    // Merge baseline defaults, server persisted data, cloud Supabase, and local storage
+    const merged: AppSettings = {
+      ...DEFAULT_APP_SETTINGS,
+      ...(serverData || {}),
+      ...(cloudData || {}),
+      id: "global",
+    };
 
-      setSettings(merged);
-      if (typeof window !== "undefined") {
-        localStorage.setItem("pizarra_app_settings", JSON.stringify(merged));
-      }
-    } else if (cloudData) {
-      const merged = { ...DEFAULT_APP_SETTINGS, ...cloudData, id: "global" };
-      setSettings(merged);
-      if (typeof window !== "undefined") {
-        localStorage.setItem("pizarra_app_settings", JSON.stringify(merged));
-      }
+    if (localData && localTime > Math.max(cloudTime, serverTime)) {
+      // Local settings are strictly newer: prioritize local changes
+      Object.assign(merged, localData, { id: "global" });
+      console.log(
+        "[BoardDesign:Context] Configuración local es más reciente. Sincronizando hacia nube/servidor...",
+      );
+      // Persist to server and Supabase in background
+      fetch("/api/public/results/sync", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ appSettings: merged }),
+      }).catch(() => {});
+      const sanitized = sanitizeAppSettingsForSupabase(merged);
+      supabase
+        .from("app_settings")
+        .upsert(sanitized, { onConflict: "id" })
+        .catch(() => {});
     } else if (localData) {
-      setSettings({ ...DEFAULT_APP_SETTINGS, ...localData, id: "global" });
+      // Merge local extended settings (like custom game_colors) if not explicitly overwritten
+      merged.game_colors = {
+        ...(localData.game_colors || {}),
+        ...(serverData?.game_colors || {}),
+        ...(cloudData?.game_colors || {}),
+      };
+      if (!cloudData?.card_style && !serverData?.card_style && localData.card_style) {
+        merged.card_style = localData.card_style;
+      }
+    }
+
+    console.log("[BoardDesign:Context] Configuración final consolidada para renderizar:", {
+      background_color: merged.background_color,
+      surface_color: merged.surface_color,
+      card_color: merged.card_color,
+      primary_color: merged.primary_color,
+      result_row_color: merged.result_row_color,
+      text_color: merged.text_color,
+      card_style: merged.card_style,
+      font_family: merged.font_family,
+      updated_at: merged.updated_at,
+    });
+
+    setSettings(merged);
+    if (typeof window !== "undefined") {
+      try {
+        localStorage.setItem("pizarra_app_settings", JSON.stringify(merged));
+      } catch {
+        // ignore
+      }
     }
   }, []);
 

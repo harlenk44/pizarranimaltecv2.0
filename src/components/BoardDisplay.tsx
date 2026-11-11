@@ -192,6 +192,25 @@ function DisplayShell({ children }: { children: ReactNode }) {
     }
   }
 
+  const isCustom = Boolean(
+    designConfig &&
+    (designConfig.useCustomDesign ||
+      designConfig.background_color ||
+      designConfig.surface_color ||
+      designConfig.card_color ||
+      designConfig.result_row_color ||
+      designConfig.primary_color ||
+      designConfig.text_color),
+  );
+  const effectiveDesign = isCustom ? designConfig : null;
+  const currentCardColor = effectiveDesign?.card_color || settings.card_color || "#0f172a";
+  const currentBgColor =
+    effectiveDesign?.background_color || settings.background_color || "#020617";
+  const currentSurfaceColor = effectiveDesign?.surface_color || settings.surface_color || "#0f172a";
+  const currentTextColor = effectiveDesign?.text_color || settings.text_color || "#f8fafc";
+  const currentRowColor =
+    effectiveDesign?.result_row_color || settings.result_row_color || "#1e293b";
+
   const variables = {
     "--display-scale": preferences.resultScale / 100,
     "--display-logo": `${logoSize}px`,
@@ -199,11 +218,11 @@ function DisplayShell({ children }: { children: ReactNode }) {
     "--display-hero-scale": heroCardScale / 100,
     "--display-animal-scale": animalScale / 100,
     "--display-card-min": `${Math.round((300 * preferences.resultScale) / 100)}px`,
-    "--display-surface": settings.surface_color,
-    "--display-text": settings.text_color,
-    "--display-row": settings.result_row_color,
-    "--display-card": settings.card_color,
-    backgroundColor: settings.background_color,
+    "--display-surface": currentSurfaceColor,
+    "--display-text": currentTextColor,
+    "--display-row": currentRowColor,
+    "--display-card": currentCardColor,
+    backgroundColor: currentBgColor,
   } as CSSProperties;
 
   return (

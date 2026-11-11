@@ -294,14 +294,14 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background-color: #000000;
+  background-color: var(--board-bg, #000000);
 }
 
 .board-fluid-header {
   flex-shrink: 0;
   padding: clamp(4px, 0.8vh, 12px) clamp(10px, 1.2vw, 20px);
-  border-bottom: 1px solid #1e293b;
-  background-color: #000000;
+  border-bottom: 1px solid var(--board-primary, #1e293b);
+  background-color: var(--board-surface, #0f172a);
 }
 
 .board-fluid-main {
@@ -312,6 +312,7 @@
   height: 100%;
   padding: clamp(4px, 0.8vh, 12px) clamp(6px, 0.8vw, 16px);
   overflow: hidden;
+  background-color: var(--board-bg, #000000);
 }
 
 .board-fluid-grid {
@@ -353,7 +354,7 @@
   flex-direction: column;
   justify-content: space-between;
   border-radius: calc(clamp(8px, 1vw, 16px) * var(--card-density-scale, 1));
-  background-color: #000000;
+  background-color: var(--board-card, #0f172a);
   border-style: solid;
   border-width: clamp(2.5px, 0.28vw, 3.8px);
   padding: calc(clamp(5px, 0.7vh, 12px) * var(--card-density-scale, 1))
@@ -412,7 +413,7 @@
 .fluid-hero-banner {
   flex-shrink: 0;
   min-height: 0;
-  background-color: rgba(15, 23, 42, 0.8);
+  background-color: var(--board-row, rgba(15, 23, 42, 0.8));
   border: 1px solid rgba(51, 65, 85, 0.8);
   border-radius: calc(clamp(8px, 0.9vw, 14px) * var(--card-density-scale, 1));
   padding: calc(
@@ -466,7 +467,7 @@
   padding: calc(clamp(1px, 0.25vh, 4px) * var(--card-density-scale, 1))
     calc(clamp(2px, 0.25vw, 4px) * var(--card-density-scale, 1));
   text-align: center;
-  background-color: rgba(2, 6, 23, 0.8);
+  background-color: var(--board-card, rgba(2, 6, 23, 0.8));
   display: flex;
   flex-direction: column;
   justify-content: center;

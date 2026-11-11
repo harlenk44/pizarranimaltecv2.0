@@ -177,6 +177,31 @@ interface BoardWindowPage {
   tripleGames?: TripleGameConfig[];
 }
 
+function getInitialCachedAnimalImages(): AnimalImageMap {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw =
+      localStorage.getItem("pizarra_user_custom_animal_images_v2") ||
+      localStorage.getItem("pizarra_custom_animal_images");
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const map: AnimalImageMap = {};
+        for (const img of parsed) {
+          if (img?.image_url && img.animal_number != null) {
+            map[`${img.game_id}:${img.animal_number}`] = img.image_url;
+            map[`any:${img.animal_number}`] = img.image_url;
+          }
+        }
+        return map;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return {};
+}
+
 export default function BoardPage({ onAdminClick }: BoardPageProps) {
   const { profile, signOut } = useAuth();
   const { settings, updateSettings, refreshSettings } = useBoardSettings();
@@ -185,22 +210,30 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
 
   const effectiveSettings = useMemo(() => {
     if (!designConfig) return settings;
+    const isCustom = Boolean(
+      designConfig.useCustomDesign ||
+      designConfig.background_color ||
+      designConfig.surface_color ||
+      designConfig.primary_color ||
+      designConfig.text_color ||
+      designConfig.card_color ||
+      designConfig.result_row_color ||
+      designConfig.card_style ||
+      (designConfig.game_colors && Object.keys(designConfig.game_colors).length > 0),
+    );
+    if (!isCustom) return settings;
     return {
       ...settings,
-      ...(designConfig.useCustomDesign
-        ? {
-            background_color: designConfig.background_color ?? settings.background_color,
-            surface_color: designConfig.surface_color ?? settings.surface_color,
-            primary_color: designConfig.primary_color ?? settings.primary_color,
-            text_color: designConfig.text_color ?? settings.text_color,
-            card_color: designConfig.card_color ?? settings.card_color,
-            result_row_color: designConfig.result_row_color ?? settings.result_row_color,
-            font_family: designConfig.font_family ?? settings.font_family,
-            animal_scale: designConfig.animal_scale ?? settings.animal_scale,
-            hero_card_scale: designConfig.hero_card_scale ?? settings.hero_card_scale,
-            logo_size: designConfig.logo_size ?? settings.logo_size,
-          }
-        : {}),
+      background_color: designConfig.background_color ?? settings.background_color,
+      surface_color: designConfig.surface_color ?? settings.surface_color,
+      primary_color: designConfig.primary_color ?? settings.primary_color,
+      text_color: designConfig.text_color ?? settings.text_color,
+      card_color: designConfig.card_color ?? settings.card_color,
+      result_row_color: designConfig.result_row_color ?? settings.result_row_color,
+      font_family: designConfig.font_family ?? settings.font_family,
+      animal_scale: designConfig.animal_scale ?? settings.animal_scale,
+      hero_card_scale: designConfig.hero_card_scale ?? settings.hero_card_scale,
+      logo_size: designConfig.logo_size ?? settings.logo_size,
       card_style: designConfig.card_style ?? settings.card_style ?? "neon",
       game_colors: {
         ...(settings.game_colors ?? {}),
@@ -209,9 +242,23 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     };
   }, [settings, designConfig]);
 
+  useEffect(() => {
+    console.log("[BoardDesign:BoardPage] Renderizando Pizarra con configuración activa:", {
+      origen: designConfig?.useCustomDesign ? "Personalizado por PIN de Cliente" : "Diseño Global",
+      background_color: effectiveSettings.background_color,
+      surface_color: effectiveSettings.surface_color,
+      card_color: effectiveSettings.card_color,
+      primary_color: effectiveSettings.primary_color,
+      result_row_color: effectiveSettings.result_row_color,
+      text_color: effectiveSettings.text_color,
+      card_style: effectiveSettings.card_style,
+      font_family: effectiveSettings.font_family,
+    });
+  }, [effectiveSettings, designConfig]);
+
   const [games, setGames] = useState<Game[]>([]);
   const [resultsMap, setResultsMap] = useState<Record<string, Result[]>>({});
-  const [animalImages, setAnimalImages] = useState<AnimalImageMap>({});
+  const [animalImages, setAnimalImages] = useState<AnimalImageMap>(getInitialCachedAnimalImages);
   const [animalNames, setAnimalNames] = useState<AnimalNameMap>({});
   const [animalLabels, setAnimalLabels] = useState<AnimalLabelMap>({});
   const [loading, setLoading] = useState(true);
@@ -225,7 +272,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
   const gamesLoadedRef = useRef<boolean>(false);
   const mediaLoadedRef = useRef<boolean>(false);
   const cachedGamesDataRef = useRef<Game[]>([]);
-  const cachedImgMapRef = useRef<AnimalImageMap>({});
+  const cachedImgMapRef = useRef<AnimalImageMap>(getInitialCachedAnimalImages());
   const cachedNameMapRef = useRef<AnimalNameMap>({});
   const cachedLabelMapRef = useRef<AnimalLabelMap>({});
   const [activePageIndex, setActivePageIndex] = useState<number>(0);
@@ -541,17 +588,14 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
 
     const shouldRefreshMedia = !mediaLoadedRef.current || Array.isArray(syncData?.animalImages);
     if (shouldRefreshMedia) {
-      const [imagesData, entriesData] = await Promise.all([
-        supabase.from("animal_images").select("*"),
-        supabase.from("animal_entries").select("*"),
-      ]);
-
-      imgMap = {};
+      // 1. Inmediata resolución desde caché local para pintar en el frame 0 sin retraso
       const localRecoveredCustom = recoverCustomAnimalImagesFromLocalStorage();
       let localCachedImages: AnimalImage[] = [];
       if (typeof window !== "undefined") {
         try {
-          const localRaw = localStorage.getItem("pizarra_custom_animal_images");
+          const localRaw =
+            localStorage.getItem("pizarra_user_custom_animal_images_v2") ||
+            localStorage.getItem("pizarra_custom_animal_images");
           if (localRaw) {
             const parsed = JSON.parse(localRaw);
             if (Array.isArray(parsed)) localCachedImages = parsed;
@@ -560,6 +604,30 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           // ignore
         }
       }
+
+      if (
+        Object.keys(imgMap).length === 0 &&
+        (localCachedImages.length > 0 || localRecoveredCustom.length > 0)
+      ) {
+        const instantMap: AnimalImageMap = {};
+        for (const img of [...localCachedImages, ...localRecoveredCustom]) {
+          if (!img?.image_url) continue;
+          instantMap[`${img.game_id}:${img.animal_number}`] = img.image_url;
+          instantMap[`any:${img.animal_number}`] = img.image_url;
+        }
+        imgMap = instantMap;
+        cachedImgMapRef.current = instantMap;
+        animalImagesRef.current = instantMap;
+        setAnimalImages(instantMap);
+      }
+
+      // 2. Consulta y sincronización en segundo plano con Supabase
+      const [imagesData, entriesData] = await Promise.all([
+        supabase.from("animal_images").select("*"),
+        supabase.from("animal_entries").select("*"),
+      ]);
+
+      imgMap = { ...imgMap };
 
       const combinedImages: AnimalImage[] = mergeAnimalImagesPreserveCustom(
         (imagesData.data ?? []) as AnimalImage[],
@@ -570,6 +638,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       for (const img of combinedImages) {
         if (!img?.image_url) continue;
         imgMap[`${img.game_id}:${img.animal_number}`] = img.image_url;
+        imgMap[`any:${img.animal_number}`] = img.image_url;
         const matchedGame = loadedGames.find((g) => g.id === img.game_id || g.slug === img.game_id);
         if (matchedGame) {
           imgMap[`${matchedGame.id}:${img.animal_number}`] = img.image_url;
@@ -1135,6 +1204,30 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     timerResetKey,
   ]);
 
+  // Pre-carga silenciosa de imágenes de la próxima pantalla para rotaciones instantáneas sin parpadeo
+  useEffect(() => {
+    if (boardWindows.length <= 1) return;
+    const nextIndex = (safePageIndex + 1) % boardWindows.length;
+    const nextWin = boardWindows[nextIndex];
+    if (nextWin?.animalCards && typeof Image !== "undefined") {
+      for (const card of nextWin.animalCards) {
+        const results = card?.latest_results;
+        if (Array.isArray(results) && results.length > 0) {
+          const latest = results[results.length - 1];
+          if (latest) {
+            const imgUrl =
+              animalImages[`${card.id}:${latest.animal_number}`] ||
+              animalImages[`any:${latest.animal_number}`];
+            if (imgUrl && !imgUrl.startsWith("data:")) {
+              const pre = new Image();
+              pre.src = imgUrl;
+            }
+          }
+        }
+      }
+    }
+  }, [safePageIndex, boardWindows, animalImages]);
+
   const enrichedAlertQueue = useMemo(
     () =>
       alertQueue
@@ -1150,13 +1243,20 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         backgroundColor: effectiveSettings.background_color || "#000000",
         color: effectiveSettings.text_color || "#ffffff",
         fontFamily: effectiveSettings.font_family || "inherit",
+        ["--board-bg" as string]: effectiveSettings.background_color || "#000000",
+        ["--board-surface" as string]: effectiveSettings.surface_color || "#0f172a",
+        ["--board-card" as string]: effectiveSettings.card_color || "#0f172a",
+        ["--board-row" as string]: effectiveSettings.result_row_color || "#1e293b",
+        ["--board-primary" as string]: effectiveSettings.primary_color || "#2563eb",
+        ["--board-text" as string]: effectiveSettings.text_color || "#ffffff",
       }}
     >
       {/* Header */}
       <header
         className="board-fluid-header shrink-0 flex items-center justify-between"
         style={{
-          backgroundColor: effectiveSettings.surface_color || "transparent",
+          backgroundColor: effectiveSettings.surface_color || "#0f172a",
+          borderBottom: `1px solid ${effectiveSettings.primary_color ? `${effectiveSettings.primary_color}40` : "#1e293b"}`,
         }}
       >
         {/* Left Title & Window Tabs */}
@@ -1374,8 +1474,18 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       <AdTickerBar />
 
       {/* Footer */}
-      <footer className="px-6 py-0.5 bg-black border-t border-slate-900/80 text-center shrink-0">
-        <p className="text-[10px] text-slate-600 font-mono">
+      <footer
+        className="px-6 py-0.5 text-center shrink-0 border-t"
+        style={{
+          backgroundColor:
+            effectiveSettings.surface_color || effectiveSettings.background_color || "#000000",
+          borderTopColor: effectiveSettings.primary_color
+            ? `${effectiveSettings.primary_color}33`
+            : "#0f172a",
+          color: effectiveSettings.text_color ? `${effectiveSettings.text_color}88` : "#64748b",
+        }}
+      >
+        <p className="text-[10px] font-mono">
           pizarraianimaltec · Pizarra de Resultados de Lotería en Vivo
         </p>
       </footer>
@@ -1402,11 +1512,13 @@ function AnimalAvatar({
   name,
   number,
   className,
+  priority,
 }: {
   imageUrl?: string;
   name: string;
   number: number;
   className?: string;
+  priority?: "high" | "low" | "auto";
 }) {
   return (
     <AnimalMedia
@@ -1415,6 +1527,9 @@ function AnimalAvatar({
       number={number}
       className={className || "w-full h-full object-contain rounded-md"}
       emojiClassName="text-[clamp(1.8rem,3.2vw,3.8rem)] leading-none select-none"
+      loading="eager"
+      decoding="async"
+      fetchPriority={priority || "auto"}
     />
   );
 }
@@ -1469,7 +1584,10 @@ function GameCard({
   return (
     <div
       className="fluid-game-card h-full w-full min-h-0 min-w-0 overflow-hidden flex flex-col justify-between"
-      style={getNeonFlexCardStyle(neonColor, settings.card_color || "#000000", styleMode)}
+      style={{
+        ...getNeonFlexCardStyle(neonColor, settings.card_color || "#0f172a", styleMode),
+        color: settings.text_color || "#ffffff",
+      }}
     >
       {/* Top Header */}
       <div className="fluid-card-header shrink-0">
@@ -1484,8 +1602,9 @@ function GameCard({
           <img
             src={getGameLogo(game, neonColor)}
             alt={game.name}
-            loading="lazy"
+            loading="eager"
             decoding="async"
+            fetchPriority="high"
             onError={(e) => {
               e.currentTarget.src = getGameLogo(game.slug || game.name, neonColor);
             }}
@@ -1530,6 +1649,7 @@ function GameCard({
               name={latestDisplayName}
               number={latestCanonical.number}
               className="w-full h-full object-contain max-h-full max-w-full p-0.5 drop-shadow-md rounded-lg"
+              priority="high"
             />
           ) : (
             <Target className="w-6 h-6 sm:w-8 sm:h-8 text-slate-500" />
@@ -1543,15 +1663,24 @@ function GameCard({
           />
           {latestResult ? (
             <div className="truncate">
-              <div className="fluid-hero-text font-black text-white tracking-wide truncate">
+              <div
+                className="fluid-hero-text font-black tracking-wide truncate"
+                style={{ color: settings.text_color || "#ffffff" }}
+              >
                 {latestLabel} - {latestDisplayName.toUpperCase()}
               </div>
-              <div className="fluid-hero-time font-mono font-semibold text-slate-300 mt-0.5 truncate">
+              <div
+                className="fluid-hero-time font-mono font-semibold mt-0.5 truncate"
+                style={{ color: settings.text_color ? `${settings.text_color}cc` : "#cbd5e1" }}
+              >
                 {formatTime(latestResult.draw_time)}
               </div>
             </div>
           ) : (
-            <div className="fluid-hero-text font-bold text-slate-400 tracking-wide truncate">
+            <div
+              className="fluid-hero-text font-bold tracking-wide truncate"
+              style={{ color: settings.text_color ? `${settings.text_color}88` : "#94a3b8" }}
+            >
               Esperando sorteo
             </div>
           )}
@@ -1578,15 +1707,27 @@ function GameCard({
             <div
               key={timeSlot}
               className={`fluid-schedule-cell h-full w-full min-h-0 min-w-0 overflow-hidden transition ${
-                res ? "border-slate-700/90 shadow-sm" : "border-slate-800/80 opacity-80"
+                res ? "shadow-sm" : "opacity-85"
               }`}
               style={{
                 backgroundColor: res
                   ? settings.result_row_color || "rgba(15, 23, 42, 0.9)"
-                  : "rgba(2, 6, 23, 0.6)",
+                  : settings.card_color
+                    ? `${settings.card_color}cc`
+                    : "rgba(2, 6, 23, 0.6)",
+                borderColor: res
+                  ? `${neonColor}66`
+                  : settings.card_color
+                    ? `${settings.card_color}88`
+                    : "rgba(51, 65, 85, 0.5)",
               }}
             >
-              <div className="fluid-cell-time truncate w-full">{formatTime(timeSlot)}</div>
+              <div
+                className="fluid-cell-time truncate w-full"
+                style={{ color: settings.text_color ? `${settings.text_color}b3` : "#94a3b8" }}
+              >
+                {formatTime(timeSlot)}
+              </div>
               {res && cellCanonical ? (
                 isExpandedCard ? (
                   <div className="flex items-center justify-center gap-1.5 w-full min-w-0 px-1 mt-0.5">

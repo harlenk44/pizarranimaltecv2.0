@@ -124,6 +124,96 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   updated_at: "",
 };
 
+/**
+ * Sanitizes AppSettings into the exact standard columns of the Supabase public.app_settings table.
+ * Strips non-column properties so PostgREST never fails with 'column not found' errors.
+ */
+export function sanitizeAppSettingsForSupabase(
+  settings: Partial<AppSettings>,
+): Record<string, unknown> {
+  return {
+    id: "global",
+    background_color: settings.background_color || DEFAULT_APP_SETTINGS.background_color,
+    surface_color: settings.surface_color || DEFAULT_APP_SETTINGS.surface_color,
+    primary_color: settings.primary_color || DEFAULT_APP_SETTINGS.primary_color,
+    text_color: settings.text_color || DEFAULT_APP_SETTINGS.text_color,
+    card_color: settings.card_color || DEFAULT_APP_SETTINGS.card_color,
+    result_row_color: settings.result_row_color || DEFAULT_APP_SETTINGS.result_row_color,
+    font_family: settings.font_family || DEFAULT_APP_SETTINGS.font_family,
+    base_font_size:
+      typeof settings.base_font_size === "number"
+        ? settings.base_font_size
+        : DEFAULT_APP_SETTINGS.base_font_size,
+    rotation_enabled: Boolean(settings.rotation_enabled),
+    rotation_interval_seconds:
+      typeof settings.rotation_interval_seconds === "number"
+        ? settings.rotation_interval_seconds
+        : DEFAULT_APP_SETTINGS.rotation_interval_seconds,
+    start_view: settings.start_view === "weekly" ? "weekly" : "daily",
+    updated_at: settings.updated_at || new Date().toISOString(),
+  };
+}
+
+/**
+ * Parses raw row data from Supabase app_settings table into a clean Partial<AppSettings>,
+ * safely inspecting standard columns and any theme_config/custom_styles JSON columns if present.
+ */
+export function parseAppSettingsFromSupabase(
+  data: Record<string, unknown> | null | undefined,
+): Partial<AppSettings> | null {
+  if (!data || typeof data !== "object") return null;
+  const result: Partial<AppSettings> = {
+    id: "global",
+    background_color:
+      typeof data["background_color"] === "string" ? data["background_color"] : undefined,
+    surface_color: typeof data["surface_color"] === "string" ? data["surface_color"] : undefined,
+    primary_color: typeof data["primary_color"] === "string" ? data["primary_color"] : undefined,
+    text_color: typeof data["text_color"] === "string" ? data["text_color"] : undefined,
+    card_color: typeof data["card_color"] === "string" ? data["card_color"] : undefined,
+    result_row_color:
+      typeof data["result_row_color"] === "string" ? data["result_row_color"] : undefined,
+    font_family: typeof data["font_family"] === "string" ? data["font_family"] : undefined,
+    base_font_size: typeof data["base_font_size"] === "number" ? data["base_font_size"] : undefined,
+    rotation_enabled:
+      typeof data["rotation_enabled"] === "boolean" ? data["rotation_enabled"] : undefined,
+    rotation_interval_seconds:
+      typeof data["rotation_interval_seconds"] === "number"
+        ? data["rotation_interval_seconds"]
+        : undefined,
+    start_view: data["start_view"] === "weekly" ? "weekly" : "daily",
+    updated_at: typeof data["updated_at"] === "string" ? data["updated_at"] : undefined,
+  };
+
+  // If theme_config or custom_styles JSON column exists in Supabase table, extract extended properties
+  const extended = (data["theme_config"] || data["custom_styles"]) as
+    Record<string, unknown> | undefined;
+  if (extended && typeof extended === "object") {
+    if (extended["card_style"] === "solid" || extended["card_style"] === "neon") {
+      result.card_style = extended["card_style"];
+    }
+    if (extended["game_colors"] && typeof extended["game_colors"] === "object") {
+      result.game_colors = extended["game_colors"] as Record<string, string>;
+    }
+    if (typeof extended["logo_size"] === "number") result.logo_size = extended["logo_size"];
+    if (typeof extended["font_size_scale"] === "number")
+      result.font_size_scale = extended["font_size_scale"];
+    if (typeof extended["hero_card_scale"] === "number")
+      result.hero_card_scale = extended["hero_card_scale"];
+    if (typeof extended["animal_scale"] === "number")
+      result.animal_scale = extended["animal_scale"];
+  }
+
+  // Also check if columns directly existed
+  if (data["card_style"] === "solid" || data["card_style"] === "neon") {
+    result.card_style = data["card_style"];
+  }
+  if (data["game_colors"] && typeof data["game_colors"] === "object") {
+    result.game_colors = data["game_colors"] as Record<string, string>;
+  }
+
+  return result;
+}
+
 export interface GameWithResults extends Game {
   latest_results: Result[];
 }

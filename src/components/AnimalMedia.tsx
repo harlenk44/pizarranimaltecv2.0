@@ -23,6 +23,7 @@ interface AnimalMediaProps {
   emojiClassName?: string;
   loading?: "lazy" | "eager";
   decoding?: "async" | "sync" | "auto";
+  fetchPriority?: "high" | "low" | "auto";
 }
 
 export default function AnimalMedia({
@@ -31,8 +32,9 @@ export default function AnimalMedia({
   number,
   className = "w-full h-full object-contain",
   emojiClassName = "text-2xl",
-  loading = "lazy",
+  loading = "eager",
   decoding = "async",
+  fetchPriority = "auto",
 }: AnimalMediaProps) {
   const [hasError, setHasError] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -99,6 +101,7 @@ export default function AnimalMedia({
       alt={name}
       loading={loading}
       decoding={decoding}
+      fetchPriority={fetchPriority !== "auto" ? fetchPriority : undefined}
       onError={() => setHasError(true)}
       className={className}
     />
