@@ -6,6 +6,8 @@
  * que retornan HTML bloqueado por Cloudflare o anti-hotlinking en los navegadores y Smart TVs.
  */
 
+import persistedGameLogosJson from "../../game_logos.persisted.json";
+
 function svgToDataUri(svg: string): string {
   return "data:image/svg+xml;utf8," + encodeURIComponent(svg.trim().replace(/\s+/g, " "));
 }
@@ -626,7 +628,19 @@ export const CUSTOM_GAME_LOGOS_STORAGE_KEY = "pizarra_custom_game_logos_v1";
 
 const OFFICIAL_LOGO_VALUES = new Set<string>(Object.values(OFFICIAL_GAME_LOGOS));
 
-let memoryCustomGameLogos: Record<string, string> = {};
+function buildInitialPersistedLogosMap(): Record<string, string> {
+  const initial: Record<string, string> = {};
+  if (persistedGameLogosJson && typeof persistedGameLogosJson === "object") {
+    for (const [k, v] of Object.entries(persistedGameLogosJson as Record<string, unknown>)) {
+      if (typeof v === "string" && isCustomUploadedGameLogo(v)) {
+        initial[k.trim().toLowerCase()] = v;
+      }
+    }
+  }
+  return initial;
+}
+
+let memoryCustomGameLogos: Record<string, string> = buildInitialPersistedLogosMap();
 let memoryLogosInitialized = false;
 
 /**
@@ -659,9 +673,13 @@ export function isCustomUploadedGameLogo(url?: string | null): boolean {
 }
 
 /**
- * Carga y sincroniza el mapa de logos personalizados desde localStorage y pizarra_persisted_games.
+ * Carga y sincroniza el mapa de logos personalizados desde el archivo persistido empaquetado,
+ * localStorage y pizarra_persisted_games.
  */
 export function getCustomGameLogosMap(): Record<string, string> {
+  if (Object.keys(memoryCustomGameLogos).length === 0) {
+    memoryCustomGameLogos = buildInitialPersistedLogosMap();
+  }
   if (typeof window === "undefined") {
     return memoryCustomGameLogos;
   }

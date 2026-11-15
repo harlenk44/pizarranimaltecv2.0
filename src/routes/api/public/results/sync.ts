@@ -19,6 +19,9 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { resolveCanonicalAnimal, parseCanonicalAnimalNumber } from "@/lib/official-animals";
 import { getGameLogo, isBrokenExternalLogo, isCustomUploadedGameLogo } from "@/lib/game-logos";
 import { TRIPLE_GAMES, buildTripleAlertItem, type TripleResult } from "@/lib/triples";
+import persistedGameLogosJson from "../../../../../game_logos.persisted.json";
+import persistedAnimalImagesJson from "../../../../../animal_images.persisted.json";
+import persistedAppSettingsJson from "../../../../../app_settings.persisted.json";
 
 const RESULTS_FILE = "/tmp/lottery_results.json";
 const TRIPLE_RESULTS_FILE = "/tmp/lottery_triples_results.json";
@@ -326,6 +329,12 @@ function loadServerAnimalImages() {
     let persistedTmp: AnimalImage[] = [];
     let hadRedundantOrBrokenRefs = false;
 
+    if (Array.isArray(persistedAnimalImagesJson)) {
+      persistedWorkspace = filterAdminCustomAnimalImages(
+        persistedAnimalImagesJson as AnimalImage[],
+      );
+    }
+
     if (fs.existsSync(WORKSPACE_ANIMAL_IMAGES_FILE)) {
       const parsed = JSON.parse(fs.readFileSync(WORKSPACE_ANIMAL_IMAGES_FILE, "utf-8"));
       if (Array.isArray(parsed)) {
@@ -439,6 +448,13 @@ export async function syncAnimalImagesWithSupabase() {
 
 function loadServerGameLogos() {
   try {
+    if (persistedGameLogosJson && typeof persistedGameLogosJson === "object") {
+      for (const [k, v] of Object.entries(persistedGameLogosJson as Record<string, unknown>)) {
+        if (typeof v === "string" && isCustomUploadedGameLogo(v)) {
+          serverCustomGameLogos[k.trim().toLowerCase()] = v;
+        }
+      }
+    }
     for (const f of [WORKSPACE_GAME_LOGOS_FILE, GAME_LOGOS_FILE]) {
       if (fs.existsSync(f)) {
         try {
@@ -632,7 +648,10 @@ export async function syncGamesWithSupabase() {
 
 function loadServerAppSettings() {
   try {
-    let loaded: AppSettings | null = null;
+    let loaded: Record<string, unknown> | null =
+      persistedAppSettingsJson && typeof persistedAppSettingsJson === "object"
+        ? (persistedAppSettingsJson as Record<string, unknown>)
+        : null;
     for (const f of [WORKSPACE_APP_SETTINGS_FILE, APP_SETTINGS_FILE]) {
       if (fs.existsSync(f)) {
         const parsed = JSON.parse(fs.readFileSync(f, "utf-8"));
