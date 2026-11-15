@@ -33,17 +33,46 @@ function createSupabaseFetch(supabaseKey: string): typeof fetch {
   };
 }
 
+const INACTIVE_SUPABASE_HOSTS = [
+  "ebpunrzbagmcdtammjqn.supabase.co",
+  "dqpomustswauzejggfui.supabase.co",
+];
+let _supabaseAdminOffline = false;
+
+function isInactiveSupabaseUrl(url?: string): boolean {
+  if (!url) return true;
+  return INACTIVE_SUPABASE_HOSTS.some((host) => url.includes(host));
+}
+
 function createSupabaseAdminClient() {
   const SUPABASE_URL = process.env["SUPABASE_URL"];
   const SUPABASE_SERVICE_ROLE_KEY = process.env["SUPABASE_SERVICE_ROLE_KEY"];
 
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  if (
+    _supabaseAdminOffline ||
+    !SUPABASE_URL ||
+    !SUPABASE_SERVICE_ROLE_KEY ||
+    isInactiveSupabaseUrl(SUPABASE_URL)
+  ) {
     return createMockSupabaseClient() as unknown as ReturnType<typeof createClient<Database>>;
   }
 
+  const baseFetch = createSupabaseFetch(SUPABASE_SERVICE_ROLE_KEY);
+  const resilientFetch: typeof fetch = async (input, init) => {
+    try {
+      return await baseFetch(input, init);
+    } catch (err) {
+      _supabaseAdminOffline = true;
+      _supabaseAdmin = createMockSupabaseClient() as unknown as ReturnType<
+        typeof createClient<Database>
+      >;
+      throw err;
+    }
+  };
+
   return createClient<Database>(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
     global: {
-      fetch: createSupabaseFetch(SUPABASE_SERVICE_ROLE_KEY),
+      fetch: resilientFetch,
     },
     auth: {
       storage: undefined,

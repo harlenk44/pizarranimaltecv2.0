@@ -561,17 +561,34 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
 
     let loadedGames = cachedGamesDataRef.current;
     if (!gamesLoadedRef.current || (Array.isArray(syncData?.games) && syncData.games.length > 0)) {
-      const { data: gamesData } = await supabase
-        .from("games")
-        .select("*")
-        .eq("is_active", true)
-        .order("display_order");
+      let resolvedGames: Game[] = [];
+      try {
+        const { data: gamesData } = await supabase
+          .from("games")
+          .select("*")
+          .eq("is_active", true)
+          .order("display_order");
+        if (Array.isArray(gamesData) && gamesData.length > 0) {
+          resolvedGames = gamesData as Game[];
+        }
+      } catch {
+        // Fallback when external Supabase is unreachable
+      }
 
-      if (gamesData && gamesData.length > 0) {
-        cachedGamesDataRef.current = gamesData as Game[];
-        loadedGames = gamesData as Game[];
+      if (resolvedGames.length === 0) {
+        if (Array.isArray(syncData?.games) && syncData.games.length > 0) {
+          resolvedGames = (syncData.games as Game[]).filter((g) => g.is_active !== false);
+        } else {
+          const { mockStore } = await import("@/lib/mock-db");
+          resolvedGames = (mockStore.games as Game[]).filter((g) => g.is_active !== false);
+        }
+      }
+
+      if (resolvedGames.length > 0) {
+        cachedGamesDataRef.current = resolvedGames;
+        loadedGames = resolvedGames;
         getCustomGameLogosMap();
-        const gamesWithLogos = (gamesData as Game[]).map((g) => ({
+        const gamesWithLogos = resolvedGames.map((g) => ({
           ...g,
           logo_url: getGameLogo(g, g.color),
         }));
@@ -621,16 +638,39 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         setAnimalImages(instantMap);
       }
 
-      // 2. Consulta y sincronización en segundo plano con Supabase
-      const [imagesData, entriesData] = await Promise.all([
-        supabase.from("animal_images").select("*"),
-        supabase.from("animal_entries").select("*"),
-      ]);
+      // 2. Consulta y sincronización en segundo plano con Supabase (con respaldo a mockStore)
+      let dbImages: AnimalImage[] = [];
+      let dbEntries: AnimalEntry[] = [];
+      try {
+        const [imagesData, entriesData] = await Promise.all([
+          supabase.from("animal_images").select("*"),
+          supabase.from("animal_entries").select("*"),
+        ]);
+        if (Array.isArray(imagesData?.data) && imagesData.data.length > 0) {
+          dbImages = imagesData.data as AnimalImage[];
+        }
+        if (Array.isArray(entriesData?.data) && entriesData.data.length > 0) {
+          dbEntries = entriesData.data as AnimalEntry[];
+        }
+      } catch {
+        // Fallback to mockStore below
+      }
+
+      if (dbImages.length === 0 || dbEntries.length === 0) {
+        const { mockStore, ensureCustomCatalogLoaded } = await import("@/lib/mock-db");
+        await ensureCustomCatalogLoaded().catch(() => {});
+        if (dbImages.length === 0) {
+          dbImages = mockStore.animal_images as AnimalImage[];
+        }
+        if (dbEntries.length === 0) {
+          dbEntries = mockStore.animal_entries as AnimalEntry[];
+        }
+      }
 
       imgMap = { ...imgMap };
 
       const combinedImages: AnimalImage[] = mergeAnimalImagesPreserveCustom(
-        (imagesData.data ?? []) as AnimalImage[],
+        dbImages,
         localCachedImages,
         localRecoveredCustom,
       );
@@ -651,7 +691,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
 
       nameMap = {};
       labelMap = {};
-      for (const entry of (entriesData.data ?? []) as AnimalEntry[]) {
+      for (const entry of dbEntries) {
         nameMap[`${entry.game_id}:${entry.number}`] = entry.name;
         if (entry.label) labelMap[`${entry.game_id}:${entry.number}`] = entry.label;
         const matchedGame = loadedGames.find(
@@ -686,13 +726,25 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           return { gameId: g.id, results: matching };
         }
 
-        const { data } = await supabase
-          .from("results")
-          .select("*")
-          .eq("game_id", g.id)
-          .eq("draw_date", today)
-          .order("draw_time", { ascending: true });
-        return { gameId: g.id, results: (data ?? []) as Result[] };
+        try {
+          const { data } = await supabase
+            .from("results")
+            .select("*")
+            .eq("game_id", g.id)
+            .eq("draw_date", today)
+            .order("draw_time", { ascending: true });
+          if (Array.isArray(data) && data.length > 0) {
+            return { gameId: g.id, results: data as Result[] };
+          }
+        } catch {
+          // Fallback to mockStore.results
+        }
+
+        const { mockStore } = await import("@/lib/mock-db");
+        const fallbackResults = (mockStore.results as Result[])
+          .filter((r) => r.game_id === g.id && r.draw_date === today)
+          .sort((a, b) => a.draw_time.localeCompare(b.draw_time));
+        return { gameId: g.id, results: fallbackResults };
       }),
     );
 

@@ -55,26 +55,52 @@ function createSupabaseFetch(supabaseUrl: string, supabaseKey: string): typeof f
   };
 }
 
+const INACTIVE_SUPABASE_HOSTS = [
+  "ebpunrzbagmcdtammjqn.supabase.co",
+  "dqpomustswauzejggfui.supabase.co",
+];
+let _supabaseOffline = false;
+
+function isInactiveSupabaseUrl(url?: string): boolean {
+  if (!url) return true;
+  return INACTIVE_SUPABASE_HOSTS.some((host) => url.includes(host));
+}
+
 function createSupabaseClient() {
   const SUPABASE_URL = import.meta.env["VITE_SUPABASE_URL"] || process.env["SUPABASE_URL"];
   const SUPABASE_PUBLISHABLE_KEY =
     import.meta.env["VITE_SUPABASE_PUBLISHABLE_KEY"] || process.env["SUPABASE_PUBLISHABLE_KEY"];
   const SUPABASE_SERVICE_ROLE_KEY = process.env["SUPABASE_SERVICE_ROLE_KEY"];
 
-  // Connect to external Supabase when a .supabase.co URL or service role key is configured;
-  // otherwise use the self-contained mock database for preview/test environments.
+  // Connect to external Supabase when an active .supabase.co URL or service role key is configured;
+  // otherwise use the self-contained mock database so the board always renders reliably.
   const isExternalSupabase = Boolean(
+    !_supabaseOffline &&
     SUPABASE_URL &&
     SUPABASE_PUBLISHABLE_KEY &&
+    !isInactiveSupabaseUrl(SUPABASE_URL) &&
     (SUPABASE_URL.includes(".supabase.co") || Boolean(SUPABASE_SERVICE_ROLE_KEY)),
   );
   if (!isExternalSupabase) {
     return createMockSupabaseClient() as unknown as ReturnType<typeof createClient<Database>>;
   }
 
+  const baseFetch = createSupabaseFetch(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
+  const resilientFetch: typeof fetch = async (input, init) => {
+    try {
+      return await baseFetch(input, init);
+    } catch (err) {
+      _supabaseOffline = true;
+      _supabase = createMockSupabaseClient() as unknown as ReturnType<
+        typeof createClient<Database>
+      >;
+      throw err;
+    }
+  };
+
   return createClient<Database>(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
     global: {
-      fetch: createSupabaseFetch(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY),
+      fetch: resilientFetch,
     },
     auth: {
       storage: brokeredPreviewStorage(),

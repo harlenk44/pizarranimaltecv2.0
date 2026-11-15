@@ -884,6 +884,7 @@ async function triggerBackgroundSync(forceWait = false) {
           animalName: canonical.name,
           animalImageUrl: alertAnimalImageUrl ?? null,
         };
+        serverLatestAlert = alertPayload;
         try {
           fs.writeFileSync(LATEST_ALERT_FILE, JSON.stringify(alertPayload));
         } catch {
@@ -903,6 +904,7 @@ async function triggerBackgroundSync(forceWait = false) {
         );
         if (tripleGame) {
           const alertPayload = buildTripleAlertItem(latestTriple, tripleGame);
+          serverLatestAlert = alertPayload as unknown as Record<string, unknown>;
           try {
             fs.writeFileSync(LATEST_ALERT_FILE, JSON.stringify(alertPayload));
           } catch {
@@ -1051,10 +1053,18 @@ export const Route = createFileRoute("/api/public/results/sync")({
           (r) => r.draw_date === serverToday,
         ).length;
 
-        // Only trigger initial background sync once on server boot if results for today are empty
-        if (!initialAutoSyncDone && (todayResultsCount === 0 || serverTripleResults.length === 0)) {
+        // Await sync when today's results are empty (e.g. cold Cloudflare Worker) or when interval elapsed
+        const isStaleSync = Date.now() - lastAutoSyncTimestamp >= AUTO_SYNC_INTERVAL_MS;
+        if (
+          !initialAutoSyncDone ||
+          todayResultsCount === 0 ||
+          serverTripleResults.length === 0 ||
+          isStaleSync
+        ) {
           initialAutoSyncDone = true;
-          triggerBackgroundSync(true).catch(() => {});
+          await triggerBackgroundSync(
+            todayResultsCount === 0 || serverTripleResults.length === 0,
+          ).catch(() => {});
         }
 
         let latestAlert = serverLatestAlert;

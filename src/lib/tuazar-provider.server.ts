@@ -2,6 +2,7 @@
 // and TuAzar as safety fallback, normalizing them for sync_automatic_result.
 // The origins are fixed in code; no user-supplied URLs are ever fetched.
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
+import { mockStore } from "@/lib/mock-db";
 import type { ResultsProvider, SyncGame } from "@/lib/result-sync";
 import { hourTo24h, normalizeName, parseTuazarResults, type TuazarPage } from "@/lib/tuazar-parser";
 import {
@@ -121,12 +122,21 @@ export function createTuazarProvider(tuazarGameName: string, gameSlug?: string):
   return {
     async fetchResults(game: SyncGame): Promise<unknown[]> {
       // 1. Fetch game catalog for valid matching
-      const { data: entries, error } = await supabaseAdmin
-        .from("animal_entries")
-        .select("number, name, label")
-        .eq("game_id", game.id);
-      if (error) throw error;
-      const catalogEntries = entries ?? [];
+      let catalogEntries: Array<{ number: number; name: string; label?: string }> = [];
+      try {
+        const { data: entries, error } = await supabaseAdmin
+          .from("animal_entries")
+          .select("number, name, label")
+          .eq("game_id", game.id);
+        if (!error && Array.isArray(entries) && entries.length > 0) {
+          catalogEntries = entries;
+        }
+      } catch {
+        // Fallback to mockStore.animal_entries
+      }
+      if (catalogEntries.length === 0) {
+        catalogEntries = mockStore.animal_entries.filter((e) => e.game_id === game.id);
+      }
       const scheduledTimes = getGameScheduleTimes(targetSlug ?? game.slug);
       const validScheduleSet = new Set(scheduledTimes.map((t) => normalizeScheduleTime(t) ?? t));
       if (targetSlug === "la-ricachona" || game.slug === "la-ricachona") {
