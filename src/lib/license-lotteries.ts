@@ -1,4 +1,5 @@
 import type { CSSProperties } from "react";
+import type { ClientLicense } from "@/lib/types";
 import {
   MASTER_PRODUCTS_CATALOG,
   getMasterAnimalProducts,
@@ -497,4 +498,185 @@ export function getResponsiveBoardGridStyle(cardCount: number): CSSProperties {
     "--card-logo-scale": logoScale,
     "--card-cell-scale": cellScale,
   } as CSSProperties;
+}
+
+export const LICENSE_OVERRIDES_STORAGE_KEY = "pizarra_license_overrides_v3";
+export const LICENSE_CACHE_STORAGE_KEY = "pizarra_license_cache_v2";
+export const CLIENT_LICENSES_CACHE_KEY = "pizarra_client_licenses_cache_v2";
+export const DELETED_LICENSES_STORAGE_KEY = "pizarra_deleted_licenses_v2";
+export const LAST_CONFIGURED_LICENSE_ID_KEY = "pizarra_last_configured_license_id";
+
+interface StoredLicenseOverride {
+  license: ClientLicense;
+  updatedAt: number;
+}
+
+export function saveLocalLicenseOverride(lic: ClientLicense): void {
+  if (typeof window === "undefined") return;
+  try {
+    const raw = localStorage.getItem(LICENSE_OVERRIDES_STORAGE_KEY);
+    const map: Record<string, StoredLicenseOverride> =
+      raw && typeof JSON.parse(raw) === "object" ? JSON.parse(raw) : {};
+    const entry: StoredLicenseOverride = {
+      license: { ...lic },
+      updatedAt: Date.now(),
+    };
+    if (lic.id) {
+      map[lic.id] = entry;
+    }
+    if (lic.pin_code) {
+      map[`pin:${lic.pin_code}`] = entry;
+    }
+    localStorage.setItem(LICENSE_OVERRIDES_STORAGE_KEY, JSON.stringify(map));
+    if (lic.id) {
+      localStorage.setItem(LAST_CONFIGURED_LICENSE_ID_KEY, lic.id);
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function removeLocalLicenseOverride(id?: string, pinCode?: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    const raw = localStorage.getItem(LICENSE_OVERRIDES_STORAGE_KEY);
+    if (raw) {
+      const map: Record<string, StoredLicenseOverride> = JSON.parse(raw) || {};
+      if (id) delete map[id];
+      if (pinCode) delete map[`pin:${pinCode}`];
+      localStorage.setItem(LICENSE_OVERRIDES_STORAGE_KEY, JSON.stringify(map));
+    }
+  } catch {
+    // ignore
+  }
+}
+
+export function saveLocalLicensesSnapshot(
+  requireLicense: boolean,
+  licenses: ClientLicense[],
+): void {
+  if (typeof window === "undefined") return;
+  try {
+    const payload = JSON.stringify({ requireLicense, licenses });
+    localStorage.setItem(LICENSE_CACHE_STORAGE_KEY, payload);
+    localStorage.setItem(CLIENT_LICENSES_CACHE_KEY, payload);
+    localStorage.setItem("pizarra_persisted_client_licenses", JSON.stringify(licenses));
+  } catch {
+    // ignore
+  }
+}
+
+export function getLastConfiguredLicenseId(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return localStorage.getItem(LAST_CONFIGURED_LICENSE_ID_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function reconcileClientLicensesWithLocal(
+  serverLicenses: ClientLicense[],
+  serverDeletedIds?: string[],
+  serverDeletedPins?: string[],
+): { licenses: ClientLicense[]; needsServerSync: ClientLicense[] } {
+  const safeServer = Array.isArray(serverLicenses) ? serverLicenses : [];
+  if (typeof window === "undefined") {
+    return { licenses: safeServer, needsServerSync: [] };
+  }
+
+  try {
+    const localDeletedRaw = localStorage.getItem(DELETED_LICENSES_STORAGE_KEY);
+    const localDeleted = localDeletedRaw ? JSON.parse(localDeletedRaw) : { ids: [], pins: [] };
+    const deletedIdSet = new Set<string>([
+      ...(Array.isArray(serverDeletedIds) ? serverDeletedIds : []),
+      ...(Array.isArray(localDeleted?.ids) ? localDeleted.ids : []),
+    ]);
+    const deletedPinSet = new Set<string>([
+      ...(Array.isArray(serverDeletedPins) ? serverDeletedPins : []),
+      ...(Array.isArray(localDeleted?.pins) ? localDeleted.pins : []),
+    ]);
+
+    const overridesRaw = localStorage.getItem(LICENSE_OVERRIDES_STORAGE_KEY);
+    const overridesMap: Record<string, StoredLicenseOverride> =
+      overridesRaw && typeof JSON.parse(overridesRaw) === "object" ? JSON.parse(overridesRaw) : {};
+
+    const needsServerSync: ClientLicense[] = [];
+    const seenIds = new Set<string>();
+    const seenPins = new Set<string>();
+    const result: ClientLicense[] = [];
+
+    for (const sLic of safeServer) {
+      if (!sLic || !sLic.id) continue;
+      if (deletedIdSet.has(sLic.id) || (sLic.pin_code && deletedPinSet.has(sLic.pin_code))) {
+        continue;
+      }
+
+      const ov =
+        overridesMap[sLic.id] || (sLic.pin_code ? overridesMap[`pin:${sLic.pin_code}`] : undefined);
+
+      if (ov && ov.license) {
+        const mergedBound = Array.from(
+          new Set([...(sLic.bound_device_ids || []), ...(ov.license.bound_device_ids || [])]),
+        );
+        const merged: ClientLicense = {
+          ...sLic,
+          ...ov.license,
+          id: sLic.id,
+          pin_code: ov.license.pin_code || sLic.pin_code,
+          bound_device_ids: mergedBound,
+        };
+        if (
+          sLic.client_name !== merged.client_name ||
+          sLic.status !== merged.status ||
+          sLic.expires_at !== merged.expires_at ||
+          sLic.max_devices !== merged.max_devices
+        ) {
+          needsServerSync.push(merged);
+        }
+        result.push(merged);
+        seenIds.add(merged.id);
+        if (merged.pin_code) seenPins.add(merged.pin_code);
+      } else {
+        result.push(sLic);
+        seenIds.add(sLic.id);
+        if (sLic.pin_code) seenPins.add(sLic.pin_code);
+      }
+    }
+
+    // Also include any locally created/cached licenses that the stateless Worker isolate didn't have
+    const extraCandidates: ClientLicense[] = [];
+    for (const key of Object.keys(overridesMap)) {
+      if (!key.startsWith("pin:") && overridesMap[key]?.license) {
+        extraCandidates.push(overridesMap[key].license);
+      }
+    }
+
+    const cachedRaw =
+      localStorage.getItem(CLIENT_LICENSES_CACHE_KEY) ||
+      localStorage.getItem(LICENSE_CACHE_STORAGE_KEY);
+    if (cachedRaw) {
+      const cachedParsed = JSON.parse(cachedRaw);
+      if (Array.isArray(cachedParsed?.licenses)) {
+        for (const cLic of cachedParsed.licenses as ClientLicense[]) {
+          if (cLic && cLic.id) extraCandidates.push(cLic);
+        }
+      }
+    }
+
+    for (const candidate of extraCandidates) {
+      if (!candidate || !candidate.id || !candidate.pin_code) continue;
+      if (deletedIdSet.has(candidate.id) || deletedPinSet.has(candidate.pin_code)) continue;
+      if (seenIds.has(candidate.id) || seenPins.has(candidate.pin_code)) continue;
+
+      seenIds.add(candidate.id);
+      seenPins.add(candidate.pin_code);
+      result.unshift(candidate);
+      needsServerSync.push(candidate);
+    }
+
+    return { licenses: result, needsServerSync };
+  } catch {
+    return { licenses: safeServer, needsServerSync: [] };
+  }
 }

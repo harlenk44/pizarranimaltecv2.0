@@ -47,6 +47,8 @@ let serverLicensesVersion = 1;
 let serverLatestAlert: Record<string, unknown> | null = null;
 let serverDataInitialized = false;
 let initialAutoSyncDone = false;
+let initialAnimalImagesSeeded = false;
+let initialAppSettingsSeeded = false;
 
 function loadServerTripleResults() {
   try {
@@ -329,7 +331,8 @@ function loadServerAnimalImages() {
     let persistedTmp: AnimalImage[] = [];
     let hadRedundantOrBrokenRefs = false;
 
-    if (Array.isArray(persistedAnimalImagesJson)) {
+    if (!initialAnimalImagesSeeded && Array.isArray(persistedAnimalImagesJson)) {
+      initialAnimalImagesSeeded = true;
       persistedWorkspace = filterAdminCustomAnimalImages(
         persistedAnimalImagesJson as AnimalImage[],
       );
@@ -648,10 +651,15 @@ export async function syncGamesWithSupabase() {
 
 function loadServerAppSettings() {
   try {
-    let loaded: Record<string, unknown> | null =
-      persistedAppSettingsJson && typeof persistedAppSettingsJson === "object"
-        ? (persistedAppSettingsJson as Record<string, unknown>)
-        : null;
+    let loaded: Record<string, unknown> | null = null;
+    if (
+      !initialAppSettingsSeeded &&
+      persistedAppSettingsJson &&
+      typeof persistedAppSettingsJson === "object"
+    ) {
+      initialAppSettingsSeeded = true;
+      loaded = persistedAppSettingsJson as Record<string, unknown>;
+    }
     for (const f of [WORKSPACE_APP_SETTINGS_FILE, APP_SETTINGS_FILE]) {
       if (fs.existsSync(f)) {
         const parsed = JSON.parse(fs.readFileSync(f, "utf-8"));
@@ -1223,21 +1231,59 @@ export const Route = createFileRoute("/api/public/results/sync")({
             } else if (act.type === "restore_batch" && Array.isArray(act.licenses)) {
               const deletedSet = new Set<string>(serverLicenseState.deletedIds || []);
               const deletedPinSet = new Set<string>(serverLicenseState.deletedPins || []);
-              let addedAny = false;
+              let changedAny = false;
               for (const cachedLic of act.licenses) {
                 if (
                   !cachedLic ||
                   !cachedLic.pin_code ||
-                  cachedLic.pin_code === "291007" ||
                   deletedSet.has(cachedLic.id) ||
                   deletedPinSet.has(cachedLic.pin_code)
                 ) {
                   continue;
                 }
-                const alreadyExists = serverLicenseState.licenses.some(
+                const existing = serverLicenseState.licenses.find(
                   (l) => l.id === cachedLic.id || l.pin_code === cachedLic.pin_code,
                 );
-                if (!alreadyExists) {
+                if (existing) {
+                  const nextName = (cachedLic.client_name || existing.client_name).trim();
+                  const nextStatus = cachedLic.status === "paused" ? "paused" : "active";
+                  const nextExpires =
+                    cachedLic.expires_at !== undefined ? cachedLic.expires_at : existing.expires_at;
+                  const nextMax = Math.max(
+                    1,
+                    Number(cachedLic.max_devices) || existing.max_devices || 1,
+                  );
+                  if (
+                    existing.client_name !== nextName ||
+                    existing.status !== nextStatus ||
+                    existing.expires_at !== nextExpires ||
+                    existing.max_devices !== nextMax
+                  ) {
+                    existing.client_name = nextName;
+                    existing.status = nextStatus;
+                    existing.expires_at = nextExpires;
+                    existing.max_devices = nextMax;
+                    if (typeof cachedLic.notes === "string") {
+                      existing.notes = cachedLic.notes;
+                    }
+                    changedAny = true;
+                    try {
+                      await supabaseAdmin.from("client_licenses").upsert({
+                        id: existing.id,
+                        client_name: existing.client_name,
+                        pin_code: existing.pin_code,
+                        status: existing.status,
+                        expires_at: existing.expires_at,
+                        max_devices: existing.max_devices,
+                        bound_device_ids: existing.bound_device_ids,
+                        notes: existing.notes ?? "",
+                        created_at: existing.created_at,
+                      });
+                    } catch {
+                      // ignore
+                    }
+                  }
+                } else {
                   const restored: ClientLicense = {
                     id:
                       cachedLic.id || `lic-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -1255,7 +1301,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
                     created_at: cachedLic.created_at || new Date().toISOString(),
                   };
                   serverLicenseState.licenses.unshift(restored);
-                  addedAny = true;
+                  changedAny = true;
                   try {
                     await supabaseAdmin.from("client_licenses").upsert({
                       id: restored.id,
@@ -1273,7 +1319,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
                   }
                 }
               }
-              if (addedAny) {
+              if (changedAny) {
                 saveServerLicenses();
               }
             } else if (act.type === "create") {
@@ -1446,9 +1492,12 @@ export const Route = createFileRoute("/api/public/results/sync")({
               const cleanPin = (act.pin_code || "").replace(/[^0-9]/g, "");
               const devId = (act.device_id || "TV-DEFAULT").trim();
               if (cleanPin === "291007") {
+                const existingMaster = serverLicenseState.licenses.find(
+                  (l) => l.pin_code === "291007",
+                );
                 licenseActivation = {
                   valid: true,
-                  license: {
+                  license: existingMaster || {
                     id: "lic-master-admin",
                     client_name: "Administrador Maestro",
                     pin_code: "291007",

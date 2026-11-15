@@ -15,6 +15,10 @@ import {
   isLotteryPermitted,
   DEFAULT_CARDS_PER_SCREEN,
   DEFAULT_TRANSITION_SECONDS,
+  LICENSE_CACHE_STORAGE_KEY,
+  reconcileClientLicensesWithLocal,
+  saveLocalLicensesSnapshot,
+  getLastConfiguredLicenseId,
   type CardsPerScreenOption,
   type ClientVoiceConfig,
   type ClientDesignConfig,
@@ -48,7 +52,6 @@ export function useLicenseContext() {
 
 export const DEVICE_ID_STORAGE_KEY = "pizarra_tv_device_id";
 export const ACTIVATED_PIN_STORAGE_KEY = "pizarra_activated_pin";
-const LICENSE_CACHE_STORAGE_KEY = "pizarra_license_cache_v2";
 
 export function getOrCreateDeviceId(): string {
   if (typeof window === "undefined") return "TV-SERVER";
@@ -158,7 +161,21 @@ export default function LicenseGate({
   });
   const [pinInput, setPinInput] = useState<string>(activatedPin);
   const [requireLicense, setRequireLicense] = useState<boolean>(true);
-  const [licenses, setLicenses] = useState<ClientLicense[]>([]);
+  const [licenses, setLicenses] = useState<ClientLicense[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      const raw = localStorage.getItem(LICENSE_CACHE_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed?.licenses)) {
+          return reconcileClientLicensesWithLocal(parsed.licenses).licenses;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return [];
+  });
   const [initialLoaded, setInitialLoaded] = useState<boolean>(false);
   const [checking, setChecking] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string>("");
@@ -182,22 +199,31 @@ export default function LicenseGate({
       const res = await fetch("/api/public/results/sync");
       if (res.ok) {
         const data = await res.json();
+        const nextRequire = typeof data.requireLicense === "boolean" ? data.requireLicense : true;
         if (typeof data.requireLicense === "boolean") {
           setRequireLicense(data.requireLicense);
         }
         if (Array.isArray(data.clientLicenses)) {
-          setLicenses(data.clientLicenses);
-        }
-        try {
-          localStorage.setItem(
-            LICENSE_CACHE_STORAGE_KEY,
-            JSON.stringify({
-              requireLicense: typeof data.requireLicense === "boolean" ? data.requireLicense : true,
-              licenses: data.clientLicenses || [],
-            }),
+          const reconciled = reconcileClientLicensesWithLocal(
+            data.clientLicenses,
+            data.deletedIds,
+            data.deletedPins,
           );
-        } catch {
-          // ignore
+          setLicenses(reconciled.licenses);
+          saveLocalLicensesSnapshot(nextRequire, reconciled.licenses);
+
+          if (reconciled.needsServerSync.length > 0) {
+            fetch("/api/public/results/sync", {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                licenseAction: {
+                  type: "restore_batch",
+                  licenses: reconciled.needsServerSync,
+                },
+              }),
+            }).catch(() => {});
+          }
         }
       }
     } catch {
@@ -206,7 +232,9 @@ export default function LicenseGate({
         if (raw) {
           const parsed = JSON.parse(raw);
           if (typeof parsed.requireLicense === "boolean") setRequireLicense(parsed.requireLicense);
-          if (Array.isArray(parsed.licenses)) setLicenses(parsed.licenses);
+          if (Array.isArray(parsed.licenses)) {
+            setLicenses(reconcileClientLicensesWithLocal(parsed.licenses).licenses);
+          }
         }
       } catch {
         // ignore
@@ -233,9 +261,14 @@ export default function LicenseGate({
     } catch {
       // ignore
     }
+    const handleLocalLicenseEvent = () => {
+      syncLicenseState();
+    };
+    window.addEventListener("pizarra:licenses-updated", handleLocalLicenseEvent);
     return () => {
       clearInterval(timer);
       bc?.close();
+      window.removeEventListener("pizarra:licenses-updated", handleLocalLicenseEvent);
     };
   }, [syncLicenseState]);
 
@@ -274,8 +307,25 @@ export default function LicenseGate({
     isMasterPin || (matchedLicense && !isExpired && !isPaused && isDeviceAllowed),
   );
 
-  const effectiveLicense =
-    matchedLicense ?? (!requireLicense ? licenses.find((l) => l.pin_code === "291007") : undefined);
+  const masterLicense = licenses.find((l) => l.pin_code === "291007");
+  const lastConfiguredId = getLastConfiguredLicenseId();
+  const lastConfiguredLicense = lastConfiguredId
+    ? licenses.find((l) => l.id === lastConfiguredId)
+    : undefined;
+
+  let effectiveLicense =
+    matchedLicense ?? (!requireLicense || adminBypass ? masterLicense : undefined);
+
+  // If the admin is viewing the board with master PIN 291007 or Admin Bypass, and the master license
+  // itself hasn't been customized away from default, apply the last license configured on this device
+  if (
+    (isMasterPin || adminBypass || !requireLicense) &&
+    effectiveLicense?.pin_code === "291007" &&
+    !effectiveLicense.client_name.includes("||") &&
+    lastConfiguredLicense
+  ) {
+    effectiveLicense = lastConfiguredLicense;
+  }
 
   const parsedLicenseInfo = effectiveLicense
     ? parseClientLicenseName(effectiveLicense.client_name)
@@ -328,7 +378,12 @@ export default function LicenseGate({
         .then((r) => (r.ok ? r.json() : null))
         .then((data) => {
           if (data && Array.isArray(data.clientLicenses)) {
-            setLicenses(data.clientLicenses);
+            const reconciled = reconcileClientLicensesWithLocal(
+              data.clientLicenses,
+              data.deletedIds,
+              data.deletedPins,
+            );
+            setLicenses(reconciled.licenses);
           }
         })
         .catch(() => {});
@@ -409,7 +464,13 @@ export default function LicenseGate({
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.clientLicenses)) {
-          setLicenses(data.clientLicenses);
+          const reconciled = reconcileClientLicensesWithLocal(
+            data.clientLicenses,
+            data.deletedIds,
+            data.deletedPins,
+          );
+          setLicenses(reconciled.licenses);
+          saveLocalLicensesSnapshot(requireLicense, reconciled.licenses);
         }
         if (data.licenseActivation?.valid) {
           setActivatedPin(cleanPin);

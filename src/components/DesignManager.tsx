@@ -40,6 +40,9 @@ import {
   DEFAULT_ANIMAL_LOTTERIES,
   ALL_TRIPLE_LOTTERIES,
   DEFAULT_CLIENT_VOICE_CONFIG,
+  saveLocalLicenseOverride,
+  saveLocalLicensesSnapshot,
+  reconcileClientLicensesWithLocal,
   type ClientVoiceConfig,
   type ClientDesignConfig,
 } from "@/lib/license-lotteries";
@@ -89,7 +92,12 @@ export default function DesignManager() {
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.clientLicenses)) {
-          setLicenses(data.clientLicenses);
+          const reconciled = reconcileClientLicensesWithLocal(
+            data.clientLicenses,
+            data.deletedIds,
+            data.deletedPins,
+          );
+          setLicenses(reconciled.licenses);
         }
       }
     } catch {
@@ -328,6 +336,17 @@ export default function DesignManager() {
         );
       }
 
+      const updatedLicense: ClientLicense = {
+        ...selectedLicense,
+        client_name: packedName,
+      };
+      saveLocalLicenseOverride(updatedLicense);
+      setLicenses((prev) => {
+        const next = prev.map((l) => (l.id === selectedLicense.id ? updatedLicense : l));
+        saveLocalLicensesSnapshot(true, next);
+        return next;
+      });
+
       try {
         const res = await fetch("/api/public/results/sync", {
           method: "PUT",
@@ -343,7 +362,16 @@ export default function DesignManager() {
         if (res.ok) {
           const data = await res.json();
           if (Array.isArray(data.clientLicenses)) {
-            setLicenses(data.clientLicenses);
+            const reconciled = reconcileClientLicensesWithLocal(
+              data.clientLicenses,
+              data.deletedIds,
+              data.deletedPins,
+            );
+            setLicenses(reconciled.licenses);
+            saveLocalLicensesSnapshot(
+              typeof data.requireLicense === "boolean" ? data.requireLicense : true,
+              reconciled.licenses,
+            );
           }
         }
       } catch {
@@ -356,6 +384,9 @@ export default function DesignManager() {
         setTimeout(() => bc.close(), 1000);
       } catch {
         // ignore
+      }
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("pizarra:licenses-updated"));
       }
 
       setMessage(
@@ -395,6 +426,11 @@ export default function DesignManager() {
       DEFAULT_CLIENT_VOICE_CONFIG,
       null,
     );
+    const resetLicense: ClientLicense = {
+      ...selectedLicense,
+      client_name: packedName,
+    };
+    saveLocalLicenseOverride(resetLicense);
     try {
       await fetch("/api/public/results/sync", {
         method: "PUT",
@@ -411,6 +447,9 @@ export default function DesignManager() {
       const bc = new BroadcastChannel("pizarra_lottery_channel");
       bc.postMessage({ type: "LICENSES_UPDATED" });
       setTimeout(() => bc.close(), 1000);
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("pizarra:licenses-updated"));
+      }
     } catch {
       // ignore
     }

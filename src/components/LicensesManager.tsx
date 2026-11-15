@@ -38,6 +38,10 @@ import {
   DEFAULT_TRANSITION_SECONDS,
   TRANSITION_SECONDS_OPTIONS,
   DEFAULT_CLIENT_VOICE_CONFIG,
+  saveLocalLicenseOverride,
+  removeLocalLicenseOverride,
+  saveLocalLicensesSnapshot,
+  reconcileClientLicensesWithLocal,
   type CardsPerScreenOption,
   type ClientVoiceConfig,
   type ClientDesignConfig,
@@ -123,74 +127,47 @@ export default function LicensesManager() {
       const res = await fetch("/api/public/results/sync");
       if (res.ok) {
         const data = await res.json();
+        const nextRequire =
+          typeof data.requireLicense === "boolean" ? data.requireLicense : requireLicense;
         if (typeof data.requireLicense === "boolean") {
           setRequireLicense(data.requireLicense);
         }
         if (Array.isArray(data.clientLicenses)) {
-          let finalLicenses: ClientLicense[] = data.clientLicenses;
+          const reconciled = reconcileClientLicensesWithLocal(
+            data.clientLicenses,
+            data.deletedIds,
+            data.deletedPins,
+          );
+          let finalLicenses: ClientLicense[] = reconciled.licenses;
 
-          try {
-            const localDeletedRaw = localStorage.getItem("pizarra_deleted_licenses_v2");
-            const localDeleted = localDeletedRaw
-              ? JSON.parse(localDeletedRaw)
-              : { ids: [], pins: [] };
-            const deletedIdSet = new Set<string>([
-              ...(Array.isArray(data.deletedIds) ? data.deletedIds : []),
-              ...(Array.isArray(localDeleted.ids) ? localDeleted.ids : []),
-            ]);
-            const deletedPinSet = new Set<string>([
-              ...(Array.isArray(data.deletedPins) ? data.deletedPins : []),
-              ...(Array.isArray(localDeleted.pins) ? localDeleted.pins : []),
-            ]);
-
-            const cachedRaw = localStorage.getItem("pizarra_client_licenses_cache_v2");
-            if (cachedRaw) {
-              const cached = JSON.parse(cachedRaw);
-              if (Array.isArray(cached.licenses)) {
-                const missing = cached.licenses.filter(
-                  (oldLic: ClientLicense) =>
-                    oldLic &&
-                    oldLic.pin_code &&
-                    oldLic.pin_code !== "291007" &&
-                    !deletedIdSet.has(oldLic.id) &&
-                    !deletedPinSet.has(oldLic.pin_code) &&
-                    !finalLicenses.some(
-                      (l: ClientLicense) => l.id === oldLic.id || l.pin_code === oldLic.pin_code,
-                    ),
-                );
-
-                if (missing.length > 0) {
-                  const restoreRes = await fetch("/api/public/results/sync", {
-                    method: "PUT",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      licenseAction: {
-                        type: "restore_batch",
-                        licenses: missing,
-                      },
-                    }),
-                  });
-                  if (restoreRes.ok) {
-                    const restoreData = await restoreRes.json();
-                    if (Array.isArray(restoreData.clientLicenses)) {
-                      finalLicenses = restoreData.clientLicenses;
-                    }
-                  }
+          if (reconciled.needsServerSync.length > 0) {
+            try {
+              const restoreRes = await fetch("/api/public/results/sync", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  licenseAction: {
+                    type: "restore_batch",
+                    licenses: reconciled.needsServerSync,
+                  },
+                }),
+              });
+              if (restoreRes.ok) {
+                const restoreData = await restoreRes.json();
+                if (Array.isArray(restoreData.clientLicenses)) {
+                  finalLicenses = reconcileClientLicensesWithLocal(
+                    restoreData.clientLicenses,
+                    restoreData.deletedIds,
+                    restoreData.deletedPins,
+                  ).licenses;
                 }
               }
+            } catch {
+              // ignore
             }
-
-            localStorage.setItem(
-              "pizarra_client_licenses_cache_v2",
-              JSON.stringify({
-                requireLicense: data.requireLicense,
-                licenses: finalLicenses,
-              }),
-            );
-          } catch {
-            // ignore
           }
 
+          saveLocalLicensesSnapshot(nextRequire, finalLicenses);
           setLicenses(finalLicenses);
         }
       }
@@ -199,11 +176,24 @@ export default function LicensesManager() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [requireLicense]);
 
   useEffect(() => {
     fetchLicenses();
   }, [fetchLicenses]);
+
+  const broadcastLicenseChange = () => {
+    try {
+      const bc = new BroadcastChannel("pizarra_lottery_channel");
+      bc.postMessage({ type: "LICENSES_UPDATED" });
+      setTimeout(() => bc.close(), 1000);
+    } catch {
+      // ignore
+    }
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("pizarra:licenses-updated"));
+    }
+  };
 
   const runLicenseAction = async (actionPayload: Record<string, unknown>, successText?: string) => {
     setSaving(true);
@@ -213,6 +203,7 @@ export default function LicensesManager() {
         const targetToDelete = prev.find((l) => l.id === actionPayload.id);
         const next = prev.filter((l) => l.id !== actionPayload.id);
         try {
+          removeLocalLicenseOverride(actionPayload.id as string, targetToDelete?.pin_code);
           const localDeletedRaw = localStorage.getItem("pizarra_deleted_licenses_v2");
           const localDeleted = localDeletedRaw
             ? JSON.parse(localDeletedRaw)
@@ -224,32 +215,66 @@ export default function LicensesManager() {
             pins.push(targetToDelete.pin_code);
           }
           localStorage.setItem("pizarra_deleted_licenses_v2", JSON.stringify({ ids, pins }));
-          localStorage.setItem(
-            "pizarra_client_licenses_cache_v2",
-            JSON.stringify({ requireLicense, licenses: next }),
-          );
+          saveLocalLicensesSnapshot(requireLicense, next);
         } catch {
           // ignore
         }
         return next;
       });
+      broadcastLicenseChange();
     } else if (actionPayload.type === "toggle_status" && typeof actionPayload.id === "string") {
       setLicenses((prev) => {
-        const next = prev.map((l) =>
-          l.id === actionPayload.id
-            ? { ...l, status: l.status === "active" ? ("paused" as const) : ("active" as const) }
-            : l,
-        );
-        try {
-          localStorage.setItem(
-            "pizarra_client_licenses_cache_v2",
-            JSON.stringify({ requireLicense, licenses: next }),
-          );
-        } catch {
-          // ignore
-        }
+        const next = prev.map((l) => {
+          if (l.id === actionPayload.id) {
+            const updated: ClientLicense = {
+              ...l,
+              status: l.status === "active" ? ("paused" as const) : ("active" as const),
+            };
+            saveLocalLicenseOverride(updated);
+            return updated;
+          }
+          return l;
+        });
+        saveLocalLicensesSnapshot(requireLicense, next);
         return next;
       });
+      broadcastLicenseChange();
+    } else if (
+      actionPayload.type === "update_lotteries" &&
+      typeof actionPayload.id === "string" &&
+      typeof actionPayload.client_name === "string"
+    ) {
+      const updatedClientName = actionPayload.client_name.trim();
+      setLicenses((prev) => {
+        const next = prev.map((l) => {
+          if (l.id === actionPayload.id) {
+            const updated: ClientLicense = {
+              ...l,
+              client_name: updatedClientName,
+            };
+            saveLocalLicenseOverride(updated);
+            return updated;
+          }
+          return l;
+        });
+        saveLocalLicensesSnapshot(requireLicense, next);
+        return next;
+      });
+      broadcastLicenseChange();
+    } else if (actionPayload.type === "reset_devices" && typeof actionPayload.id === "string") {
+      setLicenses((prev) => {
+        const next = prev.map((l) => {
+          if (l.id === actionPayload.id) {
+            const updated: ClientLicense = { ...l, bound_device_ids: [] };
+            saveLocalLicenseOverride(updated);
+            return updated;
+          }
+          return l;
+        });
+        saveLocalLicensesSnapshot(requireLicense, next);
+        return next;
+      });
+      broadcastLicenseChange();
     }
 
     try {
@@ -260,27 +285,36 @@ export default function LicensesManager() {
       });
       if (res.ok) {
         const data = await res.json();
+        const nextRequire =
+          typeof data.requireLicense === "boolean" ? data.requireLicense : requireLicense;
         if (typeof data.requireLicense === "boolean") {
           setRequireLicense(data.requireLicense);
         }
         if (Array.isArray(data.clientLicenses)) {
-          setLicenses(data.clientLicenses);
-          try {
-            localStorage.setItem(
-              "pizarra_client_licenses_cache_v2",
-              JSON.stringify({
-                requireLicense: data.requireLicense,
-                licenses: data.clientLicenses,
-              }),
+          if (actionPayload.type === "create" || actionPayload.type === "renew") {
+            const targetPin =
+              typeof actionPayload.pin_code === "string" ? actionPayload.pin_code : undefined;
+            const targetId = typeof actionPayload.id === "string" ? actionPayload.id : undefined;
+            const createdOrRenewed = (data.clientLicenses as ClientLicense[]).find(
+              (l) => (targetId && l.id === targetId) || (targetPin && l.pin_code === targetPin),
             );
-          } catch {
-            // ignore
+            if (createdOrRenewed) {
+              saveLocalLicenseOverride(createdOrRenewed);
+            }
           }
+          const reconciled = reconcileClientLicensesWithLocal(
+            data.clientLicenses,
+            data.deletedIds,
+            data.deletedPins,
+          );
+          setLicenses(reconciled.licenses);
+          saveLocalLicensesSnapshot(nextRequire, reconciled.licenses);
+          broadcastLicenseChange();
         }
         if (successText) showToast(successText);
       }
     } catch {
-      showToast("Error de red al actualizar licencias.");
+      showToast("Configuración guardada localmente.");
     } finally {
       setSaving(false);
     }
