@@ -52,14 +52,8 @@ export async function synchronizeAutomaticResults(): Promise<SyncReport[]> {
             p_animal_name: draw.animal_name,
           };
           const { data: localData } = await mockSupabase.rpc("sync_automatic_result", payload);
-          let remoteWritten = false;
-          try {
-            const { data } = await supabaseAdmin.rpc("sync_automatic_result", payload);
-            remoteWritten = data === true;
-          } catch {
-            // ignore external Supabase RPC failure
-          }
-          return localData === true || remoteWritten;
+          void Promise.resolve(supabaseAdmin.rpc("sync_automatic_result", payload)).catch(() => {});
+          return localData === true;
         },
       );
       reports.push(report);

@@ -7,6 +7,7 @@ export interface CustomAnimalEntry {
 
 let _cachedCatalog: CustomAnimalEntry[] | null = null;
 let _catalogImageUrlSet: Set<string> = new Set();
+let _catalogByKey: Map<string, string> = new Map();
 let _loadPromise: Promise<CustomAnimalEntry[]> | null = null;
 
 /**
@@ -34,6 +35,11 @@ export async function loadCustomAnimalCatalog(): Promise<CustomAnimalEntry[]> {
             !item.image_url.includes("/api/media?file="),
         );
         _catalogImageUrlSet = new Set(_cachedCatalog.map((item) => item.image_url));
+        const nextMap = new Map<string, string>();
+        for (const item of _cachedCatalog) {
+          nextMap.set(`${item.game_id}:${item.animal_number}`, item.image_url);
+        }
+        _catalogByKey = nextMap;
       } else {
         _cachedCatalog = [];
       }
@@ -49,6 +55,10 @@ export async function loadCustomAnimalCatalog(): Promise<CustomAnimalEntry[]> {
   return _loadPromise;
 }
 
+if (typeof window !== "undefined") {
+  void loadCustomAnimalCatalog();
+}
+
 /**
  * Retorna true si la URL pertenece al catálogo base de 451 animalitos (`custom-animal-catalog.json`).
  * Esto permite distinguir entre el catálogo base (que se carga por separado bajo demanda)
@@ -57,6 +67,16 @@ export async function loadCustomAnimalCatalog(): Promise<CustomAnimalEntry[]> {
 export function isEmbeddedCatalogImageUrl(url?: string | null): boolean {
   if (!url) return false;
   return _catalogImageUrlSet.has(url);
+}
+
+/**
+ * Busca directamente en el catálogo base en memoria por game_id y animal_number.
+ */
+export function getEmbeddedCatalogImageUrl(
+  gameId: string,
+  animalNumber: number,
+): string | undefined {
+  return _catalogByKey.get(`${gameId}:${animalNumber}`);
 }
 
 /**

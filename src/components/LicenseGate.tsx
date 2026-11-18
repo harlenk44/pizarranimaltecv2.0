@@ -1,4 +1,13 @@
-import { useState, useEffect, useCallback, createContext, useContext, type ReactNode } from "react";
+import {
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  useRef,
+  createContext,
+  useContext,
+  type ReactNode,
+} from "react";
 import {
   KeyRound,
   ShieldAlert,
@@ -9,7 +18,8 @@ import {
   RefreshCw,
   ShieldCheck,
 } from "lucide-react";
-import type { ClientLicense } from "@/lib/types";
+import type { ClientLicense, Result } from "@/lib/types";
+import { ensureCustomCatalogLoaded, mockStore, mergeResultsPreserveToday } from "@/lib/mock-db";
 import {
   parseClientLicenseName,
   isLotteryPermitted,
@@ -194,14 +204,25 @@ export default function LicenseGate({
     });
   };
 
+  const lastLicensesJsonRef = useRef<string>("");
+
   const syncLicenseState = useCallback(async () => {
     try {
-      const res = await fetch("/api/public/results/sync");
+      const [res] = await Promise.all([
+        fetch("/api/public/results/sync"),
+        ensureCustomCatalogLoaded().catch(() => {}),
+      ]);
       if (res.ok) {
         const data = await res.json();
+        if (Array.isArray(data.results) && data.results.length > 0) {
+          mockStore.results = mergeResultsPreserveToday(
+            mockStore.results,
+            data.results as Result[],
+          );
+        }
         const nextRequire = typeof data.requireLicense === "boolean" ? data.requireLicense : true;
         if (typeof data.requireLicense === "boolean") {
-          setRequireLicense(data.requireLicense);
+          setRequireLicense((prev) => (prev === data.requireLicense ? prev : data.requireLicense));
         }
         if (Array.isArray(data.clientLicenses)) {
           const reconciled = reconcileClientLicensesWithLocal(
@@ -209,7 +230,11 @@ export default function LicenseGate({
             data.deletedIds,
             data.deletedPins,
           );
-          setLicenses(reconciled.licenses);
+          const nextJson = JSON.stringify(reconciled.licenses);
+          if (lastLicensesJsonRef.current !== nextJson) {
+            lastLicensesJsonRef.current = nextJson;
+            setLicenses(reconciled.licenses);
+          }
           saveLocalLicensesSnapshot(nextRequire, reconciled.licenses);
 
           if (reconciled.needsServerSync.length > 0) {
@@ -231,16 +256,25 @@ export default function LicenseGate({
         const raw = localStorage.getItem(LICENSE_CACHE_STORAGE_KEY);
         if (raw) {
           const parsed = JSON.parse(raw);
-          if (typeof parsed.requireLicense === "boolean") setRequireLicense(parsed.requireLicense);
+          if (typeof parsed.requireLicense === "boolean") {
+            setRequireLicense((prev) =>
+              prev === parsed.requireLicense ? prev : parsed.requireLicense,
+            );
+          }
           if (Array.isArray(parsed.licenses)) {
-            setLicenses(reconcileClientLicensesWithLocal(parsed.licenses).licenses);
+            const nextList = reconcileClientLicensesWithLocal(parsed.licenses).licenses;
+            const nextJson = JSON.stringify(nextList);
+            if (lastLicensesJsonRef.current !== nextJson) {
+              lastLicensesJsonRef.current = nextJson;
+              setLicenses(nextList);
+            }
           }
         }
       } catch {
         // ignore
       }
     } finally {
-      setInitialLoaded(true);
+      setInitialLoaded((prev) => (prev ? prev : true));
     }
   }, []);
 
@@ -327,9 +361,11 @@ export default function LicenseGate({
     effectiveLicense = lastConfiguredLicense;
   }
 
-  const parsedLicenseInfo = effectiveLicense
-    ? parseClientLicenseName(effectiveLicense.client_name)
-    : null;
+  const effectiveClientName = effectiveLicense?.client_name ?? "";
+  const parsedLicenseInfo = useMemo(
+    () => (effectiveClientName ? parseClientLicenseName(effectiveClientName) : null),
+    [effectiveClientName],
+  );
   const allowedLotteries = parsedLicenseInfo?.allowedLotteries ?? null;
   const cardsPerScreen: CardsPerScreenOption =
     parsedLicenseInfo?.cardsPerScreen ?? DEFAULT_CARDS_PER_SCREEN;
@@ -345,16 +381,28 @@ export default function LicenseGate({
     [allowedLotteries],
   );
 
-  const licenseContextValue: LicenseContextValue = {
-    matchedLicense,
-    isAuthorized,
-    allowedLotteries,
-    cardsPerScreen,
-    transitionSeconds,
-    voiceConfig,
-    designConfig,
-    isGameAllowed,
-  };
+  const licenseContextValue = useMemo<LicenseContextValue>(
+    () => ({
+      matchedLicense,
+      isAuthorized,
+      allowedLotteries,
+      cardsPerScreen,
+      transitionSeconds,
+      voiceConfig,
+      designConfig,
+      isGameAllowed,
+    }),
+    [
+      matchedLicense,
+      isAuthorized,
+      allowedLotteries,
+      cardsPerScreen,
+      transitionSeconds,
+      voiceConfig,
+      designConfig,
+      isGameAllowed,
+    ],
+  );
 
   // If device has a valid saved PIN but isn't listed in bound_device_ids yet, register it automatically
   useEffect(() => {

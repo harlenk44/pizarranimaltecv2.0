@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, memo } from "react";
 import { getEmojiForNumber } from "@/lib/animals";
-import { cleanImageUrl, preloadImageOnce } from "@/lib/official-animals";
+import { cleanImageUrl, preloadImageOnce, isRealAnimalMediaUrl } from "@/lib/official-animals";
 
 export function isVideoMedia(url?: string | null): boolean {
   if (!url) return false;
@@ -38,14 +38,25 @@ const AnimalMedia = memo(function AnimalMedia({
   fetchPriority = "auto",
 }: AnimalMediaProps) {
   const sanitizedUrl = cleanImageUrl(mediaUrl);
-  const isVideo = isVideoMedia(sanitizedUrl);
 
-  // Retain the last known valid image URL so the <img> src never blanks out between renders
+  // Retain the last known valid image URL so the <img> src never blanks out or downgrades to a placeholder between renders
   const lastValidUrlRef = useRef<string>(sanitizedUrl);
-  if (sanitizedUrl && sanitizedUrl !== lastValidUrlRef.current) {
+  const lastNumberRef = useRef<number>(number);
+
+  if (lastNumberRef.current !== number) {
+    lastNumberRef.current = number;
     lastValidUrlRef.current = sanitizedUrl;
+  } else if (sanitizedUrl && sanitizedUrl !== lastValidUrlRef.current) {
+    const prevIsReal = isRealAnimalMediaUrl(lastValidUrlRef.current);
+    const nextIsReal = isRealAnimalMediaUrl(sanitizedUrl);
+    if (nextIsReal || !prevIsReal) {
+      lastValidUrlRef.current = sanitizedUrl;
+    }
   }
-  const activeUrl = sanitizedUrl || lastValidUrlRef.current;
+  const activeUrl = isRealAnimalMediaUrl(sanitizedUrl)
+    ? sanitizedUrl
+    : lastValidUrlRef.current || sanitizedUrl;
+  const isVideo = isVideoMedia(activeUrl);
 
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const hasError = Boolean(activeUrl && failedUrl === activeUrl);

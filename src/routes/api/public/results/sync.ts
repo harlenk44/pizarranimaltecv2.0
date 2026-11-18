@@ -3,6 +3,7 @@ import {
   mockStore,
   INITIAL_GAMES,
   mergeAnimalImagesPreserveCustom,
+  mergeResultsPreserveToday,
   isBaseOrDefaultCatalogImageUrl,
   filterAdminCustomAnimalImages,
   ensureCustomCatalogLoaded,
@@ -798,12 +799,14 @@ async function triggerBackgroundSync(forceWait = false) {
       syncAnimalImagesWithSupabase().catch(() => null),
     ]);
 
-    // Apply Multiloterias animal results if any
-    if (
-      multiloteriasSync.newAnimalCount > 0 ||
-      multiloteriasSync.animalResults.length > mockStore.results.length
-    ) {
-      mockStore.results = sanitizeResultsList(multiloteriasSync.animalResults);
+    // Merge Multiloterias animal results with mockStore.results (which synchronizeAutomaticResults mutated in place)
+    // NEVER overwrite mockStore.results with multiloteriasSync.animalResults, or the 9 TuAzar/LoteriaDeHoy games get wiped!
+    if (multiloteriasSync.newAnimalCount > 0 || multiloteriasSync.animalResults.length > 0) {
+      const mergedAnimals = mergeResultsPreserveToday(
+        mockStore.results,
+        multiloteriasSync.animalResults,
+      );
+      mockStore.results = sanitizeResultsList(mergedAnimals);
     }
     saveServerResults();
 
@@ -820,13 +823,12 @@ async function triggerBackgroundSync(forceWait = false) {
     }
     saveServerTripleResults();
 
-    // Ensure Multiloterias official images (including 37-48 for Lottopantera) are stored
+    // Ensure Multiloterias official images (including 37-48 for Lottopantera) are stored in memory
     try {
       const [lotoItems, panteraItems] = await Promise.all([
         getCachedMultiloteriasItems("lotoanimalito"),
         getCachedMultiloteriasItems("lottopantera"),
       ]);
-      let addedImgs = false;
       for (const item of lotoItems) {
         const num = parseCanonicalAnimalNumber("lotoanimalito", item.number, item.name);
         if (Number.isFinite(num) && item.imageUrl) {
@@ -844,7 +846,6 @@ async function triggerBackgroundSync(forceWait = false) {
               animal_number: num,
               image_url: item.imageUrl,
             });
-            addedImgs = true;
           }
         }
       }
@@ -865,12 +866,8 @@ async function triggerBackgroundSync(forceWait = false) {
               animal_number: num,
               image_url: item.imageUrl,
             });
-            addedImgs = true;
           }
         }
-      }
-      if (addedImgs) {
-        saveServerAnimalImages();
       }
     } catch {
       // ignore
@@ -1089,10 +1086,22 @@ export const Route = createFileRoute("/api/public/results/sync")({
           initialAutoSyncDone = true;
           const syncPromise = triggerBackgroundSync(isColdEmpty).catch(() => {});
           if (isColdEmpty) {
-            await Promise.race([syncPromise, new Promise((resolve) => setTimeout(resolve, 3500))]);
+            await Promise.race([syncPromise, new Promise((resolve) => setTimeout(resolve, 6500))]);
           } else {
-            await Promise.race([syncPromise, new Promise((resolve) => setTimeout(resolve, 1200))]);
+            await Promise.race([syncPromise, new Promise((resolve) => setTimeout(resolve, 1500))]);
           }
+        }
+
+        const shouldSendLogos =
+          !clientLogosVer || clientLogosVer !== String(serverCustomGameLogosVersion);
+        const shouldSendGames = !clientGamesVer || clientGamesVer !== String(serverGamesVersion);
+        const shouldSendImages =
+          !clientImagesVer || clientImagesVer !== String(serverAnimalImagesVersion);
+        const shouldSendSettings =
+          !clientSettingsVer || clientSettingsVer !== String(serverAppSettingsVersion);
+
+        if (shouldSendImages) {
+          await ensureCustomCatalogLoaded().catch(() => {});
         }
 
         let latestAlert = serverLatestAlert;
@@ -1117,14 +1126,6 @@ export const Route = createFileRoute("/api/public/results/sync")({
             animalImageUrl: `/api/public/results/sync?animalImage=${encodeURIComponent(String(latestAlert.gameId))}:${latestAlert.animalNumber}&label=${encodeURIComponent(String(latestAlert.animalLabel || ""))}`,
           };
         }
-
-        const shouldSendLogos =
-          !clientLogosVer || clientLogosVer !== String(serverCustomGameLogosVersion);
-        const shouldSendGames = !clientGamesVer || clientGamesVer !== String(serverGamesVersion);
-        const shouldSendImages =
-          !clientImagesVer || clientImagesVer !== String(serverAnimalImagesVersion);
-        const shouldSendSettings =
-          !clientSettingsVer || clientSettingsVer !== String(serverAppSettingsVersion);
 
         return Response.json({
           status: "ok",

@@ -828,23 +828,49 @@ export function ensureAllGameEntries(store: MockStore) {
         });
       }
     }
+  }
+}
 
-    if (game.slug === "monje-millonario") {
-      for (let i = 0; i <= 76; i++) {
-        const hasImg = store.animal_images.some(
-          (img) => img.game_id === game.id && img.animal_number === i,
-        );
-        if (!hasImg) {
-          store.animal_images.push({
-            id: `img-monje-${i}`,
-            game_id: game.id,
-            animal_number: i,
-            image_url: `https://tuazar.com/in/animalitos/monje_millonario/${i}.webp`,
-          });
-        }
-      }
+/**
+ * Une resultados existentes con nuevos resultados sin perder ningún sorteo ya cargado del día actual,
+ * evitando que respuestas parciales entre aislamientos de Cloudflare Workers borren sorteos en pantalla.
+ */
+export function mergeResultsPreserveToday(
+  existingResults: Result[],
+  incomingResults: Result[],
+  todayDate?: string,
+): Result[] {
+  const byKey = new Map<string, Result>();
+  const getKey = (r: Result) => {
+    const normSlot = (r.draw_time || "").substring(0, 5).replace(/^0/, "");
+    return `${r.game_id}:${r.draw_date}:${normSlot}`;
+  };
+
+  for (const r of existingResults) {
+    if (!r || !r.game_id || !r.draw_date || !r.draw_time) continue;
+    if (todayDate && r.draw_date !== todayDate) continue;
+    byKey.set(getKey(r), r);
+  }
+
+  for (const inc of incomingResults) {
+    if (!inc || !inc.game_id || !inc.draw_date || !inc.draw_time) continue;
+    if (todayDate && inc.draw_date !== todayDate) continue;
+    const key = getKey(inc);
+    const prev = byKey.get(key);
+    if (!prev) {
+      byKey.set(key, inc);
+    } else if (inc.source === "manual" && prev.source !== "manual") {
+      byKey.set(key, inc);
+    } else if (
+      inc.source === "manual" &&
+      prev.source === "manual" &&
+      (inc.animal_number !== prev.animal_number || inc.animal_name !== prev.animal_name)
+    ) {
+      byKey.set(key, inc);
     }
   }
+
+  return Array.from(byKey.values());
 }
 
 export const mockStore: MockStore = globalThis.__APPLET_MOCK_STORE__;
@@ -878,10 +904,15 @@ export async function syncTuazarDirectly(): Promise<number> {
           if (Array.isArray(data?.results)) {
             const serverDate =
               data.serverLotteryDate || data.results[data.results.length - 1]?.draw_date;
-            mockStore.results = (data.results as Result[]).map((r) =>
+            const normalizedIncoming = (data.results as Result[]).map((r) =>
               serverDate && r.draw_date === serverDate && serverDate !== todayCaracas
                 ? { ...r, draw_date: todayCaracas }
                 : r,
+            );
+            mockStore.results = mergeResultsPreserveToday(
+              mockStore.results,
+              normalizedIncoming,
+              todayCaracas,
             );
             return mockStore.results.length;
           }

@@ -4,6 +4,8 @@
 // Selva Plus: 101 animals (0, 00, 01-99) — selvaplus.com
 // LottoPantera: 50 animals (0, 00, 01-48) — api.multiloterias.net
 
+import { getEmbeddedCatalogImageUrl } from "@/lib/custom-animal-catalog";
+
 export interface OfficialAnimal {
   number: number;
   name: string;
@@ -30,6 +32,20 @@ export const GAME_ID_TO_SLUG: Readonly<Record<string, string>> = {
   "d953f80c-4335-4bc9-9f78-9b56193286fe": "lotoanimalito",
   "61580ccf-5a2d-4d10-877e-4883515135e4": "lottopantera",
   "3b92f700-0000-4000-8000-000000000011": "la-ricachona",
+};
+
+export const SLUG_TO_GAME_ID: Readonly<Record<string, string>> = {
+  "lotto-activo": "7d21a00b-0dfa-4bdc-9edf-8115802df1d6",
+  guacharo: "01da9c54-392a-45e3-ab66-9a08befe7694",
+  guacharito: "0519825d-e7ea-4e59-bf7d-cef2c832edd3",
+  "selva-plus": "8f3aa087-6a0c-41a1-9ed3-5f6d5ed6918e",
+  "loto-chaim-a": "1efc5373-a547-4f7f-9955-845b5ede5ce2",
+  granjita: "ca8a0400-0000-4000-8000-000000000006",
+  "monje-millonario": "0f766e00-0000-4000-8000-000000000007",
+  "lotto-activo-internacional": "1e40af00-0000-4000-8000-000000000008",
+  lotoanimalito: "d953f80c-4335-4bc9-9f78-9b56193286fe",
+  lottopantera: "61580ccf-5a2d-4d10-877e-4883515135e4",
+  "la-ricachona": "3b92f700-0000-4000-8000-000000000011",
 };
 
 export function resolveGameSlug(gameIdOrSlug?: string | null): string {
@@ -293,12 +309,20 @@ export function getFixedAnimalImageUrl(
   const isBallena = canonicalLabel === "00" || canonicalNumber === getBallenaInternalNumber(slug);
 
   if (slug === "lotoanimalito") {
-    const code = isBallena ? "00" : canonicalNumber === 0 ? "0" : String(canonicalNumber);
+    const code = isBallena
+      ? "00"
+      : canonicalNumber === 0
+        ? "0"
+        : String(canonicalNumber).padStart(2, "0");
     return `https://toteback.atilax.io/storage/bases/1/${code}.png`;
   }
 
   if (slug === "lottopantera") {
-    const code = isBallena ? "00" : canonicalNumber === 0 ? "0" : String(canonicalNumber);
+    const code = isBallena
+      ? "00"
+      : canonicalNumber === 0
+        ? "0"
+        : String(canonicalNumber).padStart(2, "0");
     return `https://toteback.atilax.io/storage/bases/2/${code}.png`;
   }
 
@@ -346,8 +370,8 @@ export function preloadImageOnce(url?: string | null): string {
 }
 
 /**
- * Returns true if the URL is an actual embedded data URI or static/custom asset,
- * and NOT a server on-demand endpoint placeholder.
+ * Returns true if the URL is an actual embedded data URI or valid static/custom asset,
+ * and NOT a server on-demand endpoint placeholder or broken legacy scraper URL.
  */
 export function isRealAnimalMediaUrl(url?: string | null): boolean {
   if (!url || typeof url !== "string") return false;
@@ -355,6 +379,10 @@ export function isRealAnimalMediaUrl(url?: string | null): boolean {
   if (!trimmed) return false;
   if (trimmed.includes("/api/public/results/sync?animalImage=")) return false;
   if (trimmed.includes("/api/media?file=")) return false;
+  if (trimmed.includes("tuazar.com/in/animalitos/")) return false;
+  if (trimmed.includes("toteback.atilax.io/storage/bases/") && /\/[1-9]\.png$/i.test(trimmed)) {
+    return false;
+  }
   return true;
 }
 
@@ -374,6 +402,7 @@ export function resolveCanonicalAnimal(
   customLabels?: Record<string, string>,
 ): CanonicalAnimalResolution {
   const slug = resolveGameSlug(gameIdOrSlug);
+  const gameUuid = SLUG_TO_GAME_ID[slug] ?? (gameIdOrSlug ?? slug).trim();
   const gameKey = (gameIdOrSlug ?? slug).trim();
   const catalog = OFFICIAL_ANIMALS[slug] ?? LOTTO_ACTIVO_ANIMALS;
   const ballenaNum = getBallenaInternalNumber(slug);
@@ -409,15 +438,19 @@ export function resolveCanonicalAnimal(
     return undefined;
   };
 
-  // Direct match for this game
+  // 1. Direct match for this game (customImages or direct embedded catalog for this game UUID)
   let customImg = pickReal(
     customImages?.[`${gameKey}:${canonicalNum}`],
+    customImages?.[`${gameUuid}:${canonicalNum}`],
     customImages?.[`${slug}:${canonicalNum}`],
     isBallena ? customImages?.[`${gameKey}:00`] : undefined,
     isBallena ? customImages?.[`${slug}:00`] : undefined,
+    customImages && slug !== "lotoanimalito" && slug !== "lottopantera"
+      ? getEmbeddedCatalogImageUrl(gameUuid, canonicalNum)
+      : undefined,
   );
 
-  // If this game delegates to the shared 38-animal or 77-animal local catalog (e.g. La Ricachona, Monje Millonario),
+  // 2. If this game delegates to or is missing an entry in the shared 38/77/101-animal local catalog,
   // resolve directly from the in-memory embedded base64 catalog rather than making network requests
   if (!customImg && customImages && slug !== "lotoanimalito" && slug !== "lottopantera") {
     const granjitaLookupNum = isBallena ? 37 : canonicalNum;
@@ -428,20 +461,22 @@ export function resolveCanonicalAnimal(
       granjitaLookupNum <= 37
         ? (customImages[`granjita:${granjitaLookupNum}`] ??
             customImages[`ca8a0400-0000-4000-8000-000000000006:${granjitaLookupNum}`] ??
+            getEmbeddedCatalogImageUrl("ca8a0400-0000-4000-8000-000000000006", granjitaLookupNum) ??
             customImages[`lotto-activo:${granjitaLookupNum}`] ??
-            customImages[`eb7c4d00-0000-4000-8000-000000000005:${granjitaLookupNum}`])
+            customImages[`7d21a00b-0dfa-4bdc-9edf-8115802df1d6:${granjitaLookupNum}`] ??
+            getEmbeddedCatalogImageUrl("7d21a00b-0dfa-4bdc-9edf-8115802df1d6", granjitaLookupNum))
         : undefined,
       guacharoLookupNum <= 76
         ? (customImages[`guacharo:${guacharoLookupNum}`] ??
-            customImages[`01da9c54-392a-45e3-ab66-9a08befe7694:${guacharoLookupNum}`])
+            customImages[`01da9c54-392a-45e3-ab66-9a08befe7694:${guacharoLookupNum}`] ??
+            getEmbeddedCatalogImageUrl("01da9c54-392a-45e3-ab66-9a08befe7694", guacharoLookupNum))
         : undefined,
       guacharitoLookupNum <= 100
         ? (customImages[`guacharito:${guacharitoLookupNum}`] ??
-            customImages[`0519825d-e7ea-4e59-bf7d-cef2c832edd3:${guacharitoLookupNum}`])
+            customImages[`0519825d-e7ea-4e59-bf7d-cef2c832edd3:${guacharitoLookupNum}`] ??
+            getEmbeddedCatalogImageUrl("0519825d-e7ea-4e59-bf7d-cef2c832edd3", guacharitoLookupNum))
         : undefined,
       customImages[`any:${canonicalNum}`],
-      customImages?.[`${gameKey}:${canonicalNum}`],
-      customImages?.[`${slug}:${canonicalNum}`],
     );
   }
 

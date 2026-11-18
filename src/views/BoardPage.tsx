@@ -45,6 +45,7 @@ import {
   mockStore,
   ensureCustomCatalogLoaded,
   mergeAnimalImagesPreserveCustom,
+  mergeResultsPreserveToday,
   recoverCustomAnimalImagesFromLocalStorage,
   filterAdminCustomAnimalImages,
   mergeGamesPreserveCustomLogos,
@@ -240,8 +241,23 @@ function getInitialGames(): Game[] {
 function getInitialResultsMap(): Record<string, Result[]> {
   try {
     const today = lotteryDate();
+    let initialList = mockStore.results as Result[];
+    if (typeof window !== "undefined") {
+      try {
+        const raw = localStorage.getItem("pizarra_mock_results");
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            initialList = mergeResultsPreserveToday(initialList, parsed as Result[], today);
+            mockStore.results = initialList;
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
     const map: Record<string, Result[]> = {};
-    for (const r of mockStore.results as Result[]) {
+    for (const r of initialList) {
       if (r.draw_date === today) {
         const list = (map[r.game_id] ??= []);
         list.push(r);
@@ -260,9 +276,9 @@ function getInitialCachedAnimalImages(): AnimalImageMap {
   const map: AnimalImageMap = {};
   try {
     for (const img of mockStore.animal_images as AnimalImage[]) {
-      if (img?.image_url && img.animal_number != null) {
+      if (img?.image_url && img.animal_number != null && isRealAnimalMediaUrl(img.image_url)) {
         map[`${img.game_id}:${img.animal_number}`] = img.image_url;
-        if (isRealAnimalMediaUrl(img.image_url) || !map[`any:${img.animal_number}`]) {
+        if (!map[`any:${img.animal_number}`]) {
           map[`any:${img.animal_number}`] = img.image_url;
         }
       }
@@ -279,11 +295,9 @@ function getInitialCachedAnimalImages(): AnimalImageMap {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
         for (const img of parsed) {
-          if (img?.image_url && img.animal_number != null) {
+          if (img?.image_url && img.animal_number != null && isRealAnimalMediaUrl(img.image_url)) {
             map[`${img.game_id}:${img.animal_number}`] = img.image_url;
-            if (isRealAnimalMediaUrl(img.image_url) || !map[`any:${img.animal_number}`]) {
-              map[`any:${img.animal_number}`] = img.image_url;
-            }
+            map[`any:${img.animal_number}`] = img.image_url;
           }
         }
       }
@@ -457,185 +471,250 @@ const ScheduleCell = memo(function ScheduleCell({
   );
 });
 
-const GameCard = memo(function GameCard({
-  game,
-  animalImages,
-  animalNames,
-  animalLabels,
-  settings,
-  cardCount = 8,
-}: {
-  game: GameWithResults;
-  animalImages: AnimalImageMap;
-  animalNames: AnimalNameMap;
-  animalLabels: AnimalLabelMap;
-  settings: ReturnType<typeof useBoardSettings>["settings"];
-  cardCount?: number;
-}) {
-  const styleMode = settings.card_style ?? "neon";
-  const neonColor = getGameNeonColor(
-    game.slug || game.id || game.name,
-    game.color,
-    settings.game_colors,
-  );
-  const scheduleTimes = buildFullSchedule(game, game.latest_results || []);
-  const validSlots = new Set(scheduleTimes.map((t) => t.substring(0, 5).replace(/^0/, "")));
-  const validResults = (game.latest_results || [])
-    .filter((r) => {
-      const slot = r.draw_time.substring(0, 5).replace(/^0/, "");
-      return validSlots.has(slot);
-    })
-    .sort((a, b) => a.draw_time.localeCompare(b.draw_time));
-  const latestResult = validResults.length > 0 ? validResults[validResults.length - 1] : null;
+const GameCard = memo(
+  function GameCard({
+    game,
+    animalImages,
+    animalNames,
+    animalLabels,
+    settings,
+    cardCount = 8,
+  }: {
+    game: GameWithResults;
+    animalImages: AnimalImageMap;
+    animalNames: AnimalNameMap;
+    animalLabels: AnimalLabelMap;
+    settings: ReturnType<typeof useBoardSettings>["settings"];
+    cardCount?: number;
+  }) {
+    const styleMode = settings.card_style ?? "neon";
+    const neonColor = getGameNeonColor(
+      game.slug || game.id || game.name,
+      game.color,
+      settings.game_colors,
+    );
+    const scheduleTimes = buildFullSchedule(game, game.latest_results || []);
+    const validSlots = new Set(scheduleTimes.map((t) => t.substring(0, 5).replace(/^0/, "")));
+    const validResults = (game.latest_results || [])
+      .filter((r) => {
+        const slot = r.draw_time.substring(0, 5).replace(/^0/, "");
+        return validSlots.has(slot);
+      })
+      .sort((a, b) => a.draw_time.localeCompare(b.draw_time));
+    const latestResult = validResults.length > 0 ? validResults[validResults.length - 1] : null;
 
-  const latestCanonical = latestResult
-    ? resolveCanonicalAnimal(
-        game.slug || game.id,
-        latestResult.animal_number,
-        latestResult.animal_name,
-        animalImages,
-        animalNames,
-        animalLabels,
-      )
-    : null;
+    const latestCanonical = latestResult
+      ? resolveCanonicalAnimal(
+          game.slug || game.id,
+          latestResult.animal_number,
+          latestResult.animal_name,
+          animalImages,
+          animalNames,
+          animalLabels,
+        )
+      : null;
 
-  const latestImgUrl = latestCanonical?.imageUrl;
-  const latestDisplayName = latestCanonical?.name ?? "";
-  const latestLabel = latestCanonical?.label ?? "";
-  const isExpandedCard = cardCount <= 4;
+    const latestImgUrl = latestCanonical?.imageUrl;
+    const latestDisplayName = latestCanonical?.name ?? "";
+    const latestLabel = latestCanonical?.label ?? "";
+    const isExpandedCard = cardCount <= 4;
 
-  return (
-    <div
-      className="fluid-game-card h-full w-full min-h-0 min-w-0 overflow-hidden flex flex-col justify-between"
-      style={{
-        ...getNeonFlexCardStyle(neonColor, settings.card_color || "#0f172a", styleMode),
-        color: settings.text_color || "#ffffff",
-      }}
-    >
-      {/* Top Header */}
-      <div className="fluid-card-header shrink-0">
-        <div
-          className="rounded-full bg-slate-900 flex items-center justify-center overflow-hidden shrink-0 fluid-logo-wrapper"
-          style={{
-            width: "var(--display-logo)",
-            height: "var(--display-logo)",
-            ...getNeonLogoRingStyle(neonColor, styleMode),
-          }}
-        >
-          <GameLogoImage game={game} neonColor={neonColor} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <h2 className="fluid-game-title truncate" style={getNeonTitleStyle(neonColor, styleMode)}>
-            {game.name}
-          </h2>
-          <p className="fluid-game-subtitle font-mono truncate">
-            {validResults.length >= scheduleTimes.length
-              ? "Sorteos de hoy completos"
-              : "En progreso"}
-          </p>
-        </div>
-      </div>
-
-      {/* Hero Center Display (Customized by result_row_color, --display-hero-scale, --display-animal-scale and --card-avatar-scale) */}
+    return (
       <div
-        className="fluid-hero-banner shrink-0 min-h-0 overflow-hidden"
-        style={getNeonHeroStyle(
-          neonColor,
-          settings.result_row_color || "rgba(15, 23, 42, 0.8)",
-          styleMode,
-        )}
+        className="fluid-game-card h-full w-full min-h-0 min-w-0 overflow-hidden flex flex-col justify-between"
+        style={{
+          ...getNeonFlexCardStyle(neonColor, settings.card_color || "#0f172a", styleMode),
+          color: settings.text_color || "#ffffff",
+        }}
       >
-        <div
-          className="fluid-hero-avatar rounded-xl bg-slate-950/90 border flex items-center justify-center shrink-0 overflow-hidden shadow-inner p-1"
-          style={{
-            borderColor: `${neonColor}80`,
-            boxShadow: styleMode === "neon" ? `0 0 10px ${neonColor}33` : "none",
-            width:
-              "calc(clamp(2.2rem, min(5.5vh, 4vw), 4.8rem) * var(--display-animal-scale, 1) * var(--card-avatar-scale, 1))",
-            height:
-              "calc(clamp(2.2rem, min(5.5vh, 4vw), 4.8rem) * var(--display-animal-scale, 1) * var(--card-avatar-scale, 1))",
-          }}
-        >
-          {latestResult && latestCanonical ? (
-            <AnimalAvatar
-              imageUrl={latestImgUrl}
-              name={latestDisplayName}
-              number={latestCanonical.number}
-              className="w-full h-full object-contain max-h-full max-w-full p-0.5 drop-shadow-md rounded-lg"
-              priority="high"
-            />
-          ) : (
-            <Target className="w-6 h-6 sm:w-8 sm:h-8 text-slate-500" />
-          )}
-        </div>
-
-        <div className="flex-1 text-right min-w-0 overflow-hidden">
+        {/* Top Header */}
+        <div className="fluid-card-header shrink-0">
           <div
-            className="h-1.5 w-10 sm:w-14 rounded-full ml-auto mb-1"
-            style={getNeonBadgeStyle(neonColor, styleMode)}
-          />
-          {latestResult ? (
-            <div className="truncate">
-              <div
-                className="fluid-hero-text font-black tracking-wide truncate"
-                style={{ color: settings.text_color || "#ffffff" }}
-              >
-                {latestLabel} - {latestDisplayName.toUpperCase()}
-              </div>
-              <div
-                className="fluid-hero-time font-mono font-semibold mt-0.5 truncate"
-                style={{ color: settings.text_color ? `${settings.text_color}cc` : "#cbd5e1" }}
-              >
-                {formatTime(latestResult.draw_time)}
-              </div>
-            </div>
-          ) : (
-            <div
-              className="fluid-hero-text font-bold tracking-wide truncate"
-              style={{ color: settings.text_color ? `${settings.text_color}88` : "#94a3b8" }}
+            className="rounded-full bg-slate-900 flex items-center justify-center overflow-hidden shrink-0 fluid-logo-wrapper"
+            style={{
+              width: "var(--display-logo)",
+              height: "var(--display-logo)",
+              ...getNeonLogoRingStyle(neonColor, styleMode),
+            }}
+          >
+            <GameLogoImage game={game} neonColor={neonColor} />
+          </div>
+          <div className="flex-1 min-w-0">
+            <h2
+              className="fluid-game-title truncate"
+              style={getNeonTitleStyle(neonColor, styleMode)}
             >
-              Esperando sorteo
-            </div>
+              {game.name}
+            </h2>
+            <p className="fluid-game-subtitle font-mono truncate">
+              {validResults.length >= scheduleTimes.length
+                ? "Sorteos de hoy completos"
+                : "En progreso"}
+            </p>
+          </div>
+        </div>
+
+        {/* Hero Center Display (Customized by result_row_color, --display-hero-scale, --display-animal-scale and --card-avatar-scale) */}
+        <div
+          className="fluid-hero-banner shrink-0 min-h-0 overflow-hidden"
+          style={getNeonHeroStyle(
+            neonColor,
+            settings.result_row_color || "rgba(15, 23, 42, 0.8)",
+            styleMode,
           )}
+        >
+          <div
+            className="fluid-hero-avatar rounded-xl bg-slate-950/90 border flex items-center justify-center shrink-0 overflow-hidden shadow-inner p-1"
+            style={{
+              borderColor: `${neonColor}80`,
+              boxShadow: styleMode === "neon" ? `0 0 10px ${neonColor}33` : "none",
+              width:
+                "calc(clamp(2.2rem, min(5.5vh, 4vw), 4.8rem) * var(--display-animal-scale, 1) * var(--card-avatar-scale, 1))",
+              height:
+                "calc(clamp(2.2rem, min(5.5vh, 4vw), 4.8rem) * var(--display-animal-scale, 1) * var(--card-avatar-scale, 1))",
+            }}
+          >
+            {latestResult && latestCanonical ? (
+              <AnimalAvatar
+                imageUrl={latestImgUrl}
+                name={latestDisplayName}
+                number={latestCanonical.number}
+                className="w-full h-full object-contain max-h-full max-w-full p-0.5 drop-shadow-md rounded-lg"
+                priority="high"
+              />
+            ) : (
+              <Target className="w-6 h-6 sm:w-8 sm:h-8 text-slate-500" />
+            )}
+          </div>
+
+          <div className="flex-1 text-right min-w-0 overflow-hidden">
+            <div
+              className="h-1.5 w-10 sm:w-14 rounded-full ml-auto mb-1"
+              style={getNeonBadgeStyle(neonColor, styleMode)}
+            />
+            {latestResult ? (
+              <div className="truncate">
+                <div
+                  className="fluid-hero-text font-black tracking-wide truncate"
+                  style={{ color: settings.text_color || "#ffffff" }}
+                >
+                  {latestLabel} - {latestDisplayName.toUpperCase()}
+                </div>
+                <div
+                  className="fluid-hero-time font-mono font-semibold mt-0.5 truncate"
+                  style={{ color: settings.text_color ? `${settings.text_color}cc` : "#cbd5e1" }}
+                >
+                  {formatTime(latestResult.draw_time)}
+                </div>
+              </div>
+            ) : (
+              <div
+                className="fluid-hero-text font-bold tracking-wide truncate"
+                style={{ color: settings.text_color ? `${settings.text_color}88` : "#94a3b8" }}
+              >
+                Esperando sorteo
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Bottom Schedule Matrix Grid */}
+        <div className="fluid-schedule-matrix grid flex-1 h-full w-full min-h-0 min-w-0 grid-cols-4 auto-rows-fr overflow-hidden">
+          {scheduleTimes.map((timeSlot) => {
+            const res = findResultForTimeSlot(validResults, timeSlot);
+            const cellCanonical = res
+              ? resolveCanonicalAnimal(
+                  game.slug || game.id,
+                  res.animal_number,
+                  res.animal_name,
+                  animalImages,
+                  animalNames,
+                  animalLabels,
+                )
+              : null;
+
+            return (
+              <ScheduleCell
+                key={`${game.id}-${timeSlot}`}
+                timeSlot={timeSlot}
+                hasResult={Boolean(res && cellCanonical)}
+                displayNum={cellCanonical ? cellCanonical.label : null}
+                cellName={cellCanonical?.name ?? ""}
+                cellNumber={cellCanonical?.number ?? 0}
+                cellImageUrl={cellCanonical?.imageUrl}
+                isExpandedCard={isExpandedCard}
+                neonColor={neonColor}
+                cardColor={settings.card_color}
+                resultRowColor={settings.result_row_color}
+                textColor={settings.text_color}
+              />
+            );
+          })}
         </div>
       </div>
+    );
+  },
+  function areGameCardPropsEqual(prev, next) {
+    if (prev.cardCount !== next.cardCount) return false;
+    if (prev.settings !== next.settings) return false;
+    if (
+      prev.game.id !== next.game.id ||
+      prev.game.slug !== next.game.slug ||
+      prev.game.name !== next.game.name ||
+      prev.game.color !== next.game.color ||
+      prev.game.logo_url !== next.game.logo_url
+    ) {
+      return false;
+    }
 
-      {/* Bottom Schedule Matrix Grid */}
-      <div className="fluid-schedule-matrix grid flex-1 h-full w-full min-h-0 min-w-0 grid-cols-4 auto-rows-fr overflow-hidden">
-        {scheduleTimes.map((timeSlot) => {
-          const res = findResultForTimeSlot(validResults, timeSlot);
-          const cellCanonical = res
-            ? resolveCanonicalAnimal(
-                game.slug || game.id,
-                res.animal_number,
-                res.animal_name,
-                animalImages,
-                animalNames,
-                animalLabels,
-              )
-            : null;
+    const prevRes = prev.game.latest_results || [];
+    const nextRes = next.game.latest_results || [];
+    if (prevRes.length !== nextRes.length) return false;
 
-          return (
-            <ScheduleCell
-              key={`${game.id}-${timeSlot}`}
-              timeSlot={timeSlot}
-              hasResult={Boolean(res && cellCanonical)}
-              displayNum={cellCanonical ? cellCanonical.label : null}
-              cellName={cellCanonical?.name ?? ""}
-              cellNumber={cellCanonical?.number ?? 0}
-              cellImageUrl={cellCanonical?.imageUrl}
-              isExpandedCard={isExpandedCard}
-              neonColor={neonColor}
-              cardColor={settings.card_color}
-              resultRowColor={settings.result_row_color}
-              textColor={settings.text_color}
-            />
-          );
-        })}
-      </div>
-    </div>
-  );
-});
+    const gameKey = next.game.slug || next.game.id;
+    for (let i = 0; i < prevRes.length; i++) {
+      const a = prevRes[i]!;
+      const b = nextRes[i]!;
+      if (
+        a.draw_time !== b.draw_time ||
+        a.animal_number !== b.animal_number ||
+        a.animal_name !== b.animal_name
+      ) {
+        return false;
+      }
+      if (
+        prev.animalImages !== next.animalImages ||
+        prev.animalNames !== next.animalNames ||
+        prev.animalLabels !== next.animalLabels
+      ) {
+        const canA = resolveCanonicalAnimal(
+          gameKey,
+          a.animal_number,
+          a.animal_name,
+          prev.animalImages,
+          prev.animalNames,
+          prev.animalLabels,
+        );
+        const canB = resolveCanonicalAnimal(
+          gameKey,
+          b.animal_number,
+          b.animal_name,
+          next.animalImages,
+          next.animalNames,
+          next.animalLabels,
+        );
+        if (
+          canA.imageUrl !== canB.imageUrl ||
+          canA.label !== canB.label ||
+          canA.name !== canB.name
+        ) {
+          return false;
+        }
+      }
+    }
+    return true;
+  },
+);
 
 export default function BoardPage({ onAdminClick }: BoardPageProps) {
   const { profile, signOut } = useAuth();
@@ -895,19 +974,20 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         if (syncData?.settingsVersion)
           lastSettingsVersionRef.current = Number(syncData.settingsVersion);
 
-        // Sync all latest results from server into client mockStore & storage
+        // Sync all latest results from server into client mockStore & storage without erasing today's existing slots
         if (Array.isArray(syncData?.results) && syncData.results.length > 0) {
-          serverSyncedResults = syncData.results as Result[];
-          const { saveResultsToStorage } = await import("@/lib/mock-db");
-          mockStore.results = syncData.results as Result[];
-          if (typeof saveResultsToStorage === "function") {
-            saveResultsToStorage();
-          } else {
-            try {
-              localStorage.setItem("pizarra_mock_results", JSON.stringify(syncData.results));
-            } catch {
-              // ignore
-            }
+          const todayDate = lotteryDate();
+          const mergedResults = mergeResultsPreserveToday(
+            mockStore.results as Result[],
+            syncData.results as Result[],
+            todayDate,
+          );
+          serverSyncedResults = mergedResults;
+          mockStore.results = mergedResults;
+          try {
+            localStorage.setItem("pizarra_mock_results", JSON.stringify(mergedResults));
+          } catch {
+            // ignore
           }
         }
 
@@ -1098,9 +1178,9 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       );
 
       for (const img of combinedImages) {
-        if (!img?.image_url) continue;
+        if (!img?.image_url || !isRealAnimalMediaUrl(img.image_url)) continue;
         nextImgMap[`${img.game_id}:${img.animal_number}`] = img.image_url;
-        if (isRealAnimalMediaUrl(img.image_url) || !nextImgMap[`any:${img.animal_number}`]) {
+        if (!nextImgMap[`any:${img.animal_number}`]) {
           nextImgMap[`any:${img.animal_number}`] = img.image_url;
         }
         const matchedGame = loadedGames.find((g) => g.id === img.game_id || g.slug === img.game_id);
@@ -1200,10 +1280,15 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         continue;
       }
 
-      const prevGameResults = prevResultsByGame[r.gameId] ?? [];
+      const prevGameResults = (prevResultsByGame[r.gameId] ?? []).filter(
+        (pr) => pr.draw_date === today,
+      );
+      const mergedForGame = mergeResultsPreserveToday(prevGameResults, r.results, today).sort(
+        (a, b) => a.draw_time.localeCompare(b.draw_time),
+      );
       const frozenGameResults: Result[] = [];
 
-      for (const rawRes of r.results) {
+      for (const rawRes of mergedForGame) {
         const slotKey = rawRes.draw_time.substring(0, 5).replace(/^0/, "");
         const existingInSlot = prevGameResults.find(
           (pr) =>
@@ -1447,7 +1532,11 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data?.results)) {
-          mockStore.results = data.results;
+          mockStore.results = mergeResultsPreserveToday(
+            mockStore.results as Result[],
+            data.results as Result[],
+            lotteryDate(),
+          );
         }
         if (Array.isArray(data?.tripleResults)) {
           const tJson = JSON.stringify(data.tripleResults);
