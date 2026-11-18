@@ -1,5 +1,6 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, memo } from "react";
 import { getEmojiForNumber } from "@/lib/animals";
+import { cleanImageUrl, preloadImageOnce } from "@/lib/official-animals";
 
 export function isVideoMedia(url?: string | null): boolean {
   if (!url) return false;
@@ -26,7 +27,7 @@ interface AnimalMediaProps {
   fetchPriority?: "high" | "low" | "auto";
 }
 
-export default function AnimalMedia({
+const AnimalMedia = memo(function AnimalMedia({
   mediaUrl,
   name,
   number,
@@ -36,14 +37,25 @@ export default function AnimalMedia({
   decoding = "async",
   fetchPriority = "auto",
 }: AnimalMediaProps) {
-  const [hasError, setHasError] = useState(false);
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const isVideo = isVideoMedia(mediaUrl);
+  const sanitizedUrl = cleanImageUrl(mediaUrl);
+  const isVideo = isVideoMedia(sanitizedUrl);
 
-  // Reset error when URL changes
+  // Retain the last known valid image URL so the <img> src never blanks out between renders
+  const lastValidUrlRef = useRef<string>(sanitizedUrl);
+  if (sanitizedUrl && sanitizedUrl !== lastValidUrlRef.current) {
+    lastValidUrlRef.current = sanitizedUrl;
+  }
+  const activeUrl = sanitizedUrl || lastValidUrlRef.current;
+
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const hasError = Boolean(activeUrl && failedUrl === activeUrl);
+  const videoRef = useRef<HTMLVideoElement>(null);
+
   useEffect(() => {
-    setHasError(false);
-  }, [mediaUrl]);
+    if (activeUrl && !isVideo) {
+      preloadImageOnce(activeUrl);
+    }
+  }, [activeUrl, isVideo]);
 
   // Ensure video autoplays safely when mounted
   useEffect(() => {
@@ -54,9 +66,9 @@ export default function AnimalMedia({
         // Autoplay policy fallback: muted video usually autoplays without issues
       });
     }
-  }, [isVideo, mediaUrl, hasError]);
+  }, [isVideo, activeUrl, hasError]);
 
-  if (!mediaUrl || hasError) {
+  if (!activeUrl || hasError) {
     return (
       <span className={emojiClassName} role="img" aria-label={name}>
         {getEmojiForNumber(number, name)}
@@ -68,7 +80,7 @@ export default function AnimalMedia({
     return (
       <video
         ref={videoRef}
-        src={mediaUrl}
+        src={activeUrl}
         autoPlay
         loop
         muted
@@ -88,7 +100,7 @@ export default function AnimalMedia({
             videoRef.current.play().catch(() => {});
           }
         }}
-        onError={() => setHasError(true)}
+        onError={() => setFailedUrl(activeUrl)}
         className={className}
         title={`Video animado de ${name}`}
       />
@@ -97,13 +109,17 @@ export default function AnimalMedia({
 
   return (
     <img
-      src={mediaUrl}
-      alt={name}
+      src={activeUrl}
+      alt=""
+      aria-label={name}
       loading={loading}
       decoding={decoding}
+      draggable={false}
       fetchPriority={fetchPriority !== "auto" ? fetchPriority : undefined}
-      onError={() => setHasError(true)}
+      onError={() => setFailedUrl(activeUrl)}
       className={className}
     />
   );
-}
+});
+
+export default AnimalMedia;

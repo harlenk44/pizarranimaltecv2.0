@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useMemo, memo } from "react";
 import { Hash } from "lucide-react";
 import { useBoardSettings } from "@/context/BoardSettingsContext";
 import { useLicenseContext } from "@/components/LicenseGate";
@@ -18,6 +18,7 @@ import {
   getNeonBadgeStyle,
 } from "@/lib/neon-flex";
 import { getGameLogo } from "@/lib/game-logos";
+import { preloadImageOnce } from "@/lib/official-animals";
 
 interface TriplesBoardProps {
   results: TripleResult[];
@@ -44,88 +45,200 @@ function findTripleForTimeSlot(
   });
 }
 
-export default function TriplesBoard({ results, loading = false, games }: TriplesBoardProps) {
-  const { settings } = useBoardSettings();
-  const { isGameAllowed, designConfig } = useLicenseContext();
+const TripleLogoImage = memo(function TripleLogoImage({
+  game,
+  neonColor,
+}: {
+  game: TripleGameConfig;
+  neonColor: string;
+}) {
+  const primaryLogo = preloadImageOnce(getGameLogo(game, neonColor));
+  const fallbackLogo = preloadImageOnce(getGameLogo(game.slug || game.name, neonColor));
 
-  const effectiveSettings = useMemo(() => {
-    if (!designConfig) return settings;
-    const isCustom = Boolean(
-      designConfig.useCustomDesign ||
-      designConfig.background_color ||
-      designConfig.surface_color ||
-      designConfig.primary_color ||
-      designConfig.text_color ||
-      designConfig.card_color ||
-      designConfig.result_row_color ||
-      designConfig.card_style ||
-      (designConfig.game_colors && Object.keys(designConfig.game_colors).length > 0),
-    );
-    if (!isCustom) return settings;
-    return {
-      ...settings,
-      background_color: designConfig.background_color ?? settings.background_color,
-      surface_color: designConfig.surface_color ?? settings.surface_color,
-      primary_color: designConfig.primary_color ?? settings.primary_color,
-      text_color: designConfig.text_color ?? settings.text_color,
-      card_color: designConfig.card_color ?? settings.card_color,
-      result_row_color: designConfig.result_row_color ?? settings.result_row_color,
-      font_family: designConfig.font_family ?? settings.font_family,
-      card_style: designConfig.card_style ?? settings.card_style ?? "neon",
-      game_colors: {
-        ...(settings.game_colors ?? {}),
-        ...(designConfig.game_colors ?? {}),
-      },
-    };
-  }, [settings, designConfig]);
+  return (
+    <img
+      src={primaryLogo}
+      alt=""
+      aria-label={game.name}
+      loading="eager"
+      decoding="async"
+      draggable={false}
+      fetchPriority="high"
+      onError={(e) => {
+        if (fallbackLogo && e.currentTarget.src !== fallbackLogo) {
+          e.currentTarget.src = fallbackLogo;
+        }
+      }}
+      className="w-full h-full object-contain max-h-full max-w-full p-0.5"
+    />
+  );
+});
 
-  const visibleTriples = useMemo(() => {
-    if (games && games.length > 0) return games;
-    return TRIPLE_GAMES.filter((g) => isGameAllowed(g.id) || isGameAllowed(g.slug));
-  }, [games, isGameAllowed]);
-
-  if (loading && results.length === 0) {
+const TripleScheduleCell = memo(function TripleScheduleCell({
+  timeSlot,
+  res,
+  isHorizontalRowLayout,
+  isSingleColumn,
+  neonColor,
+  cardColor,
+  resultRowColor,
+  textColor,
+}: {
+  timeSlot: string;
+  res?: TripleResult;
+  isHorizontalRowLayout: boolean;
+  isSingleColumn: boolean;
+  neonColor: string;
+  cardColor?: string;
+  resultRowColor?: string;
+  textColor?: string;
+}) {
+  if (isHorizontalRowLayout) {
     return (
-      <div className="flex items-center justify-center h-full">
-        <div className="animate-pulse text-slate-400 font-medium">
-          Cargando resultados de Triples...
+      <div
+        className={`fluid-schedule-cell h-full w-full min-h-0 min-w-0 overflow-hidden !flex-row items-center justify-between !px-2.5 ${
+          res ? "shadow-sm" : "opacity-85"
+        }`}
+        style={{
+          backgroundColor: res
+            ? resultRowColor || "rgba(15, 23, 42, 0.9)"
+            : cardColor
+              ? `${cardColor}cc`
+              : "rgba(2, 6, 23, 0.6)",
+          borderColor: res
+            ? `${neonColor}66`
+            : cardColor
+              ? `${cardColor}88`
+              : "rgba(51, 65, 85, 0.5)",
+        }}
+      >
+        <div
+          className="fluid-cell-time whitespace-nowrap font-bold shrink-0"
+          style={{ color: textColor ? `${textColor}cc` : "#cbd5e1" }}
+        >
+          {formatTime(timeSlot)}
         </div>
-      </div>
-    );
-  }
-
-  if (visibleTriples.length === 0) {
-    return (
-      <div className="flex items-center justify-center h-full text-slate-400 text-sm">
-        No hay loterías de Triples contratadas para esta licencia.
+        <div className="font-mono tabular-nums flex items-center justify-end gap-1.5 sm:gap-2 min-w-0">
+          {res ? (
+            isSingleColumn ? (
+              <span
+                className="font-black"
+                style={{
+                  color: neonColor,
+                  textShadow: `0 0 6px ${neonColor}80`,
+                  fontSize:
+                    "calc(clamp(0.85rem, min(2vh, 1.2vw), 1.3rem) * var(--display-font-scale, 1) * var(--card-cell-scale, 1))",
+                }}
+              >
+                {res.triple_a}
+              </span>
+            ) : (
+              <div className="flex items-center justify-end gap-1.5 sm:gap-2 flex-wrap">
+                <span
+                  className="font-black whitespace-nowrap"
+                  style={{
+                    color: neonColor,
+                    textShadow: `0 0 6px ${neonColor}80`,
+                    fontSize:
+                      "calc(clamp(0.72rem, min(1.8vh, 1.05vw), 1.15rem) * var(--display-font-scale, 1) * var(--card-cell-scale, 1))",
+                  }}
+                >
+                  <span className="text-[0.8em] opacity-75 mr-0.5">A:</span>
+                  {res.triple_a}
+                </span>
+                {res.triple_b && (
+                  <span
+                    className="font-black text-white whitespace-nowrap"
+                    style={{
+                      fontSize:
+                        "calc(clamp(0.72rem, min(1.8vh, 1.05vw), 1.15rem) * var(--display-font-scale, 1) * var(--card-cell-scale, 1))",
+                    }}
+                  >
+                    <span className="text-[0.8em] text-slate-400 mr-0.5">B:</span>
+                    {res.triple_b}
+                  </span>
+                )}
+                {(res.triple_c || res.zodiac_sign) && (
+                  <span
+                    className="font-extrabold text-amber-300 whitespace-nowrap bg-amber-500/10 border border-amber-500/30 rounded px-1.5 py-0.5 leading-none"
+                    style={{
+                      fontSize:
+                        "calc(clamp(0.68rem, min(1.7vh, 0.98vw), 1.05rem) * var(--display-font-scale, 1) * var(--card-cell-scale, 1))",
+                    }}
+                  >
+                    {res.triple_c ?? ""}
+                    {res.zodiac_sign ? ` ${formatZodiacSign(res.zodiac_sign)}` : ""}
+                  </span>
+                )}
+              </div>
+            )
+          ) : (
+            <span className="text-slate-600 font-normal text-sm">—</span>
+          )}
+        </div>
       </div>
     );
   }
 
   return (
     <div
-      className="board-fluid-grid grid h-full w-full min-h-0 min-w-0 auto-rows-fr overflow-hidden"
-      style={getResponsiveBoardGridStyle(visibleTriples.length)}
+      className={`fluid-schedule-cell h-full w-full min-h-0 min-w-0 overflow-hidden flex flex-col items-center justify-center px-0.5 ${
+        res ? "shadow-sm" : "opacity-85"
+      }`}
+      style={{
+        backgroundColor: res
+          ? resultRowColor || "rgba(15, 23, 42, 0.9)"
+          : cardColor
+            ? `${cardColor}cc`
+            : "rgba(2, 6, 23, 0.6)",
+        borderColor: res
+          ? `${neonColor}66`
+          : cardColor
+            ? `${cardColor}88`
+            : "rgba(51, 65, 85, 0.5)",
+      }}
     >
-      {visibleTriples.map((game) => {
-        const gameResults = results
-          .filter((r) => r.game_id === game.id || r.game_slug === game.slug)
-          .sort((a, b) => a.draw_time.localeCompare(b.draw_time));
-
-        return (
-          <TripleGameCard
-            key={game.id}
-            game={game}
-            results={gameResults}
-            settings={effectiveSettings}
-          />
-        );
-      })}
+      <div
+        className="fluid-cell-time truncate w-full text-center"
+        style={{ color: textColor ? `${textColor}b3` : "#94a3b8" }}
+      >
+        {formatTime(timeSlot)}
+      </div>
+      <div className="fluid-cell-result w-full text-center font-mono tabular-nums">
+        {res ? (
+          isSingleColumn ? (
+            <span
+              style={{ color: neonColor, textShadow: `0 0 6px ${neonColor}80` }}
+              className="font-black"
+            >
+              {res.triple_a}
+            </span>
+          ) : (
+            <div className="flex flex-col items-center justify-center leading-none">
+              <span
+                style={{ color: neonColor, textShadow: `0 0 6px ${neonColor}80` }}
+                className="font-black text-[0.76em] tracking-tighter whitespace-nowrap"
+              >
+                {res.triple_a}
+                {res.triple_b ? `-${res.triple_b}` : ""}
+              </span>
+              {(res.triple_c || res.zodiac_sign) && (
+                <span className="text-[0.65em] text-amber-300 font-bold leading-none mt-0.5 tracking-tighter whitespace-nowrap">
+                  {res.triple_c ?? ""}
+                  {res.zodiac_sign ? ` ${formatZodiacSign(res.zodiac_sign)}` : ""}
+                </span>
+              )}
+            </div>
+          )
+        ) : (
+          <span className="text-slate-600 font-normal">—</span>
+        )}
+      </div>
     </div>
   );
-}
+});
 
-function TripleGameCard({
+const TripleGameCard = memo(function TripleGameCard({
   game,
   results,
   settings,
@@ -140,7 +253,6 @@ function TripleGameCard({
     game.color,
     settings.game_colors,
   );
-  const [imgError, setImgError] = useState(false);
   const scheduleTimes = game.schedule_times;
   const validSlots = new Set(scheduleTimes.map((t) => t.substring(0, 5).replace(/^0/, "")));
   const validResults = results
@@ -184,17 +296,7 @@ function TripleGameCard({
             ...getNeonLogoRingStyle(neonColor, styleMode),
           }}
         >
-          <img
-            src={getGameLogo(game, neonColor)}
-            alt={game.name}
-            loading="eager"
-            decoding="async"
-            fetchPriority="high"
-            onError={(e) => {
-              e.currentTarget.src = getGameLogo(game.slug || game.name, neonColor);
-            }}
-            className="w-full h-full object-contain max-h-full max-w-full p-0.5"
-          />
+          <TripleLogoImage game={game} neonColor={neonColor} />
         </div>
         <div className="flex-1 min-w-0">
           <h2 className="fluid-game-title truncate" style={getNeonTitleStyle(neonColor, styleMode)}>
@@ -317,154 +419,94 @@ function TripleGameCard({
       >
         {scheduleTimes.map((timeSlot) => {
           const res = findTripleForTimeSlot(validResults, timeSlot);
-
-          if (isHorizontalRowLayout) {
-            return (
-              <div
-                key={timeSlot}
-                className={`fluid-schedule-cell h-full w-full min-h-0 min-w-0 overflow-hidden transition !flex-row items-center justify-between !px-2.5 ${
-                  res ? "shadow-sm" : "opacity-85"
-                }`}
-                style={{
-                  backgroundColor: res
-                    ? settings.result_row_color || "rgba(15, 23, 42, 0.9)"
-                    : settings.card_color
-                      ? `${settings.card_color}cc`
-                      : "rgba(2, 6, 23, 0.6)",
-                  borderColor: res
-                    ? `${neonColor}66`
-                    : settings.card_color
-                      ? `${settings.card_color}88`
-                      : "rgba(51, 65, 85, 0.5)",
-                }}
-              >
-                <div
-                  className="fluid-cell-time whitespace-nowrap font-bold shrink-0"
-                  style={{ color: settings.text_color ? `${settings.text_color}cc` : "#cbd5e1" }}
-                >
-                  {formatTime(timeSlot)}
-                </div>
-                <div className="font-mono tabular-nums flex items-center justify-end gap-1.5 sm:gap-2 min-w-0">
-                  {res ? (
-                    isSingleColumn ? (
-                      <span
-                        className="font-black"
-                        style={{
-                          color: neonColor,
-                          textShadow: `0 0 6px ${neonColor}80`,
-                          fontSize:
-                            "calc(clamp(0.85rem, min(2vh, 1.2vw), 1.3rem) * var(--display-font-scale, 1) * var(--card-cell-scale, 1))",
-                        }}
-                      >
-                        {res.triple_a}
-                      </span>
-                    ) : (
-                      <div className="flex items-center justify-end gap-1.5 sm:gap-2 flex-wrap">
-                        <span
-                          className="font-black whitespace-nowrap"
-                          style={{
-                            color: neonColor,
-                            textShadow: `0 0 6px ${neonColor}80`,
-                            fontSize:
-                              "calc(clamp(0.72rem, min(1.8vh, 1.05vw), 1.15rem) * var(--display-font-scale, 1) * var(--card-cell-scale, 1))",
-                          }}
-                        >
-                          <span className="text-[0.8em] opacity-75 mr-0.5">A:</span>
-                          {res.triple_a}
-                        </span>
-                        {res.triple_b && (
-                          <span
-                            className="font-black text-white whitespace-nowrap"
-                            style={{
-                              fontSize:
-                                "calc(clamp(0.72rem, min(1.8vh, 1.05vw), 1.15rem) * var(--display-font-scale, 1) * var(--card-cell-scale, 1))",
-                            }}
-                          >
-                            <span className="text-[0.8em] text-slate-400 mr-0.5">B:</span>
-                            {res.triple_b}
-                          </span>
-                        )}
-                        {(res.triple_c || res.zodiac_sign) && (
-                          <span
-                            className="font-extrabold text-amber-300 whitespace-nowrap bg-amber-500/10 border border-amber-500/30 rounded px-1.5 py-0.5 leading-none"
-                            style={{
-                              fontSize:
-                                "calc(clamp(0.68rem, min(1.7vh, 0.98vw), 1.05rem) * var(--display-font-scale, 1) * var(--card-cell-scale, 1))",
-                            }}
-                          >
-                            {res.triple_c ?? ""}
-                            {res.zodiac_sign ? ` ${formatZodiacSign(res.zodiac_sign)}` : ""}
-                          </span>
-                        )}
-                      </div>
-                    )
-                  ) : (
-                    <span className="text-slate-600 font-normal text-sm">—</span>
-                  )}
-                </div>
-              </div>
-            );
-          }
-
           return (
-            <div
-              key={timeSlot}
-              className={`fluid-schedule-cell h-full w-full min-h-0 min-w-0 overflow-hidden transition flex flex-col items-center justify-center px-0.5 ${
-                res ? "shadow-sm" : "opacity-85"
-              }`}
-              style={{
-                backgroundColor: res
-                  ? settings.result_row_color || "rgba(15, 23, 42, 0.9)"
-                  : settings.card_color
-                    ? `${settings.card_color}cc`
-                    : "rgba(2, 6, 23, 0.6)",
-                borderColor: res
-                  ? `${neonColor}66`
-                  : settings.card_color
-                    ? `${settings.card_color}88`
-                    : "rgba(51, 65, 85, 0.5)",
-              }}
-            >
-              <div
-                className="fluid-cell-time truncate w-full text-center"
-                style={{ color: settings.text_color ? `${settings.text_color}b3` : "#94a3b8" }}
-              >
-                {formatTime(timeSlot)}
-              </div>
-              <div className="fluid-cell-result w-full text-center font-mono tabular-nums">
-                {res ? (
-                  isSingleColumn ? (
-                    <span
-                      style={{ color: neonColor, textShadow: `0 0 6px ${neonColor}80` }}
-                      className="font-black"
-                    >
-                      {res.triple_a}
-                    </span>
-                  ) : (
-                    <div className="flex flex-col items-center justify-center leading-none">
-                      <span
-                        style={{ color: neonColor, textShadow: `0 0 6px ${neonColor}80` }}
-                        className="font-black text-[0.76em] tracking-tighter whitespace-nowrap"
-                      >
-                        {res.triple_a}
-                        {res.triple_b ? `-${res.triple_b}` : ""}
-                      </span>
-                      {(res.triple_c || res.zodiac_sign) && (
-                        <span className="text-[0.65em] text-amber-300 font-bold leading-none mt-0.5 tracking-tighter whitespace-nowrap">
-                          {res.triple_c ?? ""}
-                          {res.zodiac_sign ? ` ${formatZodiacSign(res.zodiac_sign)}` : ""}
-                        </span>
-                      )}
-                    </div>
-                  )
-                ) : (
-                  <span className="text-slate-600 font-normal">—</span>
-                )}
-              </div>
-            </div>
+            <TripleScheduleCell
+              key={`${game.id}-${timeSlot}`}
+              timeSlot={timeSlot}
+              res={res}
+              isHorizontalRowLayout={isHorizontalRowLayout}
+              isSingleColumn={isSingleColumn}
+              neonColor={neonColor}
+              cardColor={settings.card_color}
+              resultRowColor={settings.result_row_color}
+              textColor={settings.text_color}
+            />
           );
         })}
       </div>
     </div>
   );
-}
+});
+
+const TriplesBoard = memo(function TriplesBoard({ results, games }: TriplesBoardProps) {
+  const { settings } = useBoardSettings();
+  const { isGameAllowed, designConfig } = useLicenseContext();
+
+  const effectiveSettings = useMemo(() => {
+    if (!designConfig) return settings;
+    const isCustom = Boolean(
+      designConfig.useCustomDesign ||
+      designConfig.background_color ||
+      designConfig.surface_color ||
+      designConfig.primary_color ||
+      designConfig.text_color ||
+      designConfig.card_color ||
+      designConfig.result_row_color ||
+      designConfig.card_style ||
+      (designConfig.game_colors && Object.keys(designConfig.game_colors).length > 0),
+    );
+    if (!isCustom) return settings;
+    return {
+      ...settings,
+      background_color: designConfig.background_color ?? settings.background_color,
+      surface_color: designConfig.surface_color ?? settings.surface_color,
+      primary_color: designConfig.primary_color ?? settings.primary_color,
+      text_color: designConfig.text_color ?? settings.text_color,
+      card_color: designConfig.card_color ?? settings.card_color,
+      result_row_color: designConfig.result_row_color ?? settings.result_row_color,
+      font_family: designConfig.font_family ?? settings.font_family,
+      card_style: designConfig.card_style ?? settings.card_style ?? "neon",
+      game_colors: {
+        ...(settings.game_colors ?? {}),
+        ...(designConfig.game_colors ?? {}),
+      },
+    };
+  }, [settings, designConfig]);
+
+  const visibleTriples = useMemo(() => {
+    if (games && games.length > 0) return games;
+    return TRIPLE_GAMES.filter((g) => isGameAllowed(g.id) || isGameAllowed(g.slug));
+  }, [games, isGameAllowed]);
+
+  if (visibleTriples.length === 0) {
+    return (
+      <div className="flex items-center justify-center h-full text-slate-400 text-sm">
+        No hay loterías de Triples contratadas para esta licencia.
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="board-fluid-grid grid h-full w-full min-h-0 min-w-0 auto-rows-fr overflow-hidden"
+      style={getResponsiveBoardGridStyle(visibleTriples.length)}
+    >
+      {visibleTriples.map((game) => {
+        const gameResults = results
+          .filter((r) => r.game_id === game.id || r.game_slug === game.slug)
+          .sort((a, b) => a.draw_time.localeCompare(b.draw_time));
+
+        return (
+          <TripleGameCard
+            key={game.id}
+            game={game}
+            results={gameResults}
+            settings={effectiveSettings}
+          />
+        );
+      })}
+    </div>
+  );
+});
+
+export default TriplesBoard;

@@ -1059,6 +1059,8 @@ export const Route = createFileRoute("/api/public/results/sync")({
         const reqUrl = new URL(request.url, "http://localhost");
         const animalImageQuery = reqUrl.searchParams.get("animalImage");
         if (animalImageQuery) {
+          await ensureCustomCatalogLoaded().catch(() => {});
+          loadServerAnimalImages();
           const labelParam = reqUrl.searchParams.get("label") ?? "";
           return serveOnDemandAnimalImage(animalImageQuery, labelParam);
         }
@@ -1080,18 +1082,17 @@ export const Route = createFileRoute("/api/public/results/sync")({
           (r) => r.draw_date === serverToday,
         ).length;
 
-        // Await sync when today's results are empty (e.g. cold Cloudflare Worker) or when interval elapsed
+        // Await sync when today's results are empty (e.g. cold Cloudflare Worker) or bound wait when interval elapsed
         const isStaleSync = Date.now() - lastAutoSyncTimestamp >= AUTO_SYNC_INTERVAL_MS;
-        if (
-          !initialAutoSyncDone ||
-          todayResultsCount === 0 ||
-          serverTripleResults.length === 0 ||
-          isStaleSync
-        ) {
+        const isColdEmpty = todayResultsCount === 0 || serverTripleResults.length === 0;
+        if (!initialAutoSyncDone || isColdEmpty || isStaleSync) {
           initialAutoSyncDone = true;
-          await triggerBackgroundSync(
-            todayResultsCount === 0 || serverTripleResults.length === 0,
-          ).catch(() => {});
+          const syncPromise = triggerBackgroundSync(isColdEmpty).catch(() => {});
+          if (isColdEmpty) {
+            await Promise.race([syncPromise, new Promise((resolve) => setTimeout(resolve, 3500))]);
+          } else {
+            await Promise.race([syncPromise, new Promise((resolve) => setTimeout(resolve, 1200))]);
+          }
         }
 
         let latestAlert = serverLatestAlert;

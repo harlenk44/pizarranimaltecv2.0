@@ -1335,7 +1335,7 @@ function createMockQueryBuilder(table: string) {
       if (table === "results" && mockStore.results.length === 0 && typeof window !== "undefined") {
         await syncTuazarDirectly();
       }
-      if (table === "animal_images" && typeof window === "undefined") {
+      if (table === "animal_images") {
         await ensureCustomCatalogLoaded();
       }
       const storeList = ((mockStore as unknown as Record<string, unknown[]>)[table] ??=

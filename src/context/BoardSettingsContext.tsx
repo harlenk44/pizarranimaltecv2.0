@@ -186,7 +186,7 @@ export function BoardSettingsProvider({ children }: { children: ReactNode }) {
     }
 
     const channel = supabase
-      .channel(`app-settings-${Math.random().toString(36).slice(2)}`)
+      .channel("app-settings-realtime-sync")
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "app_settings" },

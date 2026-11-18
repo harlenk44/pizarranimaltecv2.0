@@ -306,12 +306,64 @@ export function getFixedAnimalImageUrl(
   return `/api/public/results/sync?animalImage=${encodeURIComponent(slug)}:${canonicalNumber}&label=${encodeURIComponent(label)}`;
 }
 
+const preloadedImagesCache = new Map<string, HTMLImageElement>();
+
+/**
+ * Strips volatile cache-busting query params (?t=, ?v=, ?_t=, etc.) from image URLs
+ * so the browser never re-downloads an image due to changing query strings.
+ */
+export function cleanImageUrl(url?: string | null): string {
+  if (!url) return "";
+  const trimmed = url.trim();
+  if (!trimmed || trimmed.startsWith("data:") || trimmed.startsWith("blob:")) {
+    return trimmed;
+  }
+  return trimmed
+    .replace(/([?&])(t|v|_t|ts|timestamp|cache|cb)=\d+(&?)/gi, (_match, prefix, _key, suffix) => {
+      if (prefix === "?" && suffix === "&") return "?";
+      if (prefix === "&" && suffix === "&") return "&";
+      return "";
+    })
+    .replace(/[?&]$/, "");
+}
+
+/**
+ * Preloads an image once using new Image() with decoding="async" and keeps a strong
+ * reference in memory so mobile browsers never evict decoded bitmaps during tab switches.
+ */
+export function preloadImageOnce(url?: string | null): string {
+  const clean = cleanImageUrl(url);
+  if (!clean) return "";
+  if (typeof window !== "undefined" && typeof Image !== "undefined") {
+    if (!preloadedImagesCache.has(clean)) {
+      const img = new Image();
+      img.decoding = "async";
+      img.src = clean;
+      preloadedImagesCache.set(clean, img);
+    }
+  }
+  return clean;
+}
+
+/**
+ * Returns true if the URL is an actual embedded data URI or static/custom asset,
+ * and NOT a server on-demand endpoint placeholder.
+ */
+export function isRealAnimalMediaUrl(url?: string | null): boolean {
+  if (!url || typeof url !== "string") return false;
+  const trimmed = url.trim();
+  if (!trimmed) return false;
+  if (trimmed.includes("/api/public/results/sync?animalImage=")) return false;
+  if (trimmed.includes("/api/media?file=")) return false;
+  return true;
+}
+
 /**
  * Master immutable resolver for any animalito draw across the entire application.
  * Guarantees:
  *  1. "0" is always DELFÍN and "00" is always BALLENA (never conflated via parseInt).
  *  2. Official animal name comes from the local immutable catalog for that lottery.
- *  3. Image priority is strictly: (1) Game-specific custom admin image -> (2) Fixed local bank.
+ *  3. Image priority is strictly: (1) Game-specific custom admin image -> (2) Local embedded catalog -> (3) Fixed local bank.
  */
 export function resolveCanonicalAnimal(
   gameIdOrSlug: string | null | undefined,
@@ -350,12 +402,51 @@ export function resolveCanonicalAnimal(
         catalogEntry?.name ??
         (rawAnimalName ? rawAnimalName.trim() : `Animal ${label}`));
 
-  const customImg =
-    customImages?.[`${gameKey}:${canonicalNum}`] ??
-    customImages?.[`${slug}:${canonicalNum}`] ??
-    (isBallena ? (customImages?.[`${gameKey}:00`] ?? customImages?.[`${slug}:00`]) : undefined);
+  const pickReal = (...candidates: (string | undefined)[]): string | undefined => {
+    for (const c of candidates) {
+      if (isRealAnimalMediaUrl(c)) return cleanImageUrl(c);
+    }
+    return undefined;
+  };
 
-  const imageUrl = customImg || getFixedAnimalImageUrl(slug, canonicalNum, label);
+  // Direct match for this game
+  let customImg = pickReal(
+    customImages?.[`${gameKey}:${canonicalNum}`],
+    customImages?.[`${slug}:${canonicalNum}`],
+    isBallena ? customImages?.[`${gameKey}:00`] : undefined,
+    isBallena ? customImages?.[`${slug}:00`] : undefined,
+  );
+
+  // If this game delegates to the shared 38-animal or 77-animal local catalog (e.g. La Ricachona, Monje Millonario),
+  // resolve directly from the in-memory embedded base64 catalog rather than making network requests
+  if (!customImg && customImages && slug !== "lotoanimalito" && slug !== "lottopantera") {
+    const granjitaLookupNum = isBallena ? 37 : canonicalNum;
+    const guacharoLookupNum = isBallena ? 76 : canonicalNum;
+    const guacharitoLookupNum = isBallena ? 100 : canonicalNum;
+
+    customImg = pickReal(
+      granjitaLookupNum <= 37
+        ? (customImages[`granjita:${granjitaLookupNum}`] ??
+            customImages[`ca8a0400-0000-4000-8000-000000000006:${granjitaLookupNum}`] ??
+            customImages[`lotto-activo:${granjitaLookupNum}`] ??
+            customImages[`eb7c4d00-0000-4000-8000-000000000005:${granjitaLookupNum}`])
+        : undefined,
+      guacharoLookupNum <= 76
+        ? (customImages[`guacharo:${guacharoLookupNum}`] ??
+            customImages[`01da9c54-392a-45e3-ab66-9a08befe7694:${guacharoLookupNum}`])
+        : undefined,
+      guacharitoLookupNum <= 100
+        ? (customImages[`guacharito:${guacharitoLookupNum}`] ??
+            customImages[`0519825d-e7ea-4e59-bf7d-cef2c832edd3:${guacharitoLookupNum}`])
+        : undefined,
+      customImages[`any:${canonicalNum}`],
+      customImages?.[`${gameKey}:${canonicalNum}`],
+      customImages?.[`${slug}:${canonicalNum}`],
+    );
+  }
+
+  const rawFinalUrl = customImg || getFixedAnimalImageUrl(slug, canonicalNum, label);
+  const imageUrl = preloadImageOnce(rawFinalUrl);
 
   return {
     number: canonicalNum,

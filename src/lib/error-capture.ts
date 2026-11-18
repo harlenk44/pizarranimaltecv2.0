@@ -49,11 +49,45 @@ function isErrorLike(value: unknown): value is Error {
   return value instanceof Error;
 }
 
+export function isBenignAbortError(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < CAUSE_DEPTH_LIMIT && current != null; depth++) {
+    if (current instanceof Error) {
+      const msg = (current.message || "").trim().toLowerCase();
+      const name = (current.name || "").trim().toLowerCase();
+      const code = String((current as { code?: unknown }).code ?? "").toUpperCase();
+      if (
+        msg === "aborted" ||
+        msg === "the operation was aborted" ||
+        msg === "request aborted" ||
+        msg.includes("premature close") ||
+        name === "aborterror" ||
+        code === "ECONNRESET" ||
+        code === "EPIPE" ||
+        code === "ERR_STREAM_PREMATURE_CLOSE"
+      ) {
+        return true;
+      }
+      current = current.cause;
+    } else if (typeof current === "string") {
+      const lower = current.trim().toLowerCase();
+      if (lower === "aborted" || lower === "error: aborted") return true;
+      break;
+    } else {
+      break;
+    }
+  }
+  return false;
+}
+
 // Wrap console.error so errors logged by any layer — including h3's internal
 // unhandled-error logging, which this file cannot hook directly — are both
 // recorded for consumeLastCapturedError and expanded before serialization.
 const originalConsoleError = console.error.bind(console);
 console.error = (...args: unknown[]) => {
+  if (args.some((arg) => isBenignAbortError(arg))) {
+    return;
+  }
   const expanded = args.map((arg) => {
     if (!isErrorLike(arg)) return arg;
     record(arg);
@@ -63,10 +97,14 @@ console.error = (...args: unknown[]) => {
 };
 
 if (typeof globalThis.addEventListener === "function") {
-  globalThis.addEventListener("error", (event) => record((event as ErrorEvent).error ?? event));
-  globalThis.addEventListener("unhandledrejection", (event) =>
-    record((event as PromiseRejectionEvent).reason),
-  );
+  globalThis.addEventListener("error", (event) => {
+    const err = (event as ErrorEvent).error ?? event;
+    if (!isBenignAbortError(err)) record(err);
+  });
+  globalThis.addEventListener("unhandledrejection", (event) => {
+    const reason = (event as PromiseRejectionEvent).reason;
+    if (!isBenignAbortError(reason)) record(reason);
+  });
 }
 
 export function consumeLastCapturedError(): unknown {
