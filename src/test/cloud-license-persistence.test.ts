@@ -669,4 +669,35 @@ describe("Cloud license persistence & Cloudflare runtime env", () => {
       });
     });
   });
+
+  it("ignores dead .lovable.cloud SUPABASE_URL in Preview without Cloudflare error 1016", async () => {
+    const serverHandlers = (
+      SyncRoute as unknown as {
+        options: {
+          server: {
+            handlers: {
+              GET: (ctx: { request: Request }) => Promise<Response>;
+              PUT: (ctx: { request: Request }) => Promise<Response>;
+            };
+          };
+        };
+      }
+    ).options.server.handlers;
+
+    await runWithCloudflareEnv(
+      {
+        SUPABASE_URL: "https://c--3a6ab190-4f7e-4548-9e20-102bf4b52d68-prod.lovable.cloud",
+        SUPABASE_SERVICE_ROLE_KEY: "dummy-key",
+      },
+      async () => {
+        expect(createRealSupabaseAdminClient()).toBeNull();
+        const getRes = await serverHandlers.GET({
+          request: new Request("http://localhost/api/public/results/sync"),
+        });
+        const getJson = await getRes.json();
+        expect(getJson.cloudLicenseError).toBeNull();
+        expect(getJson.workspaceLicenseFileActive).toBe(true);
+      },
+    );
+  });
 });

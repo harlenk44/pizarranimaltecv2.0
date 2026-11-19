@@ -37,6 +37,7 @@ function createSupabaseFetch(supabaseKey: string): typeof fetch {
 const INACTIVE_SUPABASE_HOSTS = [
   "ebpunrzbagmcdtammjqn.supabase.co",
   "dqpomustswauzejggfui.supabase.co",
+  ".lovable.cloud",
 ];
 
 function isInactiveSupabaseUrl(url?: string): boolean {
