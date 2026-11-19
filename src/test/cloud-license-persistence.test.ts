@@ -144,7 +144,21 @@ describe("Cloud license persistence & Cloudflare runtime env", () => {
       const packedName =
         'prueba taller||{"loterias":["lotto-activo","granjita"],"tarjetasPorPantalla":4,"tiempoTransicion":15,"pantallaCompleta":true}';
 
-      // 1. Create license
+      // 1. First GET with empty KV (even if inactive SUPABASE_URL env var is still set) seeds KV cleanly with no error
+      await runWithCloudflareEnv(
+        { PIZARRA_KV: kv, SUPABASE_URL: "https://ebpunrzbagmcdtammjqn.supabase.co" },
+        async () => {
+          const initGet = await serverHandlers.GET({
+            request: new Request("http://localhost/api/public/results/sync"),
+          });
+          const initJson = await initGet.json();
+          expect(initJson.cloudLicenseConfigured).toBe(true);
+          expect(initJson.cloudLicenseError).toBeNull();
+          expect(kv.store.size).toBe(1);
+        },
+      );
+
+      // 2. Create license
       const createRes = await serverHandlers.PUT({
         request: new Request("http://localhost/api/public/results/sync", {
           method: "PUT",
@@ -166,7 +180,7 @@ describe("Cloud license persistence & Cloudflare runtime env", () => {
       expect(createJson.cloudLicenseError).toBeNull();
       expect(kv.store.size).toBe(1);
 
-      // 2. Incognito GET returns newly created license immediately
+      // 3. Incognito GET returns newly created license immediately
       const getRes = await serverHandlers.GET({
         request: new Request("http://localhost/api/public/results/sync"),
       });
@@ -178,7 +192,7 @@ describe("Cloud license persistence & Cloudflare runtime env", () => {
       expect(found).toBeDefined();
       expect(found?.client_name).toBe(packedName);
 
-      // 3. Activate PIN with device_id
+      // 4. Activate PIN with device_id
       const actRes = await serverHandlers.PUT({
         request: new Request("http://localhost/api/public/results/sync", {
           method: "PUT",
@@ -197,7 +211,7 @@ describe("Cloud license persistence & Cloudflare runtime env", () => {
       expect(actJson.cloudLicenseSyncOk).toBe(true);
       expect(actJson.licenseActivation?.license?.bound_device_ids).toContain("TV-TALLER-01");
 
-      // 4. Pause status
+      // 5. Pause status
       const pauseRes = await serverHandlers.PUT({
         request: new Request("http://localhost/api/public/results/sync", {
           method: "PUT",
@@ -217,7 +231,7 @@ describe("Cloud license persistence & Cloudflare runtime env", () => {
       ).find((l) => l.pin_code === "918273");
       expect(pausedRow?.status).toBe("paused");
 
-      // 5. Delete license
+      // 6. Delete license
       const delRes = await serverHandlers.PUT({
         request: new Request("http://localhost/api/public/results/sync", {
           method: "PUT",

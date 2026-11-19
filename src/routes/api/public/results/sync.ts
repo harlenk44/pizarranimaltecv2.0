@@ -513,6 +513,14 @@ export async function syncLicensesWithSupabase(force = false): Promise<void> {
         lastCloudLicenseReadError = null;
         lastLicensesCloudSyncAt = Date.now();
         saveServerLicenses();
+      } else if (diag.hasKvBinding) {
+        const seedRes = await writeLicensesToCloudflareKv(serverLicenseState);
+        if (seedRes.ok) {
+          lastCloudLicenseReadError = null;
+          lastLicensesCloudSyncAt = Date.now();
+        } else {
+          lastCloudLicenseReadError = seedRes.error || diag.reason;
+        }
       } else {
         lastCloudLicenseReadError = diag.reason;
       }
