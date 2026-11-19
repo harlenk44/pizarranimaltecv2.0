@@ -23,7 +23,7 @@ import {
   getSupabaseCloudDiagnostics,
   type SupabaseCloudDiagnostics,
 } from "@/integrations/supabase/client.server";
-import { getBoundCloudflareKv } from "@/lib/cloudflare-env.server";
+import { getBoundCloudflareKv, ensureCloudflareEnvFromRequest } from "@/lib/cloudflare-env.server";
 import { toSupabaseLicenseUuid, generateLicenseUuid, isValidUuid } from "@/lib/license-lotteries";
 import { resolveCanonicalAnimal, parseCanonicalAnimalNumber } from "@/lib/official-animals";
 import { getGameLogo, isBrokenExternalLogo, isCustomUploadedGameLogo } from "@/lib/game-logos";
@@ -1560,6 +1560,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
   server: {
     handlers: {
       GET: async ({ request }) => {
+        await ensureCloudflareEnvFromRequest(request);
         ensureServerDataInitialized();
 
         const reqUrl = new URL(request.url, "http://localhost");
@@ -1674,6 +1675,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
         });
       },
       POST: async ({ request }) => {
+        await ensureCloudflareEnvFromRequest(request);
         if (process.env["SUPABASE_URL"]) {
           const { authenticateCronRequest } = await import("@/integrations/supabase/cron-auth");
           const authFailure = await authenticateCronRequest(request);
@@ -1711,6 +1713,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
         }
       },
       PUT: async ({ request }) => {
+        await ensureCloudflareEnvFromRequest(request);
         try {
           loadServerGames();
           loadServerLicenses();

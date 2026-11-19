@@ -2,7 +2,7 @@ import "./lib/error-capture";
 
 import { consumeLastCapturedError, isBenignAbortError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
-import { runWithCloudflareEnv } from "./lib/cloudflare-env.server";
+import { runWithCloudflareEnv, resolveCloudflareRuntimeEnv } from "./lib/cloudflare-env.server";
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
@@ -55,7 +55,8 @@ function isH3SwallowedErrorBody(body: string): boolean {
 
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
-    return await runWithCloudflareEnv(env, async () => {
+    const resolvedEnv = await resolveCloudflareRuntimeEnv(request, env, ctx);
+    return await runWithCloudflareEnv(resolvedEnv, async () => {
       try {
         const handler = await getServerEntry();
         const response = await handler.fetch(request, env, ctx);

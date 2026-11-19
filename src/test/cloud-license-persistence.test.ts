@@ -253,4 +253,78 @@ describe("Cloud license persistence & Cloudflare runtime env", () => {
       ).toBe(false);
     });
   });
+
+  it("resolves PIZARRA_KV from Nitro request.runtime.cloudflare.env and globalThis.__env__ when env param is omitted", async () => {
+    const kv = createMemoryKv();
+    const serverHandlers = (
+      SyncRoute as unknown as {
+        options: {
+          server: {
+            handlers: {
+              GET: (ctx: { request: Request }) => Promise<Response>;
+              PUT: (ctx: { request: Request }) => Promise<Response>;
+            };
+          };
+        };
+      }
+    ).options.server.handlers;
+
+    // Reset latestRuntimeEnv first
+    await runWithCloudflareEnv({}, async () => {});
+
+    // Simulate Nitro attaching runtime.cloudflare.env onto Request (without AsyncLocalStorage env arg)
+    const getReq = new Request("http://localhost/api/public/results/sync");
+    (
+      getReq as unknown as {
+        runtime: { cloudflare: { env: Record<string, unknown> } };
+      }
+    ).runtime = {
+      cloudflare: {
+        env: {
+          PIZARRA_KV: kv,
+          SUPABASE_URL: "https://ebpunrzbagmcdtammjqn.supabase.co",
+        },
+      },
+    };
+
+    const getRes = await serverHandlers.GET({ request: getReq });
+    const getJson = await getRes.json();
+    expect(getJson.cloudLicenseConfigured).toBe(true);
+    expect(getJson.cloudLicenseError).toBeNull();
+
+    // Simulate Nitro globalThis.__env__ on PUT without runtime on request
+    const prevGlobalEnv = (globalThis as { __env__?: unknown }).__env__;
+    try {
+      (globalThis as { __env__?: unknown }).__env__ = {
+        PIZARRA_KV: kv,
+        SUPABASE_URL: "https://ebpunrzbagmcdtammjqn.supabase.co",
+      };
+      const putReq = new Request("http://localhost/api/public/results/sync", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          licenseAction: {
+            type: "create",
+            id: generateLicenseUuid(),
+            client_name: "prueba nitro kv",
+            pin_code: "303495",
+            days: 30,
+            max_devices: 1,
+          },
+        }),
+      });
+      const putRes = await serverHandlers.PUT({ request: putReq });
+      const putJson = await putRes.json();
+      expect(putJson.cloudLicenseSyncOk).toBe(true);
+      expect(putJson.cloudLicenseError).toBeNull();
+      expect(
+        (putJson.clientLicenses as Array<{ pin_code: string }>).some(
+          (l) => l.pin_code === "303495",
+        ),
+      ).toBe(true);
+    } finally {
+      (globalThis as { __env__?: unknown }).__env__ = prevGlobalEnv;
+      await runWithCloudflareEnv({}, async () => {});
+    }
+  });
 });

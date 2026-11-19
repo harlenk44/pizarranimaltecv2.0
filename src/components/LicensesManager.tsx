@@ -156,7 +156,12 @@ export default function LicensesManager() {
 
         // If external Supabase is configured in browser and server list failed to reach Supabase, also merge direct admin query
         const sbUrl = import.meta.env["VITE_SUPABASE_URL"];
-        if (typeof sbUrl === "string" && sbUrl.includes(".supabase.co")) {
+        const isActiveSupabaseUrl =
+          typeof sbUrl === "string" &&
+          sbUrl.includes(".supabase.co") &&
+          !sbUrl.includes("ebpunrzbagmcdtammjqn.supabase.co") &&
+          !sbUrl.includes("dqpomustswauzejggfui.supabase.co");
+        if (isActiveSupabaseUrl) {
           try {
             const { data: sbRows, error: sbErr } = await supabase
               .from("client_licenses")
@@ -359,7 +364,12 @@ export default function LicensesManager() {
     let directCloudError: string | null = null;
     let accessToken: string | null = null;
     const sbUrl = import.meta.env["VITE_SUPABASE_URL"];
-    if (typeof sbUrl === "string" && sbUrl.includes(".supabase.co")) {
+    const isActiveSupabaseUrl =
+      typeof sbUrl === "string" &&
+      sbUrl.includes(".supabase.co") &&
+      !sbUrl.includes("ebpunrzbagmcdtammjqn.supabase.co") &&
+      !sbUrl.includes("dqpomustswauzejggfui.supabase.co");
+    if (isActiveSupabaseUrl) {
       try {
         const { data: sessionData } = await supabase.auth.getSession();
         const rawTok = sessionData.session?.access_token ?? null;
@@ -1447,6 +1457,19 @@ export default function LicensesManager() {
               </div>
             </div>
           </div>
+
+          {cloudErrorAlert && (
+            <div
+              role="alert"
+              className="bg-red-950/90 border border-red-500/70 text-red-100 px-3.5 py-2.5 rounded-xl text-xs space-y-1"
+            >
+              <div className="flex items-center gap-2 font-bold text-red-300">
+                <AlertTriangle className="w-4 h-4 shrink-0 text-red-400" />
+                <span>No se pudo guardar en la nube (guardado local bloqueado)</span>
+              </div>
+              <p className="font-mono text-[11px] text-red-100 break-words">{cloudErrorAlert}</p>
+            </div>
+          )}
 
           <div className="flex flex-col sm:flex-row items-stretch sm:items-end justify-between gap-4 pt-1">
             <div className="flex-1">
