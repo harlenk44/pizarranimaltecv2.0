@@ -30,6 +30,8 @@ function DisplayShell({ children }: { children: ReactNode }) {
   const manualExitRef = useRef(false);
   const prevFullscreenAutoRef = useRef(fullscreenAuto);
   const wasNativeFullscreenRef = useRef(false);
+  const lastNativeFsSentRef = useRef<boolean | null>(null);
+  const nativeFsAttemptedRef = useRef(false);
 
   const customDesign = designConfig?.useCustomDesign ? designConfig : null;
   const logoSize = preferences.logoSize ?? customDesign?.logo_size ?? settings.logo_size ?? 72;
@@ -121,41 +123,54 @@ function DisplayShell({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  useEffect(() => {
-    const notifyNativeFullscreen = (enabled: boolean) => {
-      try {
-        const win = window as unknown as {
-          Android?: {
-            setFullscreen?: (val: boolean) => void;
-            enterFullscreen?: () => void;
-            exitFullscreen?: () => void;
-          };
-          ReactNativeWebView?: {
-            postMessage?: (msg: string) => void;
-          };
-        };
-        if (win.Android) {
-          win.Android.setFullscreen?.(enabled);
-          if (enabled) {
-            win.Android.enterFullscreen?.();
-          } else {
-            win.Android.exitFullscreen?.();
-          }
-        }
-        win.ReactNativeWebView?.postMessage?.(JSON.stringify({ type: "SET_FULLSCREEN", enabled }));
-        window.dispatchEvent(new CustomEvent("pizarra:fullscreen", { detail: { enabled } }));
-      } catch {
-        // Ignore bridge errors outside native WebView
-      }
+  const hasNativeBridge = () => {
+    if (typeof window === "undefined") return false;
+    const win = window as unknown as {
+      Android?: { setFullscreen?: unknown; enterFullscreen?: unknown; exitFullscreen?: unknown };
+      ReactNativeWebView?: { postMessage?: unknown };
     };
+    return Boolean(win.Android || win.ReactNativeWebView);
+  };
 
+  const notifyNativeFullscreen = (enabled: boolean, force = false) => {
+    if (typeof window === "undefined") return;
+    if (!force && lastNativeFsSentRef.current === enabled) return;
+    lastNativeFsSentRef.current = enabled;
+    try {
+      const win = window as unknown as {
+        Android?: {
+          setFullscreen?: (val: boolean) => void;
+          enterFullscreen?: () => void;
+          exitFullscreen?: () => void;
+        };
+        ReactNativeWebView?: {
+          postMessage?: (msg: string) => void;
+        };
+      };
+      if (win.Android) {
+        win.Android.setFullscreen?.(enabled);
+        if (enabled) {
+          win.Android.enterFullscreen?.();
+        } else {
+          win.Android.exitFullscreen?.();
+        }
+      }
+      win.ReactNativeWebView?.postMessage?.(JSON.stringify({ type: "SET_FULLSCREEN", enabled }));
+      window.dispatchEvent(new CustomEvent("pizarra:fullscreen", { detail: { enabled } }));
+    } catch {
+      // Ignore bridge errors outside native WebView
+    }
+  };
+
+  useEffect(() => {
     if (!fullscreenAuto) {
       if (prevFullscreenAutoRef.current) {
         prevFullscreenAutoRef.current = false;
         manualExitRef.current = false;
+        nativeFsAttemptedRef.current = false;
         setExpanded(false);
         notifyNativeFullscreen(false);
-        if (document.fullscreenElement) {
+        if (document.fullscreenElement === shell.current) {
           document.exitFullscreen().catch(() => {});
         }
       }
@@ -164,6 +179,7 @@ function DisplayShell({ children }: { children: ReactNode }) {
 
     if (!prevFullscreenAutoRef.current) {
       manualExitRef.current = false;
+      nativeFsAttemptedRef.current = false;
     }
     prevFullscreenAutoRef.current = true;
 
@@ -173,32 +189,30 @@ function DisplayShell({ children }: { children: ReactNode }) {
     notifyNativeFullscreen(true);
     void requestScreenWakeLock();
 
-    const tryEnterNativeFullscreen = () => {
-      if (manualExitRef.current) return;
+    // Inside Android/RN WebView APK, rely on the native bridge + CSS full-bleed presentation
+    // instead of fighting Android WebChromeClient custom-view fullscreen on mount/resize.
+    if (hasNativeBridge()) return;
+
+    const tryEnterNativeFullscreenOnce = () => {
+      if (manualExitRef.current || nativeFsAttemptedRef.current) return;
+      nativeFsAttemptedRef.current = true;
       if (document.fullscreenElement === shell.current) return;
       if (!shell.current?.requestFullscreen) return;
       shell.current.requestFullscreen().catch(() => {
-        // WebView / browser may block requestFullscreen until first gesture or handle it via native Activity
+        // Browser may disallow fullscreen outside gesture or in iframe; CSS .board-presentation stays active
       });
     };
 
-    tryEnterNativeFullscreen();
-
-    const onGesture = () => {
-      if (document.fullscreenElement !== shell.current && !manualExitRef.current) {
-        tryEnterNativeFullscreen();
-        notifyNativeFullscreen(true);
-      }
+    const onFirstGesture = () => {
+      tryEnterNativeFullscreenOnce();
     };
 
-    window.addEventListener("click", onGesture, { passive: true });
-    window.addEventListener("touchstart", onGesture, { passive: true });
-    window.addEventListener("keydown", onGesture, { passive: true });
+    window.addEventListener("pointerdown", onFirstGesture, { passive: true, once: true });
+    window.addEventListener("keydown", onFirstGesture, { passive: true, once: true });
 
     return () => {
-      window.removeEventListener("click", onGesture);
-      window.removeEventListener("touchstart", onGesture);
-      window.removeEventListener("keydown", onGesture);
+      window.removeEventListener("pointerdown", onFirstGesture);
+      window.removeEventListener("keydown", onFirstGesture);
     };
   }, [fullscreenAuto]);
 
@@ -208,14 +222,13 @@ function DisplayShell({ children }: { children: ReactNode }) {
       if (isNativeFs) {
         wasNativeFullscreenRef.current = true;
         setExpanded(true);
-      } else {
-        if (!fullscreenAuto || wasNativeFullscreenRef.current) {
-          if (fullscreenAuto && wasNativeFullscreenRef.current) {
-            manualExitRef.current = true;
-          }
-          setExpanded(false);
-        }
+      } else if (wasNativeFullscreenRef.current) {
         wasNativeFullscreenRef.current = false;
+        if (fullscreenAuto) {
+          manualExitRef.current = true;
+        }
+        setExpanded(false);
+        notifyNativeFullscreen(false);
       }
     };
     const escape = (event: KeyboardEvent) => {
@@ -224,6 +237,7 @@ function DisplayShell({ children }: { children: ReactNode }) {
           manualExitRef.current = true;
         }
         setExpanded(false);
+        notifyNativeFullscreen(false);
       }
     };
     document.addEventListener("fullscreenchange", sync);
@@ -280,40 +294,21 @@ function DisplayShell({ children }: { children: ReactNode }) {
     setNotice("");
     setControls(false);
     void requestScreenWakeLock();
-    const notifyNative = (enabled: boolean) => {
-      try {
-        const win = window as unknown as {
-          Android?: {
-            setFullscreen?: (val: boolean) => void;
-            enterFullscreen?: () => void;
-            exitFullscreen?: () => void;
-          };
-          ReactNativeWebView?: {
-            postMessage?: (msg: string) => void;
-          };
-        };
-        if (win.Android) {
-          win.Android.setFullscreen?.(enabled);
-          if (enabled) win.Android.enterFullscreen?.();
-          else win.Android.exitFullscreen?.();
-        }
-        win.ReactNativeWebView?.postMessage?.(JSON.stringify({ type: "SET_FULLSCREEN", enabled }));
-        window.dispatchEvent(new CustomEvent("pizarra:fullscreen", { detail: { enabled } }));
-      } catch {
-        // ignore
-      }
-    };
 
     if (expanded) {
       manualExitRef.current = true;
-      if (document.fullscreenElement) await document.exitFullscreen();
+      if (document.fullscreenElement) {
+        await document.exitFullscreen().catch(() => {});
+      }
       setExpanded(false);
-      notifyNative(false);
+      notifyNativeFullscreen(false, true);
       return;
     }
+
     manualExitRef.current = false;
     setExpanded(true);
-    notifyNative(true);
+    notifyNativeFullscreen(true, true);
+    if (hasNativeBridge()) return;
     try {
       if (!shell.current?.requestFullscreen) throw new Error("unsupported");
       await shell.current.requestFullscreen();

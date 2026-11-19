@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import type { ClientLicense, Result } from "@/lib/types";
 import { ensureCustomCatalogLoaded, mockStore, mergeResultsPreserveToday } from "@/lib/mock-db";
+import { supabase } from "@/integrations/supabase/client";
 import {
   parseClientLicenseName,
   isLotteryPermitted,
@@ -33,6 +34,29 @@ import {
   type ClientVoiceConfig,
   type ClientDesignConfig,
 } from "@/lib/license-lotteries";
+
+function hasExternalSupabaseConfigured(): boolean {
+  const sbUrl = import.meta.env["VITE_SUPABASE_URL"];
+  return typeof sbUrl === "string" && sbUrl.includes(".supabase.co");
+}
+
+function mapSupabaseRowToClientLicense(d: Record<string, unknown>): ClientLicense {
+  return {
+    id: String(d["id"]),
+    client_name: String(d["client_name"] || "Cliente"),
+    pin_code: String(d["pin_code"] || ""),
+    status: d["status"] === "paused" ? "paused" : "active",
+    expires_at: d["expires_at"] ? new Date(d["expires_at"] as string).toISOString() : null,
+    max_devices: Number(d["max_devices"]) || 1,
+    bound_device_ids: Array.isArray(d["bound_device_ids"])
+      ? (d["bound_device_ids"] as string[])
+      : [],
+    notes: typeof d["notes"] === "string" ? d["notes"] : "",
+    created_at: d["created_at"]
+      ? new Date(d["created_at"] as string).toISOString()
+      : new Date().toISOString(),
+  };
+}
 
 export interface LicenseContextValue {
   matchedLicense?: ClientLicense;
@@ -210,36 +234,66 @@ export default function LicenseGate({
 
   const syncLicenseState = useCallback(async () => {
     try {
-      const [res] = await Promise.all([
-        fetch("/api/public/results/sync", { cache: "no-store" }),
+      const sbDirectPromise = hasExternalSupabaseConfigured()
+        ? Promise.resolve(supabase.from("client_licenses").select("*"))
+            .then((r) => (!r.error && Array.isArray(r.data) ? r.data : null))
+            .catch(() => null)
+        : Promise.resolve(null);
+
+      const [res, sbRows] = await Promise.all([
+        fetch("/api/public/results/sync", { cache: "no-store" }).catch(() => null),
+        sbDirectPromise,
         ensureCustomCatalogLoaded().catch(() => {}),
       ]);
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.results) && data.results.length > 0) {
-          mockStore.results = mergeResultsPreserveToday(
-            mockStore.results,
-            data.results as Result[],
-          );
+
+      const data = res && res.ok ? await res.json() : null;
+      if (data && Array.isArray(data.results) && data.results.length > 0) {
+        mockStore.results = mergeResultsPreserveToday(mockStore.results, data.results as Result[]);
+      }
+
+      let nextRequire =
+        data && typeof data.requireLicense === "boolean" ? data.requireLicense : true;
+      let serverList: ClientLicense[] =
+        data && Array.isArray(data.clientLicenses) ? [...data.clientLicenses] : [];
+
+      if (Array.isArray(sbRows) && sbRows.length > 0) {
+        const mappedSb = sbRows.map((row) =>
+          mapSupabaseRowToClientLicense(row as Record<string, unknown>),
+        );
+        const masterSb = mappedSb.find((l) => l.pin_code === "291007");
+        if (masterSb?.notes?.includes("||REQUIRE:0")) {
+          nextRequire = false;
+        } else if (masterSb?.notes?.includes("||REQUIRE:1")) {
+          nextRequire = true;
         }
-        const nextRequire = typeof data.requireLicense === "boolean" ? data.requireLicense : true;
-        if (typeof data.requireLicense === "boolean") {
-          setRequireLicense((prev) => (prev === data.requireLicense ? prev : data.requireLicense));
+        const byPin = new Map<string, ClientLicense>();
+        for (const l of serverList) {
+          if (l.pin_code) byPin.set(l.pin_code, l);
         }
-        if (Array.isArray(data.clientLicenses)) {
-          const reconciled = reconcileClientLicensesWithLocal(
-            data.clientLicenses,
-            data.deletedIds,
-            data.deletedPins,
-            { allowOverrideServer: false },
-          );
-          const nextJson = JSON.stringify(reconciled.licenses);
-          if (lastLicensesJsonRef.current !== nextJson) {
-            lastLicensesJsonRef.current = nextJson;
-            setLicenses(reconciled.licenses);
-          }
-          saveLocalLicensesSnapshot(nextRequire, reconciled.licenses);
+        for (const l of mappedSb) {
+          const cleanNotes =
+            l.pin_code === "291007"
+              ? l.notes?.replace(/\|\|REQUIRE:[01]/g, "").trim() || "PIN Maestro: 291007"
+              : l.notes;
+          if (l.pin_code) byPin.set(l.pin_code, { ...l, notes: cleanNotes });
         }
+        serverList = Array.from(byPin.values());
+      }
+
+      if (data || (Array.isArray(sbRows) && sbRows.length > 0)) {
+        setRequireLicense((prev) => (prev === nextRequire ? prev : nextRequire));
+        const reconciled = reconcileClientLicensesWithLocal(
+          serverList,
+          data?.deletedIds,
+          data?.deletedPins,
+          { allowOverrideServer: false },
+        );
+        const nextJson = JSON.stringify(reconciled.licenses);
+        if (lastLicensesJsonRef.current !== nextJson) {
+          lastLicensesJsonRef.current = nextJson;
+          setLicenses(reconciled.licenses);
+        }
+        saveLocalLicensesSnapshot(nextRequire, reconciled.licenses);
       }
     } catch {
       try {
@@ -503,7 +557,28 @@ export default function LicenseGate({
     }
 
     try {
-      const localCandidate = licenses.find((l) => l.pin_code === cleanPin);
+      let localCandidate = licenses.find((l) => l.pin_code === cleanPin);
+
+      // Check Supabase directly when external Supabase is configured so new PINs work even across cold Cloudflare isolates
+      let supabaseDirectMatch: ClientLicense | null = null;
+      if (hasExternalSupabaseConfigured()) {
+        try {
+          const { data: sbRow, error: sbErr } = await supabase
+            .from("client_licenses")
+            .select("*")
+            .eq("pin_code", cleanPin)
+            .maybeSingle();
+          if (!sbErr && sbRow) {
+            supabaseDirectMatch = mapSupabaseRowToClientLicense(sbRow as Record<string, unknown>);
+            if (!localCandidate) {
+              localCandidate = supabaseDirectMatch;
+            }
+          }
+        } catch {
+          // ignore and let server route handle
+        }
+      }
+
       const res = await fetch("/api/public/results/sync", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -520,8 +595,16 @@ export default function LicenseGate({
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.clientLicenses)) {
+          const baseList = supabaseDirectMatch
+            ? [
+                supabaseDirectMatch,
+                ...(data.clientLicenses as ClientLicense[]).filter(
+                  (l) => l.pin_code !== cleanPin && l.id !== supabaseDirectMatch!.id,
+                ),
+              ]
+            : data.clientLicenses;
           const reconciled = reconcileClientLicensesWithLocal(
-            data.clientLicenses,
+            baseList,
             data.deletedIds,
             data.deletedPins,
             { allowOverrideServer: false },
@@ -540,6 +623,60 @@ export default function LicenseGate({
           }
           setErrorMsg("");
           if (onExitPreview) onExitPreview();
+        } else if (supabaseDirectMatch) {
+          // Validate directly against the live Supabase record if Worker isolate lacked it
+          const isMatchExpired = supabaseDirectMatch.expires_at
+            ? new Date(supabaseDirectMatch.expires_at) < new Date()
+            : false;
+          const isMatchPaused = supabaseDirectMatch.status === "paused";
+          const alreadyBound = supabaseDirectMatch.bound_device_ids.includes(deviceId);
+          const canBind =
+            alreadyBound ||
+            supabaseDirectMatch.bound_device_ids.length < (supabaseDirectMatch.max_devices || 1);
+
+          if (isMatchPaused) {
+            setErrorMsg("Esta licencia se encuentra suspendida temporalmente.");
+          } else if (isMatchExpired) {
+            setErrorMsg("Su suscripción ha vencido. Contacte al administrador para renovar.");
+          } else if (!canBind) {
+            setErrorMsg(
+              `Este PIN ya está en uso en el máximo de pantallas permitidas (${supabaseDirectMatch.max_devices}). Solicite liberar la pantalla anterior.`,
+            );
+          } else {
+            const nextBound = alreadyBound
+              ? supabaseDirectMatch.bound_device_ids
+              : [...supabaseDirectMatch.bound_device_ids, deviceId];
+            const activatedRecord: ClientLicense = {
+              ...supabaseDirectMatch,
+              bound_device_ids: nextBound,
+            };
+            if (!alreadyBound) {
+              void supabase
+                .from("client_licenses")
+                .update({ bound_device_ids: nextBound })
+                .eq("id", supabaseDirectMatch.id)
+                .then(
+                  () => {},
+                  () => {},
+                );
+            }
+            const merged = [
+              activatedRecord,
+              ...licenses.filter((l) => l.pin_code !== cleanPin && l.id !== activatedRecord.id),
+            ];
+            lastLicensesJsonRef.current = JSON.stringify(merged);
+            setLicenses(merged);
+            saveLocalLicensesSnapshot(requireLicense, merged);
+            setActivatedPin(cleanPin);
+            setForceLicenseScreen(false);
+            try {
+              localStorage.setItem(ACTIVATED_PIN_STORAGE_KEY, cleanPin);
+            } catch {
+              // ignore
+            }
+            setErrorMsg("");
+            if (onExitPreview) onExitPreview();
+          }
         } else {
           setErrorMsg(
             data.licenseActivation?.reason || "No se pudo validar el PIN. Verifique con soporte.",

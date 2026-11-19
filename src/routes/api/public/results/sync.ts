@@ -16,7 +16,11 @@ import {
 } from "@/lib/game-schedules";
 import fs from "fs";
 import path from "path";
-import { supabaseAdmin } from "@/integrations/supabase/client.server";
+import {
+  supabaseAdmin,
+  createSupabaseClientWithToken,
+} from "@/integrations/supabase/client.server";
+import { toSupabaseLicenseUuid, generateLicenseUuid, isValidUuid } from "@/lib/license-lotteries";
 import { resolveCanonicalAnimal, parseCanonicalAnimalNumber } from "@/lib/official-animals";
 import { getGameLogo, isBrokenExternalLogo, isCustomUploadedGameLogo } from "@/lib/game-logos";
 import { TRIPLE_GAMES, buildTripleAlertItem, type TripleResult } from "@/lib/triples";
@@ -224,6 +228,132 @@ function parseRequireFromMasterNotes(notes?: string | null): boolean | null {
   return null;
 }
 
+async function upsertLicenseRowToSupabase(
+  lic: ClientLicense,
+  notesOverride?: string,
+  authBearerToken?: string | null,
+): Promise<{ ok: boolean; error?: string; resolvedId?: string }> {
+  const sbId = toSupabaseLicenseUuid(lic.id, lic.pin_code);
+  const payload = {
+    id: sbId,
+    client_name: lic.client_name,
+    pin_code: lic.pin_code,
+    status: lic.status,
+    expires_at: lic.expires_at,
+    max_devices: lic.max_devices,
+    bound_device_ids: lic.bound_device_ids,
+    notes: notesOverride !== undefined ? notesOverride : (lic.notes ?? ""),
+    created_at: lic.created_at,
+  };
+
+  const runUpsert = async (
+    client: typeof supabaseAdmin,
+  ): Promise<{ ok: boolean; error?: string; resolvedId?: string }> => {
+    try {
+      let targetId = sbId;
+      if (lic.pin_code) {
+        const { data: existingByPin } = await client
+          .from("client_licenses")
+          .select("id")
+          .eq("pin_code", lic.pin_code)
+          .maybeSingle();
+        if (
+          existingByPin &&
+          typeof existingByPin.id === "string" &&
+          existingByPin.id.trim().length > 0
+        ) {
+          targetId = existingByPin.id;
+        }
+      }
+
+      const { error } = await client
+        .from("client_licenses")
+        .upsert({ ...payload, id: targetId }, { onConflict: "id" });
+      if (!error) {
+        return { ok: true, resolvedId: targetId };
+      }
+
+      // If id conflict or UUID mismatch occurred, retry insert without id or update by pin_code
+      if (error.code === "22P02" && lic.pin_code) {
+        const { error: updateErr } = await client
+          .from("client_licenses")
+          .update({
+            client_name: payload.client_name,
+            status: payload.status,
+            expires_at: payload.expires_at,
+            max_devices: payload.max_devices,
+            bound_device_ids: payload.bound_device_ids,
+            notes: payload.notes,
+          })
+          .eq("pin_code", lic.pin_code);
+        if (!updateErr) {
+          return { ok: true, resolvedId: targetId };
+        }
+      }
+      return { ok: false, error: error.message };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  };
+
+  const adminRes = await runUpsert(supabaseAdmin);
+  if (adminRes.ok) return adminRes;
+
+  if (authBearerToken) {
+    const authClient = createSupabaseClientWithToken(authBearerToken);
+    if (authClient) {
+      const authRes = await runUpsert(authClient as unknown as typeof supabaseAdmin);
+      if (authRes.ok) return authRes;
+      return authRes;
+    }
+  }
+
+  console.warn("[supabase-license-upsert-warn]", adminRes.error);
+  return adminRes;
+}
+
+async function deleteLicenseRowFromSupabase(
+  id: string,
+  pinCode?: string | null,
+  authBearerToken?: string | null,
+): Promise<{ ok: boolean; error?: string }> {
+  const sbId = toSupabaseLicenseUuid(id, pinCode);
+  const runDelete = async (
+    client: typeof supabaseAdmin,
+  ): Promise<{ ok: boolean; error?: string }> => {
+    try {
+      const targetIds = Array.from(
+        new Set([isValidUuid(id) ? id : null, isValidUuid(sbId) ? sbId : null].filter(Boolean)),
+      ) as string[];
+      for (const tid of targetIds) {
+        const { error } = await client.from("client_licenses").delete().eq("id", tid);
+        if (error) return { ok: false, error: error.message };
+      }
+      if (pinCode) {
+        const { error } = await client.from("client_licenses").delete().eq("pin_code", pinCode);
+        if (error) return { ok: false, error: error.message };
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  };
+
+  const adminRes = await runDelete(supabaseAdmin);
+  if (adminRes.ok) return adminRes;
+
+  if (authBearerToken) {
+    const authClient = createSupabaseClientWithToken(authBearerToken);
+    if (authClient) {
+      const authRes = await runDelete(authClient as unknown as typeof supabaseAdmin);
+      if (authRes.ok) return authRes;
+      return authRes;
+    }
+  }
+
+  return adminRes;
+}
+
 export async function syncLicensesWithSupabase(force = false): Promise<void> {
   const now = Date.now();
   if (!force && licensesCloudSyncPromise) {
@@ -257,6 +387,7 @@ export async function syncLicensesWithSupabase(force = false): Promise<void> {
         const deletedSet = new Set<string>(serverLicenseState.deletedIds || []);
         const deletedPinSet = new Set<string>(serverLicenseState.deletedPins || []);
         const mergedMap = new Map<string, ClientLicense>();
+        const seenPins = new Set<string>();
         const localById = new Map<string, ClientLicense>();
         for (const lic of serverLicenseState.licenses) {
           localById.set(lic.id, lic);
@@ -268,14 +399,9 @@ export async function syncLicensesWithSupabase(force = false): Promise<void> {
           for (const sLic of mapped) {
             if (deletedSet.has(sLic.id) || deletedPinSet.has(sLic.pin_code)) {
               if (isRecentLocalLicenseMutation(sLic.id)) {
-                await supabaseAdmin
-                  .from("client_licenses")
-                  .delete()
-                  .eq("id", sLic.id)
-                  .catch(() => {});
+                await deleteLicenseRowFromSupabase(sLic.id, sLic.pin_code);
                 continue;
               }
-              // Was previously deleted locally long ago or resurrected remotely: allow remote if not recently deleted
             }
 
             if (sLic.id === "lic-master-admin" || sLic.pin_code === "291007") {
@@ -291,16 +417,23 @@ export async function syncLicensesWithSupabase(force = false): Promise<void> {
               localById.get(sLic.id) ||
               serverLicenseState.licenses.find((l) => l.pin_code === sLic.pin_code);
 
-            if (existing && isRecentLocalLicenseMutation(existing.id)) {
-              mergedMap.set(existing.id, {
+            if (
+              existing &&
+              (isRecentLocalLicenseMutation(existing.id) || isRecentLocalLicenseMutation(sLic.id))
+            ) {
+              const mergedLic: ClientLicense = {
                 ...sLic,
                 ...existing,
+                id: sLic.id,
                 bound_device_ids: Array.from(
                   new Set([...existing.bound_device_ids, ...sLic.bound_device_ids]),
                 ),
-              });
+              };
+              mergedMap.set(mergedLic.id, mergedLic);
+              if (mergedLic.pin_code) seenPins.add(mergedLic.pin_code);
             } else {
               mergedMap.set(sLic.id, sLic);
+              if (sLic.pin_code) seenPins.add(sLic.pin_code);
             }
           }
 
@@ -308,18 +441,26 @@ export async function syncLicensesWithSupabase(force = false): Promise<void> {
           for (const lic of serverLicenseState.licenses) {
             if (
               !mergedMap.has(lic.id) &&
+              !(lic.pin_code && seenPins.has(lic.pin_code)) &&
               !deletedSet.has(lic.id) &&
               !deletedPinSet.has(lic.pin_code) &&
               isRecentLocalLicenseMutation(lic.id)
             ) {
               mergedMap.set(lic.id, lic);
+              if (lic.pin_code) seenPins.add(lic.pin_code);
             }
           }
         } else {
           // Empty Supabase table: seed current state (first initialization)
           for (const lic of serverLicenseState.licenses) {
-            if (!deletedSet.has(lic.id) && !deletedPinSet.has(lic.pin_code)) {
-              mergedMap.set(lic.id, lic);
+            if (
+              !deletedSet.has(lic.id) &&
+              !deletedPinSet.has(lic.pin_code) &&
+              !(lic.pin_code && seenPins.has(lic.pin_code))
+            ) {
+              const normalizedLic = { ...lic, id: toSupabaseLicenseUuid(lic.id, lic.pin_code) };
+              mergedMap.set(normalizedLic.id, normalizedLic);
+              if (normalizedLic.pin_code) seenPins.add(normalizedLic.pin_code);
             }
           }
         }
@@ -327,7 +468,7 @@ export async function syncLicensesWithSupabase(force = false): Promise<void> {
         // Ensure master PIN is always present
         if (!Array.from(mergedMap.values()).some((l) => l.pin_code === "291007")) {
           const masterLic: ClientLicense = {
-            id: "lic-master-admin",
+            id: toSupabaseLicenseUuid("lic-master-admin", "291007"),
             client_name: "Administrador Maestro",
             pin_code: "291007",
             status: "active",
@@ -338,38 +479,12 @@ export async function syncLicensesWithSupabase(force = false): Promise<void> {
             created_at: new Date().toISOString(),
           };
           mergedMap.set(masterLic.id, masterLic);
-          await supabaseAdmin
-            .from("client_licenses")
-            .upsert({
-              id: masterLic.id,
-              client_name: masterLic.client_name,
-              pin_code: masterLic.pin_code,
-              status: masterLic.status,
-              expires_at: masterLic.expires_at,
-              max_devices: masterLic.max_devices,
-              bound_device_ids: masterLic.bound_device_ids,
-              notes: masterLic.notes ?? "",
-              created_at: masterLic.created_at,
-            })
-            .catch(() => {});
+          await upsertLicenseRowToSupabase(masterLic);
         }
 
         if (mapped.length === 0) {
           for (const lic of Array.from(mergedMap.values())) {
-            await supabaseAdmin
-              .from("client_licenses")
-              .upsert({
-                id: lic.id,
-                client_name: lic.client_name,
-                pin_code: lic.pin_code,
-                status: lic.status,
-                expires_at: lic.expires_at,
-                max_devices: lic.max_devices,
-                bound_device_ids: lic.bound_device_ids,
-                notes: lic.notes ?? "",
-                created_at: lic.created_at,
-              })
-              .catch(() => {});
+            await upsertLicenseRowToSupabase(lic);
           }
         }
 
@@ -1454,6 +1569,17 @@ export const Route = createFileRoute("/api/public/results/sync")({
             license?: ClientLicense;
           } | null = null;
 
+          const authHeader = request.headers.get("authorization") || "";
+          const bearerToken = authHeader.toLowerCase().startsWith("bearer ")
+            ? authHeader.slice(7).trim()
+            : null;
+          let cloudLicenseSyncOk: boolean | null = null;
+          let cloudLicenseError: string | null = null;
+          const trackCloudResult = (res: { ok: boolean; error?: string }) => {
+            cloudLicenseSyncOk = res.ok;
+            if (!res.ok && res.error) cloudLicenseError = res.error;
+          };
+
           if (licenseAction && typeof licenseAction === "object") {
             await syncLicensesWithSupabase(true);
             const act = licenseAction as {
@@ -1480,21 +1606,12 @@ export const Route = createFileRoute("/api/public/results/sync")({
               );
               if (masterLic) {
                 markLocalLicenseMutation(masterLic.id);
-                try {
-                  await supabaseAdmin.from("client_licenses").upsert({
-                    id: masterLic.id,
-                    client_name: masterLic.client_name,
-                    pin_code: masterLic.pin_code,
-                    status: masterLic.status,
-                    expires_at: masterLic.expires_at,
-                    max_devices: masterLic.max_devices,
-                    bound_device_ids: masterLic.bound_device_ids,
-                    notes: packMasterNotesWithRequire(serverLicenseState.requireLicense),
-                    created_at: masterLic.created_at,
-                  });
-                } catch {
-                  // ignore
-                }
+                const cloudRes = await upsertLicenseRowToSupabase(
+                  masterLic,
+                  packMasterNotesWithRequire(serverLicenseState.requireLicense),
+                  bearerToken,
+                );
+                trackCloudResult(cloudRes);
               }
             } else if (act.type === "restore_batch" && Array.isArray(act.licenses)) {
               const deletedSet = new Set<string>(serverLicenseState.deletedIds || []);
@@ -1535,30 +1652,23 @@ export const Route = createFileRoute("/api/public/results/sync")({
                       existing.notes = cachedLic.notes;
                     }
                     changedAny = true;
-                    try {
-                      await supabaseAdmin.from("client_licenses").upsert({
-                        id: existing.id,
-                        client_name: existing.client_name,
-                        pin_code: existing.pin_code,
-                        status: existing.status,
-                        expires_at: existing.expires_at,
-                        max_devices: existing.max_devices,
-                        bound_device_ids: existing.bound_device_ids,
-                        notes: existing.notes ?? "",
-                        created_at: existing.created_at,
-                      });
-                    } catch {
-                      // ignore
-                    }
+                    const cloudRes = await upsertLicenseRowToSupabase(
+                      existing,
+                      undefined,
+                      bearerToken,
+                    );
+                    trackCloudResult(cloudRes);
                   }
                 } else {
+                  const cleanPin = String(cachedLic.pin_code)
+                    .replace(/[^0-9]/g, "")
+                    .slice(0, 6);
                   const restored: ClientLicense = {
-                    id:
-                      cachedLic.id || `lic-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                    id: isValidUuid(cachedLic.id)
+                      ? cachedLic.id
+                      : toSupabaseLicenseUuid(cachedLic.id, cleanPin),
                     client_name: (cachedLic.client_name || "Cliente").trim(),
-                    pin_code: String(cachedLic.pin_code)
-                      .replace(/[^0-9]/g, "")
-                      .slice(0, 6),
+                    pin_code: cleanPin,
                     status: cachedLic.status === "paused" ? "paused" : "active",
                     expires_at: cachedLic.expires_at || null,
                     max_devices: Math.max(1, Number(cachedLic.max_devices) || 1),
@@ -1570,21 +1680,12 @@ export const Route = createFileRoute("/api/public/results/sync")({
                   };
                   serverLicenseState.licenses.unshift(restored);
                   changedAny = true;
-                  try {
-                    await supabaseAdmin.from("client_licenses").upsert({
-                      id: restored.id,
-                      client_name: restored.client_name,
-                      pin_code: restored.pin_code,
-                      status: restored.status,
-                      expires_at: restored.expires_at,
-                      max_devices: restored.max_devices,
-                      bound_device_ids: restored.bound_device_ids,
-                      notes: restored.notes ?? "",
-                      created_at: restored.created_at,
-                    });
-                  } catch {
-                    // ignore
-                  }
+                  const cloudRes = await upsertLicenseRowToSupabase(
+                    restored,
+                    undefined,
+                    bearerToken,
+                  );
+                  trackCloudResult(cloudRes);
                 }
               }
               if (changedAny) {
@@ -1600,8 +1701,10 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 typeof daysNum === "number" && daysNum > 0
                   ? new Date(Date.now() + daysNum * 86400000).toISOString()
                   : null;
+              const newId =
+                act.id && isValidUuid(act.id) ? act.id.trim().toLowerCase() : generateLicenseUuid();
               const newLic: ClientLicense = {
-                id: act.id?.trim() || `lic-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                id: newId,
                 client_name: (act.client_name || "Cliente").trim(),
                 pin_code: cleanPin,
                 status: "active",
@@ -1630,21 +1733,12 @@ export const Route = createFileRoute("/api/public/results/sync")({
               markLocalLicenseMutation(newLic.id);
               saveServerLicenses();
 
-              // Persistent write in Supabase
-              try {
-                await supabaseAdmin.from("client_licenses").upsert({
-                  id: newLic.id,
-                  client_name: newLic.client_name,
-                  pin_code: newLic.pin_code,
-                  status: newLic.status,
-                  expires_at: newLic.expires_at,
-                  max_devices: newLic.max_devices,
-                  bound_device_ids: newLic.bound_device_ids,
-                  notes: newLic.notes ?? "",
-                  created_at: newLic.created_at,
-                });
-              } catch (err: unknown) {
-                console.warn("[supabase-create-license-warn]", err);
+              const cloudRes = await upsertLicenseRowToSupabase(newLic, undefined, bearerToken);
+              trackCloudResult(cloudRes);
+              if (cloudRes.ok && cloudRes.resolvedId && cloudRes.resolvedId !== newLic.id) {
+                newLic.id = cloudRes.resolvedId;
+                markLocalLicenseMutation(newLic.id);
+                saveServerLicenses();
               }
             } else if (act.type === "renew" && act.id) {
               let target = serverLicenseState.licenses.find(
@@ -1671,21 +1765,12 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 markLocalLicenseMutation(target.id);
                 saveServerLicenses();
 
-                // Upsert in Supabase so cold/remote records always persist
-                try {
-                  await supabaseAdmin.from("client_licenses").upsert({
-                    id: target.id,
-                    client_name: target.client_name,
-                    pin_code: target.pin_code,
-                    status: target.status,
-                    expires_at: target.expires_at,
-                    max_devices: target.max_devices,
-                    bound_device_ids: target.bound_device_ids,
-                    notes: target.notes ?? "",
-                    created_at: target.created_at,
-                  });
-                } catch (err: unknown) {
-                  console.warn("[supabase-renew-license-warn]", err);
+                const cloudRes = await upsertLicenseRowToSupabase(target, undefined, bearerToken);
+                trackCloudResult(cloudRes);
+                if (cloudRes.ok && cloudRes.resolvedId && cloudRes.resolvedId !== target.id) {
+                  target.id = cloudRes.resolvedId;
+                  markLocalLicenseMutation(target.id);
+                  saveServerLicenses();
                 }
               }
             } else if (act.type === "toggle_status" && act.id) {
@@ -1707,21 +1792,12 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 markLocalLicenseMutation(target.id);
                 saveServerLicenses();
 
-                // Upsert in Supabase
-                try {
-                  await supabaseAdmin.from("client_licenses").upsert({
-                    id: target.id,
-                    client_name: target.client_name,
-                    pin_code: target.pin_code,
-                    status: target.status,
-                    expires_at: target.expires_at,
-                    max_devices: target.max_devices,
-                    bound_device_ids: target.bound_device_ids,
-                    notes: target.notes ?? "",
-                    created_at: target.created_at,
-                  });
-                } catch (err: unknown) {
-                  console.warn("[supabase-toggle-status-warn]", err);
+                const cloudRes = await upsertLicenseRowToSupabase(target, undefined, bearerToken);
+                trackCloudResult(cloudRes);
+                if (cloudRes.ok && cloudRes.resolvedId && cloudRes.resolvedId !== target.id) {
+                  target.id = cloudRes.resolvedId;
+                  markLocalLicenseMutation(target.id);
+                  saveServerLicenses();
                 }
               }
             } else if (act.type === "reset_devices" && act.id) {
@@ -1738,21 +1814,12 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 markLocalLicenseMutation(target.id);
                 saveServerLicenses();
 
-                // Upsert in Supabase
-                try {
-                  await supabaseAdmin.from("client_licenses").upsert({
-                    id: target.id,
-                    client_name: target.client_name,
-                    pin_code: target.pin_code,
-                    status: target.status,
-                    expires_at: target.expires_at,
-                    max_devices: target.max_devices,
-                    bound_device_ids: target.bound_device_ids,
-                    notes: target.notes ?? "",
-                    created_at: target.created_at,
-                  });
-                } catch (err: unknown) {
-                  console.warn("[supabase-reset-devices-warn]", err);
+                const cloudRes = await upsertLicenseRowToSupabase(target, undefined, bearerToken);
+                trackCloudResult(cloudRes);
+                if (cloudRes.ok && cloudRes.resolvedId && cloudRes.resolvedId !== target.id) {
+                  target.id = cloudRes.resolvedId;
+                  markLocalLicenseMutation(target.id);
+                  saveServerLicenses();
                 }
               }
             } else if (
@@ -1773,27 +1840,28 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 markLocalLicenseMutation(target.id);
                 saveServerLicenses();
 
-                // Persistent upsert of client_name in Supabase
-                try {
-                  await supabaseAdmin.from("client_licenses").upsert({
-                    id: target.id,
-                    client_name: target.client_name,
-                    pin_code: target.pin_code,
-                    status: target.status,
-                    expires_at: target.expires_at,
-                    max_devices: target.max_devices,
-                    bound_device_ids: target.bound_device_ids,
-                    notes: target.notes ?? "",
-                    created_at: target.created_at,
-                  });
-                } catch (err: unknown) {
-                  console.warn("[supabase-update-lotteries-warn]", err);
+                const notesToPersist =
+                  target.id === "lic-master-admin" || target.pin_code === "291007"
+                    ? packMasterNotesWithRequire(serverLicenseState.requireLicense)
+                    : undefined;
+                const cloudRes = await upsertLicenseRowToSupabase(
+                  target,
+                  notesToPersist,
+                  bearerToken,
+                );
+                trackCloudResult(cloudRes);
+                if (cloudRes.ok && cloudRes.resolvedId && cloudRes.resolvedId !== target.id) {
+                  target.id = cloudRes.resolvedId;
+                  markLocalLicenseMutation(target.id);
+                  saveServerLicenses();
                 }
               }
             } else if (act.type === "delete" && act.id) {
-              const targetToDelete = serverLicenseState.licenses.find((l) => l.id === act.id);
+              const targetToDelete = serverLicenseState.licenses.find(
+                (l) => l.id === act.id || l.id === toSupabaseLicenseUuid(act.id),
+              );
               serverLicenseState.licenses = serverLicenseState.licenses.filter(
-                (l) => l.id !== act.id,
+                (l) => l.id !== act.id && l.id !== targetToDelete?.id,
               );
               if (!serverLicenseState.deletedIds) {
                 serverLicenseState.deletedIds = [];
@@ -1813,12 +1881,12 @@ export const Route = createFileRoute("/api/public/results/sync")({
               markLocalLicenseMutation(act.id);
               saveServerLicenses();
 
-              // Delete in Supabase
-              try {
-                await supabaseAdmin.from("client_licenses").delete().eq("id", act.id);
-              } catch (err: unknown) {
-                console.warn("[supabase-delete-license-warn]", err);
-              }
+              const cloudRes = await deleteLicenseRowFromSupabase(
+                act.id,
+                targetToDelete?.pin_code,
+                bearerToken,
+              );
+              trackCloudResult(cloudRes);
             } else if (act.type === "activate_pin") {
               const cleanPin = (act.pin_code || "").replace(/[^0-9]/g, "");
               const devId = (act.device_id || "TV-DEFAULT").trim();
@@ -1829,7 +1897,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 licenseActivation = {
                   valid: true,
                   license: existingMaster || {
-                    id: "lic-master-admin",
+                    id: toSupabaseLicenseUuid("lic-master-admin", "291007"),
                     client_name: "Administrador Maestro",
                     pin_code: "291007",
                     status: "active",
@@ -1844,7 +1912,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 let match = serverLicenseState.licenses.find((l) => l.pin_code === cleanPin);
 
                 // Direct Supabase lookup fallback if cold isolate didn't list it yet
-                if (!match) {
+                if (!match && cleanPin) {
                   try {
                     const { data: directRow } = await supabaseAdmin
                       .from("client_licenses")
@@ -1888,6 +1956,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 ) {
                   match = {
                     ...act.fallbackLicense,
+                    id: toSupabaseLicenseUuid(act.fallbackLicense.id, cleanPin),
                     bound_device_ids: Array.isArray(act.fallbackLicense.bound_device_ids)
                       ? [...act.fallbackLicense.bound_device_ids]
                       : [],
@@ -1895,21 +1964,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
                   serverLicenseState.licenses.unshift(match);
                   markLocalLicenseMutation(match.id);
                   saveServerLicenses();
-                  try {
-                    await supabaseAdmin.from("client_licenses").upsert({
-                      id: match.id,
-                      client_name: match.client_name,
-                      pin_code: match.pin_code,
-                      status: match.status,
-                      expires_at: match.expires_at,
-                      max_devices: match.max_devices,
-                      bound_device_ids: match.bound_device_ids,
-                      notes: match.notes ?? "",
-                      created_at: match.created_at,
-                    });
-                  } catch {
-                    // ignore
-                  }
+                  await upsertLicenseRowToSupabase(match, undefined, bearerToken);
                 }
 
                 if (!match) {
@@ -1939,18 +1994,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
                       match.bound_device_ids.push(devId);
                       markLocalLicenseMutation(match.id);
                       saveServerLicenses();
-
-                      // Update device binding in Supabase (awaited so Worker doesn't cancel fetch)
-                      try {
-                        await supabaseAdmin
-                          .from("client_licenses")
-                          .update({
-                            bound_device_ids: match.bound_device_ids,
-                          })
-                          .eq("id", match.id);
-                      } catch (err: unknown) {
-                        console.warn("[supabase-bind-device-warn]", err);
-                      }
+                      await upsertLicenseRowToSupabase(match, undefined, bearerToken);
                     }
                     licenseActivation = {
                       valid: true,
@@ -2293,6 +2337,8 @@ export const Route = createFileRoute("/api/public/results/sync")({
             deletedIds: serverLicenseState.deletedIds || [],
             deletedPins: serverLicenseState.deletedPins || [],
             licenseActivation,
+            cloudLicenseSyncOk,
+            cloudLicenseError,
           });
         } catch (err) {
           return noStoreJson(

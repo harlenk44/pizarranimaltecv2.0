@@ -45,6 +45,9 @@ import {
   removeLocalLicenseOverride,
   saveLocalLicensesSnapshot,
   reconcileClientLicensesWithLocal,
+  generateLicenseUuid,
+  toSupabaseLicenseUuid,
+  isValidUuid,
   type CardsPerScreenOption,
   type ClientVoiceConfig,
   type ClientDesignConfig,
@@ -265,9 +268,9 @@ export default function LicensesManager() {
           : null;
       const newLic: ClientLicense = {
         id:
-          typeof actionPayload.id === "string" && actionPayload.id
+          typeof actionPayload.id === "string" && isValidUuid(actionPayload.id)
             ? actionPayload.id
-            : `lic-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            : generateLicenseUuid(),
         client_name: String(actionPayload.client_name || "Cliente").trim(),
         pin_code: String(actionPayload.pin_code || generateRandomPin()),
         status: "active",
@@ -392,34 +395,85 @@ export default function LicensesManager() {
     }
 
     // Direct Supabase write using authenticated Admin session when external Supabase is configured
+    let directCloudOk = false;
+    let directCloudError: string | null = null;
+    let accessToken: string | null = null;
     const sbUrl = import.meta.env["VITE_SUPABASE_URL"];
     if (typeof sbUrl === "string" && sbUrl.includes(".supabase.co")) {
       try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        accessToken = sessionData.session?.access_token ?? null;
         if (actionPayload.type === "delete" && typeof actionPayload.id === "string") {
-          await supabase.from("client_licenses").delete().eq("id", actionPayload.id);
+          const targetToDelete = prevList.find((l) => l.id === actionPayload.id);
+          const sbId = toSupabaseLicenseUuid(actionPayload.id, targetToDelete?.pin_code);
+          const candidateIds = Array.from(
+            new Set(
+              [isValidUuid(actionPayload.id) ? actionPayload.id : null, sbId].filter(Boolean),
+            ),
+          ) as string[];
+          for (const cid of candidateIds) {
+            const { error: delErr } = await supabase.from("client_licenses").delete().eq("id", cid);
+            if (delErr) directCloudError = delErr.message;
+            else directCloudOk = true;
+          }
+          if (targetToDelete?.pin_code) {
+            const { error: delPinErr } = await supabase
+              .from("client_licenses")
+              .delete()
+              .eq("pin_code", targetToDelete.pin_code);
+            if (!delPinErr) directCloudOk = true;
+          }
         } else if (updatedSnapshot) {
           const snap: ClientLicense = updatedSnapshot;
-          await supabase.from("client_licenses").upsert({
-            id: snap.id,
-            client_name: snap.client_name,
-            pin_code: snap.pin_code,
-            status: snap.status,
-            expires_at: snap.expires_at,
-            max_devices: snap.max_devices,
-            bound_device_ids: snap.bound_device_ids,
-            notes: snap.notes ?? "",
-            created_at: snap.created_at,
-          });
+          let targetSbId = toSupabaseLicenseUuid(snap.id, snap.pin_code);
+          if (snap.pin_code) {
+            const { data: existingByPin } = await supabase
+              .from("client_licenses")
+              .select("id")
+              .eq("pin_code", snap.pin_code)
+              .maybeSingle();
+            if (existingByPin && typeof existingByPin.id === "string" && existingByPin.id) {
+              targetSbId = existingByPin.id;
+            }
+          }
+          const { error: upsertErr } = await supabase.from("client_licenses").upsert(
+            {
+              id: targetSbId,
+              client_name: snap.client_name,
+              pin_code: snap.pin_code,
+              status: snap.status,
+              expires_at: snap.expires_at,
+              max_devices: snap.max_devices,
+              bound_device_ids: snap.bound_device_ids,
+              notes: snap.notes ?? "",
+              created_at: snap.created_at,
+            },
+            { onConflict: "id" },
+          );
+          if (upsertErr) {
+            directCloudError = upsertErr.message;
+          } else {
+            directCloudOk = true;
+            if (targetSbId !== snap.id) {
+              updatedSnapshot = { ...snap, id: targetSbId };
+              enrichedPayload.id = targetSbId;
+              enrichedPayload.license = updatedSnapshot;
+              saveLocalLicenseOverride(updatedSnapshot);
+            }
+          }
         }
-      } catch {
-        // ignore if RLS / table unavailable; server API route handles fallback
+      } catch (err) {
+        directCloudError = err instanceof Error ? err.message : String(err);
       }
     }
 
     try {
       const res = await fetch("/api/public/results/sync", {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
         body: JSON.stringify({ licenseAction: enrichedPayload }),
       });
       if (res.ok) {
@@ -452,7 +506,18 @@ export default function LicensesManager() {
           saveLocalLicensesSnapshot(nextRequire, reconciled.licenses);
           broadcastLicenseChange();
         }
-        if (successText) showToast(successText);
+        if (
+          typeof sbUrl === "string" &&
+          sbUrl.includes(".supabase.co") &&
+          !directCloudOk &&
+          data.cloudLicenseSyncOk === false
+        ) {
+          showToast(
+            `Guardado localmente, pero falló Supabase: ${data.cloudLicenseError || directCloudError || "verifica permisos RLS en client_licenses"}`,
+          );
+        } else if (successText) {
+          showToast(successText);
+        }
       } else if (successText) {
         showToast("Configuración guardada localmente.");
       }
@@ -672,7 +737,7 @@ export default function LicensesManager() {
       formCardsPerScreen === "TODAS" ? "Todas" : `${formCardsPerScreen} por pantalla`;
 
     const cleanPin = pinCode.replace(/[^0-9]/g, "").slice(0, 6) || generateRandomPin();
-    const newId = `lic-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const newId = generateLicenseUuid();
 
     await runLicenseAction(
       {

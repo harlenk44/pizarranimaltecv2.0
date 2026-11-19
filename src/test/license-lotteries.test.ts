@@ -7,6 +7,10 @@ import {
   ALL_AVAILABLE_LOTTERIES,
   saveLocalLicenseOverride,
   reconcileClientLicensesWithLocal,
+  isValidUuid,
+  generateLicenseUuid,
+  toSupabaseLicenseUuid,
+  MASTER_LICENSE_UUID,
 } from "@/lib/license-lotteries";
 
 describe("license-lotteries utilities", () => {
@@ -276,6 +280,68 @@ describe("license-lotteries regression guards", () => {
       const parsedTv = parseClientLicenseName(tvReconciled.licenses[0]!.client_name);
       expect(parsedTv.cardsPerScreen).toBe(2);
       expect(parsedTv.allowedLotteries).toEqual(["granjita"]);
+    } finally {
+      Object.defineProperty(globalThis, "window", { value: origWindow, configurable: true });
+      Object.defineProperty(globalThis, "localStorage", { value: origStorage, configurable: true });
+    }
+  });
+
+  it("normalizes legacy IDs to valid UUIDs for Supabase and deduplicates by pin_code", () => {
+    expect(isValidUuid("lic-master-admin")).toBe(false);
+    expect(isValidUuid("lic-1763550000-abcd")).toBe(false);
+    expect(toSupabaseLicenseUuid("lic-master-admin", "291007")).toBe(MASTER_LICENSE_UUID);
+    expect(isValidUuid(toSupabaseLicenseUuid("lic-master-admin", "291007"))).toBe(true);
+    expect(isValidUuid(toSupabaseLicenseUuid("lic-custom-123", "819776"))).toBe(true);
+    expect(isValidUuid(generateLicenseUuid())).toBe(true);
+
+    const store = new Map<string, string>();
+    const fakeStorage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        store.set(k, v);
+      },
+      removeItem: (k: string) => {
+        store.delete(k);
+      },
+    };
+    const origWindow = globalThis.window;
+    const origStorage = globalThis.localStorage;
+    Object.defineProperty(globalThis, "window", { value: globalThis, configurable: true });
+    Object.defineProperty(globalThis, "localStorage", { value: fakeStorage, configurable: true });
+
+    try {
+      const legacyMaster = {
+        id: "lic-master-admin",
+        client_name: "Administrador Maestro",
+        pin_code: "291007",
+        status: "active" as const,
+        max_devices: 999,
+        bound_device_ids: [],
+        expires_at: null,
+        notes: "",
+        created_at: "2026-01-01T00:00:00.000Z",
+      };
+      const uuidMaster = {
+        ...legacyMaster,
+        id: MASTER_LICENSE_UUID,
+        client_name: formatClientLicenseName(
+          "Administrador Maestro",
+          null,
+          20,
+          8,
+          25,
+          null,
+          null,
+          true,
+        ),
+      };
+
+      const reconciled = reconcileClientLicensesWithLocal([legacyMaster, uuidMaster], [], [], {
+        allowOverrideServer: false,
+      });
+      expect(reconciled.licenses).toHaveLength(1);
+      expect(reconciled.licenses[0]!.id).toBe(MASTER_LICENSE_UUID);
+      expect(parseClientLicenseName(reconciled.licenses[0]!.client_name).fullscreenAuto).toBe(true);
     } finally {
       Object.defineProperty(globalThis, "window", { value: origWindow, configurable: true });
       Object.defineProperty(globalThis, "localStorage", { value: origStorage, configurable: true });

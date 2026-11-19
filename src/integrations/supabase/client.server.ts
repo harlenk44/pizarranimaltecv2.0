@@ -100,6 +100,30 @@ function createSupabaseAdminClient() {
   });
 }
 
+export function createSupabaseClientWithToken(accessToken?: string | null) {
+  const SUPABASE_URL = readServerEnv("SUPABASE_URL") || readServerEnv("VITE_SUPABASE_URL");
+  const SUPABASE_PUBLISHABLE_KEY =
+    readServerEnv("SUPABASE_PUBLISHABLE_KEY") ||
+    readServerEnv("VITE_SUPABASE_PUBLISHABLE_KEY") ||
+    readServerEnv("SUPABASE_SERVICE_ROLE_KEY");
+
+  if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY || isInactiveSupabaseUrl(SUPABASE_URL)) {
+    return null;
+  }
+
+  return createClient<Database>(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
+    global: {
+      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
+      fetch: createSupabaseFetch(SUPABASE_PUBLISHABLE_KEY),
+    },
+    auth: {
+      storage: undefined,
+      persistSession: false,
+      autoRefreshToken: false,
+    },
+  });
+}
+
 let _supabaseAdmin: ReturnType<typeof createSupabaseAdminClient> | undefined;
 
 // Server-side Supabase client with service role - bypasses RLS

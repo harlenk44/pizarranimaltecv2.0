@@ -6,6 +6,71 @@ import {
   getMasterTripleProducts,
 } from "@/lib/master-products";
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export const MASTER_LICENSE_UUID = "00000000-0000-4000-8000-000000291007";
+
+export const LEGACY_LICENSE_UUID_MAP: Record<string, string> = {
+  "lic-master-admin": MASTER_LICENSE_UUID,
+  "lic-exito-carupano-310148": "00000000-0000-4000-8000-000000310148",
+  "lic-mariana-108271": "00000000-0000-4000-8000-000000108271",
+  "lic-jose-barreto-770595": "00000000-0000-4000-8000-000000770595",
+};
+
+export function isValidUuid(value?: string | null): boolean {
+  return Boolean(value && UUID_REGEX.test(value.trim()));
+}
+
+export function generateLicenseUuid(): string {
+  if (
+    typeof globalThis.crypto !== "undefined" &&
+    typeof globalThis.crypto.randomUUID === "function"
+  ) {
+    return globalThis.crypto.randomUUID();
+  }
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = Math.floor(Math.random() * 16);
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+function deterministicUuidFromSeed(seed: string): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
+  let h3 = 0x85ebca6b;
+  let h4 = 0xc2b2ae35;
+  for (let i = 0; i < seed.length; i++) {
+    const ch = seed.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ (ch + i), 0x85ebca6b) >>> 0;
+    h3 = Math.imul(h3 ^ (ch * 31), 0xc2b2ae35) >>> 0;
+    h4 = Math.imul(h4 ^ (ch + i * 7), 0x27d4eb2f) >>> 0;
+  }
+  const p1 = h1.toString(16).padStart(8, "0");
+  const p2 = ((h2 >>> 16) & 0xffff).toString(16).padStart(4, "0");
+  const p3 = (0x4000 | (h2 & 0x0fff)).toString(16).padStart(4, "0");
+  const p4 = (0x8000 | ((h3 >>> 16) & 0x3fff)).toString(16).padStart(4, "0");
+  const p5 = ((h3 & 0xffff).toString(16).padStart(4, "0") + h4.toString(16).padStart(8, "0")).slice(
+    0,
+    12,
+  );
+  return `${p1}-${p2}-${p3}-${p4}-${p5}`;
+}
+
+export function toSupabaseLicenseUuid(id?: string | null, pinCode?: string | null): string {
+  const trimmedId = (id || "").trim();
+  if (isValidUuid(trimmedId)) return trimmedId.toLowerCase();
+  if (trimmedId && LEGACY_LICENSE_UUID_MAP[trimmedId]) {
+    return LEGACY_LICENSE_UUID_MAP[trimmedId]!;
+  }
+  const cleanPin = (pinCode || "").replace(/[^0-9]/g, "");
+  if (cleanPin === "291007") return MASTER_LICENSE_UUID;
+  if (trimmedId) return deterministicUuidFromSeed(`lic:${trimmedId}`);
+  if (cleanPin) return deterministicUuidFromSeed(`pin:${cleanPin}`);
+  return generateLicenseUuid();
+}
+
 export interface LotteryGameOption {
   id: string;
   slug: string;
@@ -661,9 +726,18 @@ export function reconcileClientLicensesWithLocal(
     const seenPins = new Set<string>();
     const result: ClientLicense[] = [];
 
-    for (const sLic of safeServer) {
+    const orderedServer = [...safeServer].sort((a, b) => {
+      const aUuid = isValidUuid(a?.id) ? 0 : 1;
+      const bUuid = isValidUuid(b?.id) ? 0 : 1;
+      return aUuid - bUuid;
+    });
+
+    for (const sLic of orderedServer) {
       if (!sLic || !sLic.id) continue;
       if (deletedIdSet.has(sLic.id) || (sLic.pin_code && deletedPinSet.has(sLic.pin_code))) {
+        continue;
+      }
+      if (seenIds.has(sLic.id) || (sLic.pin_code && seenPins.has(sLic.pin_code))) {
         continue;
       }
 
