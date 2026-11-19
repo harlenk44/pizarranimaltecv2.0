@@ -5,6 +5,7 @@
 import { createClient } from "@supabase/supabase-js";
 import type { Database } from "./types";
 import { createMockSupabaseClient } from "@/lib/mock-db";
+import { getBoundCloudflareKv, getRuntimeEnvVar } from "@/lib/cloudflare-env.server";
 
 function isNewSupabaseApiKey(value: string): boolean {
   return value.startsWith("sb_publishable_") || value.startsWith("sb_secret_");
@@ -37,7 +38,6 @@ const INACTIVE_SUPABASE_HOSTS = [
   "ebpunrzbagmcdtammjqn.supabase.co",
   "dqpomustswauzejggfui.supabase.co",
 ];
-let _supabaseAdminOffline = false;
 
 function isInactiveSupabaseUrl(url?: string): boolean {
   if (!url) return true;
@@ -45,52 +45,105 @@ function isInactiveSupabaseUrl(url?: string): boolean {
 }
 
 function readServerEnv(key: string): string | undefined {
-  if (typeof process !== "undefined" && process.env && process.env[key]) {
-    return process.env[key];
-  }
-  try {
-    const metaEnv = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
-    if (metaEnv && metaEnv[key]) {
-      return metaEnv[key];
-    }
-  } catch {
-    // ignore
-  }
-  return undefined;
+  return getRuntimeEnvVar(key);
 }
 
-function createSupabaseAdminClient() {
-  const SUPABASE_URL = readServerEnv("SUPABASE_URL") || readServerEnv("VITE_SUPABASE_URL");
-  const SUPABASE_SERVICE_ROLE_KEY =
-    readServerEnv("SUPABASE_SERVICE_ROLE_KEY") ||
-    readServerEnv("SUPABASE_PUBLISHABLE_KEY") ||
-    readServerEnv("VITE_SUPABASE_PUBLISHABLE_KEY");
+export interface SupabaseCloudDiagnostics {
+  configured: boolean;
+  hasServiceRoleKey: boolean;
+  hasPublishableKey: boolean;
+  hasKvBinding: boolean;
+  url: string | null;
+  reason: string | null;
+}
 
-  if (
-    _supabaseAdminOffline ||
-    !SUPABASE_URL ||
-    !SUPABASE_SERVICE_ROLE_KEY ||
-    isInactiveSupabaseUrl(SUPABASE_URL)
-  ) {
-    return createMockSupabaseClient() as unknown as ReturnType<typeof createClient<Database>>;
+export function getSupabaseCloudDiagnostics(): SupabaseCloudDiagnostics {
+  const url = readServerEnv("SUPABASE_URL") || readServerEnv("VITE_SUPABASE_URL") || null;
+  const serviceKey =
+    readServerEnv("SUPABASE_SERVICE_ROLE_KEY") || readServerEnv("SUPABASE_SECRET_KEY") || null;
+  const publishableKey =
+    readServerEnv("SUPABASE_PUBLISHABLE_KEY") ||
+    readServerEnv("VITE_SUPABASE_PUBLISHABLE_KEY") ||
+    readServerEnv("SUPABASE_ANON_KEY") ||
+    readServerEnv("VITE_SUPABASE_ANON_KEY") ||
+    null;
+  const hasKvBinding = Boolean(getBoundCloudflareKv());
+
+  if (!url) {
+    return {
+      configured: false,
+      hasServiceRoleKey: Boolean(serviceKey),
+      hasPublishableKey: Boolean(publishableKey),
+      hasKvBinding,
+      url: null,
+      reason:
+        "Falta configurar SUPABASE_URL (o VITE_SUPABASE_URL) en las variables de entorno del servidor en Cloudflare Pages.",
+    };
   }
 
-  const baseFetch = createSupabaseFetch(SUPABASE_SERVICE_ROLE_KEY);
-  const resilientFetch: typeof fetch = async (input, init) => {
-    try {
-      return await baseFetch(input, init);
-    } catch (err) {
-      _supabaseAdminOffline = true;
-      _supabaseAdmin = createMockSupabaseClient() as unknown as ReturnType<
-        typeof createClient<Database>
-      >;
-      throw err;
-    }
-  };
+  if (isInactiveSupabaseUrl(url)) {
+    return {
+      configured: false,
+      hasServiceRoleKey: Boolean(serviceKey),
+      hasPublishableKey: Boolean(publishableKey),
+      hasKvBinding,
+      url,
+      reason: `La URL de Supabase configurada (${url}) apunta a un proyecto inactivo.`,
+    };
+  }
 
-  return createClient<Database>(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  if (!serviceKey && !publishableKey) {
+    return {
+      configured: false,
+      hasServiceRoleKey: false,
+      hasPublishableKey: false,
+      hasKvBinding,
+      url,
+      reason:
+        "Falta configurar SUPABASE_SERVICE_ROLE_KEY (o SUPABASE_PUBLISHABLE_KEY) en las variables de entorno del servidor en Cloudflare Pages.",
+    };
+  }
+
+  return {
+    configured: true,
+    hasServiceRoleKey: Boolean(serviceKey),
+    hasPublishableKey: Boolean(publishableKey),
+    hasKvBinding,
+    url,
+    reason: null,
+  };
+}
+
+let cachedRealConfigKey = "";
+let cachedRealClient: ReturnType<typeof createClient<Database>> | null = null;
+
+export function createRealSupabaseAdminClient(): ReturnType<typeof createClient<Database>> | null {
+  const diag = getSupabaseCloudDiagnostics();
+  if (!diag.configured || !diag.url) {
+    return null;
+  }
+
+  const key =
+    readServerEnv("SUPABASE_SERVICE_ROLE_KEY") ||
+    readServerEnv("SUPABASE_SECRET_KEY") ||
+    readServerEnv("SUPABASE_PUBLISHABLE_KEY") ||
+    readServerEnv("VITE_SUPABASE_PUBLISHABLE_KEY") ||
+    readServerEnv("SUPABASE_ANON_KEY") ||
+    readServerEnv("VITE_SUPABASE_ANON_KEY");
+
+  if (!key) {
+    return null;
+  }
+
+  const configKey = `${diag.url}::${key}`;
+  if (cachedRealClient && cachedRealConfigKey === configKey) {
+    return cachedRealClient;
+  }
+
+  cachedRealConfigKey = configKey;
+  cachedRealClient = createClient<Database>(diag.url, key, {
     global: {
-      fetch: resilientFetch,
+      fetch: createSupabaseFetch(key),
     },
     auth: {
       storage: undefined,
@@ -98,6 +151,13 @@ function createSupabaseAdminClient() {
       autoRefreshToken: false,
     },
   });
+  return cachedRealClient;
+}
+
+function createSupabaseAdminClient() {
+  const realClient = createRealSupabaseAdminClient();
+  if (realClient) return realClient;
+  return createMockSupabaseClient() as unknown as ReturnType<typeof createClient<Database>>;
 }
 
 export function createSupabaseClientWithToken(accessToken?: string | null) {
@@ -105,6 +165,8 @@ export function createSupabaseClientWithToken(accessToken?: string | null) {
   const SUPABASE_PUBLISHABLE_KEY =
     readServerEnv("SUPABASE_PUBLISHABLE_KEY") ||
     readServerEnv("VITE_SUPABASE_PUBLISHABLE_KEY") ||
+    readServerEnv("SUPABASE_ANON_KEY") ||
+    readServerEnv("VITE_SUPABASE_ANON_KEY") ||
     readServerEnv("SUPABASE_SERVICE_ROLE_KEY");
 
   if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY || isInactiveSupabaseUrl(SUPABASE_URL)) {
@@ -124,15 +186,10 @@ export function createSupabaseClientWithToken(accessToken?: string | null) {
   });
 }
 
-let _supabaseAdmin: ReturnType<typeof createSupabaseAdminClient> | undefined;
-
-// Server-side Supabase client with service role - bypasses RLS
-// SECURITY: Only use this for trusted server-side operations, never expose to client code
-// Load inside server handlers: const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-// Top-level import is safe only in other .server.ts modules - route files and *.functions.ts ship to the client bundle.
+// Server-side Supabase client with service role - bypasses RLS when configured; falls back to mock only for non-cloud helpers.
 export const supabaseAdmin = new Proxy({} as ReturnType<typeof createSupabaseAdminClient>, {
   get(_, prop, receiver) {
-    if (!_supabaseAdmin) _supabaseAdmin = createSupabaseAdminClient();
-    return Reflect.get(_supabaseAdmin, prop, receiver);
+    const client = createSupabaseAdminClient();
+    return Reflect.get(client, prop, receiver);
   },
 });

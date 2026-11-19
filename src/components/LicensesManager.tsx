@@ -27,6 +27,7 @@ import {
   Sparkles,
   Maximize,
   Minimize,
+  AlertTriangle,
 } from "lucide-react";
 import type { ClientLicense } from "@/lib/types";
 import LicenseGate from "@/components/LicenseGate";
@@ -126,6 +127,8 @@ export default function LicensesManager() {
   // Copy feedback
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [feedbackMsg, setFeedbackMsg] = useState<string | null>(null);
+  const [cloudErrorAlert, setCloudErrorAlert] = useState<string | null>(null);
+  const [modalCloudError, setModalCloudError] = useState<string | null>(null);
 
   const showToast = (msg: string) => {
     setFeedbackMsg(msg);
@@ -189,6 +192,12 @@ export default function LicensesManager() {
           }
         }
 
+        if (typeof data.cloudLicenseError === "string" && data.cloudLicenseError.trim()) {
+          setCloudErrorAlert(data.cloudLicenseError);
+        } else if (data.cloudLicenseConfigured === true) {
+          setCloudErrorAlert(null);
+        }
+
         const reconciled = reconcileClientLicensesWithLocal(
           serverList,
           data.deletedIds,
@@ -197,7 +206,11 @@ export default function LicensesManager() {
         );
         let finalLicenses: ClientLicense[] = reconciled.licenses;
 
-        if (reconciled.needsServerSync.length > 0) {
+        if (
+          data.cloudLicenseConfigured !== false &&
+          !data.cloudLicenseError &&
+          reconciled.needsServerSync.length > 0
+        ) {
           try {
             const restoreRes = await fetch("/api/public/results/sync", {
               method: "PUT",
@@ -211,7 +224,10 @@ export default function LicensesManager() {
             });
             if (restoreRes.ok) {
               const restoreData = await restoreRes.json();
-              if (Array.isArray(restoreData.clientLicenses)) {
+              if (
+                restoreData.cloudLicenseSyncOk === true &&
+                Array.isArray(restoreData.clientLicenses)
+              ) {
                 finalLicenses = reconcileClientLicensesWithLocal(
                   restoreData.clientLicenses,
                   restoreData.deletedIds,
@@ -252,14 +268,17 @@ export default function LicensesManager() {
     }
   };
 
-  const runLicenseAction = async (actionPayload: Record<string, unknown>, successText?: string) => {
+  const runLicenseAction = async (
+    actionPayload: Record<string, unknown>,
+    successText?: string,
+  ): Promise<boolean> => {
     setSaving(true);
     const enrichedPayload: Record<string, unknown> = { ...actionPayload };
     let updatedSnapshot: ClientLicense | null = null;
     const currentReq = requireLicenseRef.current;
     const prevList = licensesRef.current;
 
-    // Optimistic local update + snapshot preparation so stateless Cloudflare isolates never miss an edit
+    // Build payload snapshot ONLY in memory; do NOT persist to localStorage or UI until cloud confirms
     if (actionPayload.type === "create") {
       const daysVal = actionPayload.days as number | null | undefined;
       const expiresAt =
@@ -284,117 +303,58 @@ export default function LicensesManager() {
       enrichedPayload.pin_code = newLic.pin_code;
       enrichedPayload.license = newLic;
       updatedSnapshot = newLic;
-      saveLocalLicenseOverride(newLic);
-      const next = [
-        newLic,
-        ...prevList.filter((l) => l.id !== newLic.id && l.pin_code !== newLic.pin_code),
-      ];
-      saveLocalLicensesSnapshot(currentReq, next);
-      setLicenses(next);
-      broadcastLicenseChange();
-    } else if (actionPayload.type === "delete" && typeof actionPayload.id === "string") {
-      const targetToDelete = prevList.find((l) => l.id === actionPayload.id);
-      const next = prevList.filter((l) => l.id !== actionPayload.id);
-      try {
-        removeLocalLicenseOverride(actionPayload.id, targetToDelete?.pin_code);
-        const localDeletedRaw = localStorage.getItem("pizarra_deleted_licenses_v2");
-        const localDeleted = localDeletedRaw ? JSON.parse(localDeletedRaw) : { ids: [], pins: [] };
-        const ids = Array.isArray(localDeleted.ids) ? localDeleted.ids : [];
-        const pins = Array.isArray(localDeleted.pins) ? localDeleted.pins : [];
-        if (!ids.includes(actionPayload.id)) ids.push(actionPayload.id);
-        if (targetToDelete?.pin_code && !pins.includes(targetToDelete.pin_code)) {
-          pins.push(targetToDelete.pin_code);
-        }
-        localStorage.setItem("pizarra_deleted_licenses_v2", JSON.stringify({ ids, pins }));
-        saveLocalLicensesSnapshot(currentReq, next);
-      } catch {
-        // ignore
-      }
-      setLicenses(next);
-      broadcastLicenseChange();
     } else if (actionPayload.type === "toggle_status" && typeof actionPayload.id === "string") {
-      const next = prevList.map((l) => {
-        if (l.id === actionPayload.id) {
-          const updated: ClientLicense = {
-            ...l,
-            status: l.status === "active" ? ("paused" as const) : ("active" as const),
-          };
-          updatedSnapshot = updated;
-          saveLocalLicenseOverride(updated);
-          return updated;
-        }
-        return l;
-      });
-      if (updatedSnapshot) enrichedPayload.license = updatedSnapshot;
-      saveLocalLicensesSnapshot(currentReq, next);
-      setLicenses(next);
-      broadcastLicenseChange();
+      const existing = prevList.find((l) => l.id === actionPayload.id);
+      if (existing) {
+        updatedSnapshot = {
+          ...existing,
+          status: existing.status === "active" ? ("paused" as const) : ("active" as const),
+        };
+        enrichedPayload.license = updatedSnapshot;
+      }
     } else if (
       actionPayload.type === "update_lotteries" &&
       typeof actionPayload.id === "string" &&
       typeof actionPayload.client_name === "string"
     ) {
-      const updatedClientName = actionPayload.client_name.trim();
-      const next = prevList.map((l) => {
-        if (l.id === actionPayload.id) {
-          const updated: ClientLicense = {
-            ...l,
-            client_name: updatedClientName,
-          };
-          updatedSnapshot = updated;
-          saveLocalLicenseOverride(updated);
-          return updated;
-        }
-        return l;
-      });
-      if (updatedSnapshot) enrichedPayload.license = updatedSnapshot;
-      saveLocalLicensesSnapshot(currentReq, next);
-      setLicenses(next);
-      broadcastLicenseChange();
+      const existing = prevList.find((l) => l.id === actionPayload.id);
+      if (existing) {
+        updatedSnapshot = {
+          ...existing,
+          client_name: actionPayload.client_name.trim(),
+        };
+        enrichedPayload.license = updatedSnapshot;
+      }
     } else if (actionPayload.type === "renew" && typeof actionPayload.id === "string") {
-      const next = prevList.map((l) => {
-        if (l.id === actionPayload.id) {
-          const daysToAdd =
-            actionPayload.days === null
+      const existing = prevList.find((l) => l.id === actionPayload.id);
+      if (existing) {
+        const daysToAdd =
+          actionPayload.days === null
+            ? null
+            : Math.max(1, Math.min(365, Number(actionPayload.days) || 30));
+        const isStillActive =
+          existing.expires_at && new Date(existing.expires_at).getTime() > Date.now();
+        const baseDate =
+          isStillActive && existing.expires_at ? new Date(existing.expires_at) : new Date();
+        updatedSnapshot = {
+          ...existing,
+          status: "active",
+          expires_at:
+            daysToAdd === null
               ? null
-              : Math.max(1, Math.min(365, Number(actionPayload.days) || 30));
-          const isStillActive = l.expires_at && new Date(l.expires_at).getTime() > Date.now();
-          const baseDate = isStillActive && l.expires_at ? new Date(l.expires_at) : new Date();
-          const updated: ClientLicense = {
-            ...l,
-            status: "active",
-            expires_at:
-              daysToAdd === null
-                ? null
-                : new Date(baseDate.getTime() + daysToAdd * 86400000).toISOString(),
-          };
-          updatedSnapshot = updated;
-          saveLocalLicenseOverride(updated);
-          return updated;
-        }
-        return l;
-      });
-      if (updatedSnapshot) enrichedPayload.license = updatedSnapshot;
-      saveLocalLicensesSnapshot(currentReq, next);
-      setLicenses(next);
-      broadcastLicenseChange();
+              : new Date(baseDate.getTime() + daysToAdd * 86400000).toISOString(),
+        };
+        enrichedPayload.license = updatedSnapshot;
+      }
     } else if (actionPayload.type === "reset_devices" && typeof actionPayload.id === "string") {
-      const next = prevList.map((l) => {
-        if (l.id === actionPayload.id) {
-          const updated: ClientLicense = { ...l, bound_device_ids: [] };
-          updatedSnapshot = updated;
-          saveLocalLicenseOverride(updated);
-          return updated;
-        }
-        return l;
-      });
-      if (updatedSnapshot) enrichedPayload.license = updatedSnapshot;
-      saveLocalLicensesSnapshot(currentReq, next);
-      setLicenses(next);
-      broadcastLicenseChange();
+      const existing = prevList.find((l) => l.id === actionPayload.id);
+      if (existing) {
+        updatedSnapshot = { ...existing, bound_device_ids: [] };
+        enrichedPayload.license = updatedSnapshot;
+      }
     }
 
-    // Direct Supabase write using authenticated Admin session when external Supabase is configured
+    // Direct Supabase write ONLY if external Supabase + real non-mock Supabase JWT session exists
     let directCloudOk = false;
     let directCloudError: string | null = null;
     let accessToken: string | null = null;
@@ -402,63 +362,73 @@ export default function LicensesManager() {
     if (typeof sbUrl === "string" && sbUrl.includes(".supabase.co")) {
       try {
         const { data: sessionData } = await supabase.auth.getSession();
-        accessToken = sessionData.session?.access_token ?? null;
-        if (actionPayload.type === "delete" && typeof actionPayload.id === "string") {
-          const targetToDelete = prevList.find((l) => l.id === actionPayload.id);
-          const sbId = toSupabaseLicenseUuid(actionPayload.id, targetToDelete?.pin_code);
-          const candidateIds = Array.from(
-            new Set(
-              [isValidUuid(actionPayload.id) ? actionPayload.id : null, sbId].filter(Boolean),
-            ),
-          ) as string[];
-          for (const cid of candidateIds) {
-            const { error: delErr } = await supabase.from("client_licenses").delete().eq("id", cid);
-            if (delErr) directCloudError = delErr.message;
-            else directCloudOk = true;
-          }
-          if (targetToDelete?.pin_code) {
-            const { error: delPinErr } = await supabase
-              .from("client_licenses")
-              .delete()
-              .eq("pin_code", targetToDelete.pin_code);
-            if (!delPinErr) directCloudOk = true;
-          }
-        } else if (updatedSnapshot) {
-          const snap: ClientLicense = updatedSnapshot;
-          let targetSbId = toSupabaseLicenseUuid(snap.id, snap.pin_code);
-          if (snap.pin_code) {
-            const { data: existingByPin } = await supabase
-              .from("client_licenses")
-              .select("id")
-              .eq("pin_code", snap.pin_code)
-              .maybeSingle();
-            if (existingByPin && typeof existingByPin.id === "string" && existingByPin.id) {
-              targetSbId = existingByPin.id;
+        const rawTok = sessionData.session?.access_token ?? null;
+        if (rawTok && !rawTok.startsWith("mock-token-") && rawTok.split(".").length === 3) {
+          accessToken = rawTok;
+        }
+        if (accessToken) {
+          if (actionPayload.type === "delete" && typeof actionPayload.id === "string") {
+            const targetToDelete = prevList.find((l) => l.id === actionPayload.id);
+            const sbId = toSupabaseLicenseUuid(actionPayload.id, targetToDelete?.pin_code);
+            const candidateIds = Array.from(
+              new Set(
+                [isValidUuid(actionPayload.id) ? actionPayload.id : null, sbId].filter(Boolean),
+              ),
+            ) as string[];
+            for (const cid of candidateIds) {
+              const { error: delErr } = await supabase
+                .from("client_licenses")
+                .delete()
+                .eq("id", cid);
+              if (delErr) directCloudError = delErr.message;
+              else directCloudOk = true;
             }
-          }
-          const { error: upsertErr } = await supabase.from("client_licenses").upsert(
-            {
-              id: targetSbId,
-              client_name: snap.client_name,
-              pin_code: snap.pin_code,
-              status: snap.status,
-              expires_at: snap.expires_at,
-              max_devices: snap.max_devices,
-              bound_device_ids: snap.bound_device_ids,
-              notes: snap.notes ?? "",
-              created_at: snap.created_at,
-            },
-            { onConflict: "id" },
-          );
-          if (upsertErr) {
-            directCloudError = upsertErr.message;
-          } else {
-            directCloudOk = true;
-            if (targetSbId !== snap.id) {
-              updatedSnapshot = { ...snap, id: targetSbId };
-              enrichedPayload.id = targetSbId;
-              enrichedPayload.license = updatedSnapshot;
-              saveLocalLicenseOverride(updatedSnapshot);
+            if (targetToDelete?.pin_code) {
+              const { error: delPinErr } = await supabase
+                .from("client_licenses")
+                .delete()
+                .eq("pin_code", targetToDelete.pin_code);
+              if (!delPinErr) directCloudOk = true;
+            }
+          } else if (updatedSnapshot) {
+            const snap: ClientLicense = updatedSnapshot;
+            let targetSbId = toSupabaseLicenseUuid(snap.id, snap.pin_code);
+            if (snap.pin_code) {
+              const { data: existingByPin } = await supabase
+                .from("client_licenses")
+                .select("id")
+                .eq("pin_code", snap.pin_code)
+                .maybeSingle();
+              if (existingByPin && typeof existingByPin.id === "string" && existingByPin.id) {
+                targetSbId = existingByPin.id;
+              }
+            }
+            const { data: upsertedRows, error: upsertErr } = await supabase
+              .from("client_licenses")
+              .upsert(
+                {
+                  id: targetSbId,
+                  client_name: snap.client_name,
+                  pin_code: snap.pin_code,
+                  status: snap.status,
+                  expires_at: snap.expires_at,
+                  max_devices: snap.max_devices,
+                  bound_device_ids: snap.bound_device_ids,
+                  notes: snap.notes ?? "",
+                  created_at: snap.created_at,
+                },
+                { onConflict: "id" },
+              )
+              .select("id");
+            if (upsertErr) {
+              directCloudError = upsertErr.message;
+            } else if (Array.isArray(upsertedRows) && upsertedRows.length > 0) {
+              directCloudOk = true;
+              if (targetSbId !== snap.id) {
+                updatedSnapshot = { ...snap, id: targetSbId };
+                enrichedPayload.id = targetSbId;
+                enrichedPayload.license = updatedSnapshot;
+              }
             }
           }
         }
@@ -476,53 +446,98 @@ export default function LicensesManager() {
         },
         body: JSON.stringify({ licenseAction: enrichedPayload }),
       });
-      if (res.ok) {
-        const data = await res.json();
-        const nextRequire =
-          typeof data.requireLicense === "boolean" ? data.requireLicense : currentReq;
-        if (typeof data.requireLicense === "boolean") {
-          setRequireLicense(data.requireLicense);
-        }
-        if (Array.isArray(data.clientLicenses)) {
-          if (actionPayload.type === "create" || actionPayload.type === "renew") {
-            const targetPin =
-              typeof enrichedPayload.pin_code === "string" ? enrichedPayload.pin_code : undefined;
-            const targetId =
-              typeof enrichedPayload.id === "string" ? enrichedPayload.id : undefined;
-            const createdOrRenewed = (data.clientLicenses as ClientLicense[]).find(
-              (l) => (targetId && l.id === targetId) || (targetPin && l.pin_code === targetPin),
-            );
-            if (createdOrRenewed) {
-              saveLocalLicenseOverride(createdOrRenewed);
-            }
-          }
-          const reconciled = reconcileClientLicensesWithLocal(
-            data.clientLicenses,
-            data.deletedIds,
-            data.deletedPins,
-            { allowOverrideServer: true },
-          );
-          setLicenses(reconciled.licenses);
-          saveLocalLicensesSnapshot(nextRequire, reconciled.licenses);
-          broadcastLicenseChange();
-        }
-        if (
-          typeof sbUrl === "string" &&
-          sbUrl.includes(".supabase.co") &&
-          !directCloudOk &&
-          data.cloudLicenseSyncOk === false
-        ) {
-          showToast(
-            `Guardado localmente, pero falló Supabase: ${data.cloudLicenseError || directCloudError || "verifica permisos RLS en client_licenses"}`,
-          );
-        } else if (successText) {
-          showToast(successText);
-        }
-      } else if (successText) {
-        showToast("Configuración guardada localmente.");
+
+      const data = await res.json().catch(() => null);
+      const serverCloudOk = Boolean(res.ok && data && data.cloudLicenseSyncOk === true);
+      const persistedInCloud = serverCloudOk || directCloudOk;
+
+      if (!persistedInCloud) {
+        const exactError =
+          (data && typeof data.cloudLicenseError === "string" && data.cloudLicenseError) ||
+          (data && typeof data.error === "string" && data.error) ||
+          directCloudError ||
+          (!res.ok
+            ? `Error HTTP ${res.status} al sincronizar la licencia con el servidor.`
+            : "El servidor no confirmó el guardado en la nube (cloudLicenseSyncOk=false).");
+        setCloudErrorAlert(exactError);
+        setModalCloudError(exactError);
+        return false;
       }
-    } catch {
-      showToast("Configuración guardada localmente.");
+
+      setCloudErrorAlert(null);
+      setModalCloudError(null);
+
+      const nextRequire =
+        data && typeof data.requireLicense === "boolean" ? data.requireLicense : currentReq;
+      if (data && typeof data.requireLicense === "boolean") {
+        setRequireLicense(data.requireLicense);
+      }
+
+      if (actionPayload.type === "delete" && typeof actionPayload.id === "string") {
+        const targetToDelete = prevList.find((l) => l.id === actionPayload.id);
+        try {
+          removeLocalLicenseOverride(actionPayload.id, targetToDelete?.pin_code);
+          const localDeletedRaw = localStorage.getItem("pizarra_deleted_licenses_v2");
+          const localDeleted = localDeletedRaw
+            ? JSON.parse(localDeletedRaw)
+            : { ids: [], pins: [] };
+          const ids = Array.isArray(localDeleted.ids) ? localDeleted.ids : [];
+          const pins = Array.isArray(localDeleted.pins) ? localDeleted.pins : [];
+          if (!ids.includes(actionPayload.id)) ids.push(actionPayload.id);
+          if (targetToDelete?.pin_code && !pins.includes(targetToDelete.pin_code)) {
+            pins.push(targetToDelete.pin_code);
+          }
+          localStorage.setItem("pizarra_deleted_licenses_v2", JSON.stringify({ ids, pins }));
+        } catch {
+          // ignore
+        }
+      }
+
+      if (data && Array.isArray(data.clientLicenses)) {
+        if (
+          actionPayload.type === "create" ||
+          actionPayload.type === "renew" ||
+          actionPayload.type === "toggle_status" ||
+          actionPayload.type === "update_lotteries" ||
+          actionPayload.type === "reset_devices"
+        ) {
+          const targetPin =
+            typeof enrichedPayload.pin_code === "string"
+              ? enrichedPayload.pin_code
+              : updatedSnapshot?.pin_code;
+          const targetId =
+            typeof enrichedPayload.id === "string" ? enrichedPayload.id : updatedSnapshot?.id;
+          const confirmedLic = (data.clientLicenses as ClientLicense[]).find(
+            (l) => (targetId && l.id === targetId) || (targetPin && l.pin_code === targetPin),
+          );
+          if (confirmedLic) {
+            saveLocalLicenseOverride(confirmedLic);
+          }
+        }
+        const reconciled = reconcileClientLicensesWithLocal(
+          data.clientLicenses,
+          data.deletedIds,
+          data.deletedPins,
+          { allowOverrideServer: true },
+        );
+        setLicenses(reconciled.licenses);
+        saveLocalLicensesSnapshot(nextRequire, reconciled.licenses);
+        broadcastLicenseChange();
+      } else if (directCloudOk) {
+        await fetchLicenses();
+        broadcastLicenseChange();
+      }
+
+      if (successText) {
+        showToast(successText);
+      }
+      return true;
+    } catch (err) {
+      const netErr = err instanceof Error ? err.message : String(err);
+      const exactError = `Error de red al guardar la licencia en la nube: ${netErr}`;
+      setCloudErrorAlert(exactError);
+      setModalCloudError(exactError);
+      return false;
     } finally {
       setSaving(false);
     }
@@ -547,6 +562,7 @@ export default function LicensesManager() {
       designConfig,
       fullscreenAuto,
     } = parseClientLicenseName(lic.client_name);
+    setModalCloudError(null);
     setEditingLicense(lic);
     setEditingLotteries(
       allowedLotteries !== null ? [...allowedLotteries] : ALL_AVAILABLE_LOTTERIES.map((l) => l.id),
@@ -575,7 +591,7 @@ export default function LicensesManager() {
       editingCardsPerScreen === "TODAS" ? "Todas" : `${editingCardsPerScreen} por pantalla`;
     const voiceLabel = editingVoiceConfig.enabled ? "Voz Activa" : "Voz Silenciada";
     const fsLabel = editingFullscreenAuto ? "Pantalla Completa AUTO" : "Pantalla Normal";
-    await runLicenseAction(
+    const ok = await runLicenseAction(
       {
         type: "update_lotteries",
         id: editingLicense.id,
@@ -583,7 +599,10 @@ export default function LicensesManager() {
       },
       `Configuración actualizada para ${cleanName} (${editingLotteries.length}/${ALL_AVAILABLE_LOTTERIES.length} loterías · ${cardsLabel} · ${voiceLabel} · ${fsLabel})`,
     );
-    setEditingLicense(null);
+    if (ok) {
+      setEditingLicense(null);
+      setModalCloudError(null);
+    }
   };
 
   const handleQuickChangeCardsPerScreen = async (
@@ -739,7 +758,7 @@ export default function LicensesManager() {
     const cleanPin = pinCode.replace(/[^0-9]/g, "").slice(0, 6) || generateRandomPin();
     const newId = generateLicenseUuid();
 
-    await runLicenseAction(
+    const ok = await runLicenseAction(
       {
         type: "create",
         id: newId,
@@ -751,17 +770,19 @@ export default function LicensesManager() {
       },
       `Licencia creada para ${clientName.trim()} (${formLotteries.length}/${ALL_AVAILABLE_LOTTERIES.length} loterías · ${cardsLabel} · ${formTransitionSeconds}s rotación · ${days ? `${days} ${days === 1 ? "día" : "días"}` : "Permanente"})`,
     );
-    setClientName("");
-    setPinCode(generateRandomPin());
-    setNotes("");
-    setDurationDays("30");
-    setFormLotteries(ALL_AVAILABLE_LOTTERIES.map((l) => l.id));
-    setFormCardsPerScreen(DEFAULT_CARDS_PER_SCREEN);
-    setFormTransitionSeconds(DEFAULT_TRANSITION_SECONDS);
-    setFormVoiceConfig(DEFAULT_CLIENT_VOICE_CONFIG);
-    setFormCardStyle("global");
-    setFormFullscreenAuto(false);
-    setShowForm(false);
+    if (ok) {
+      setClientName("");
+      setPinCode(generateRandomPin());
+      setNotes("");
+      setDurationDays("30");
+      setFormLotteries(ALL_AVAILABLE_LOTTERIES.map((l) => l.id));
+      setFormCardsPerScreen(DEFAULT_CARDS_PER_SCREEN);
+      setFormTransitionSeconds(DEFAULT_TRANSITION_SECONDS);
+      setFormVoiceConfig(DEFAULT_CLIENT_VOICE_CONFIG);
+      setFormCardStyle("global");
+      setFormFullscreenAuto(false);
+      setShowForm(false);
+    }
   };
 
   const handleCopyPin = (lic: ClientLicense) => {
@@ -920,6 +941,31 @@ export default function LicensesManager() {
           </div>
         </div>
       </div>
+
+      {cloudErrorAlert && (
+        <div
+          role="alert"
+          className="bg-red-950/85 border border-red-500/70 text-red-100 px-4 py-3.5 rounded-xl text-xs space-y-1.5 shadow-lg"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-2 font-bold text-red-300">
+              <AlertTriangle className="w-4 h-4 shrink-0 text-red-400" />
+              <span>Error de persistencia en la nube (guardado local bloqueado)</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setCloudErrorAlert(null)}
+              className="text-red-300 hover:text-white text-xs font-bold shrink-0 cursor-pointer"
+              aria-label="Cerrar alerta de error"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <p className="font-mono text-[11px] leading-relaxed text-red-100 bg-red-950/90 border border-red-800/70 rounded-lg px-3 py-2 break-words">
+            {cloudErrorAlert}
+          </p>
+        </div>
+      )}
 
       {feedbackMsg && (
         <div className="bg-blue-950/60 border border-blue-700/60 text-blue-200 px-4 py-2.5 rounded-xl text-xs font-medium flex items-center justify-between">
@@ -2248,10 +2294,26 @@ export default function LicensesManager() {
               </div>
             </div>
 
+            {modalCloudError && (
+              <div
+                role="alert"
+                className="bg-red-950/85 border border-red-500/70 text-red-100 px-3.5 py-2.5 rounded-xl text-xs space-y-1"
+              >
+                <div className="flex items-center gap-1.5 font-bold text-red-300">
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-red-400" />
+                  <span>No se pudo guardar en la nube:</span>
+                </div>
+                <p className="font-mono text-[11px] break-words text-red-100">{modalCloudError}</p>
+              </div>
+            )}
+
             <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-800">
               <button
                 type="button"
-                onClick={() => setEditingLicense(null)}
+                onClick={() => {
+                  setEditingLicense(null);
+                  setModalCloudError(null);
+                }}
                 className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition cursor-pointer"
               >
                 Cancelar

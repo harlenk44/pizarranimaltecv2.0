@@ -2,6 +2,7 @@ import "./lib/error-capture";
 
 import { consumeLastCapturedError, isBenignAbortError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
+import { runWithCloudflareEnv } from "./lib/cloudflare-env.server";
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
@@ -54,19 +55,21 @@ function isH3SwallowedErrorBody(body: string): boolean {
 
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
-    try {
-      const handler = await getServerEntry();
-      const response = await handler.fetch(request, env, ctx);
-      return await normalizeCatastrophicSsrResponse(response, request);
-    } catch (error) {
-      if (isBenignAbortError(error) || request.signal?.aborted) {
-        return new Response(null, { status: 204 });
+    return await runWithCloudflareEnv(env, async () => {
+      try {
+        const handler = await getServerEntry();
+        const response = await handler.fetch(request, env, ctx);
+        return await normalizeCatastrophicSsrResponse(response, request);
+      } catch (error) {
+        if (isBenignAbortError(error) || request.signal?.aborted) {
+          return new Response(null, { status: 204 });
+        }
+        console.error(error);
+        return new Response(renderErrorPage(), {
+          status: 500,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
       }
-      console.error(error);
-      return new Response(renderErrorPage(), {
-        status: 500,
-        headers: { "content-type": "text/html; charset=utf-8" },
-      });
-    }
+    });
   },
 };

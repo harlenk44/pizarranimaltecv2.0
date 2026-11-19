@@ -18,8 +18,12 @@ import fs from "fs";
 import path from "path";
 import {
   supabaseAdmin,
+  createRealSupabaseAdminClient,
   createSupabaseClientWithToken,
+  getSupabaseCloudDiagnostics,
+  type SupabaseCloudDiagnostics,
 } from "@/integrations/supabase/client.server";
+import { getBoundCloudflareKv } from "@/lib/cloudflare-env.server";
 import { toSupabaseLicenseUuid, generateLicenseUuid, isValidUuid } from "@/lib/license-lotteries";
 import { resolveCanonicalAnimal, parseCanonicalAnimalNumber } from "@/lib/official-animals";
 import { getGameLogo, isBrokenExternalLogo, isCustomUploadedGameLogo } from "@/lib/game-logos";
@@ -228,11 +232,100 @@ function parseRequireFromMasterNotes(notes?: string | null): boolean | null {
   return null;
 }
 
+const KV_LICENSES_KEY = "pizarra_client_licenses_v2";
+let lastCloudLicenseReadError: string | null = null;
+
+function formatSupabaseLicenseError(
+  err:
+    | {
+        code?: string | null;
+        message?: string | null;
+        details?: string | null;
+        hint?: string | null;
+      }
+    | string,
+  diag?: SupabaseCloudDiagnostics,
+): string {
+  if (typeof err === "string") return err;
+  const code = err.code ? `[${err.code}] ` : "";
+  const msg = err.message || "Error desconocido de Supabase";
+  const extra = [err.details, err.hint].filter(Boolean).join(" · ");
+  const full = `${code}${msg}${extra ? ` (${extra})` : ""}`;
+  const lower = full.toLowerCase();
+  if (
+    err.code === "42501" ||
+    lower.includes("row-level security") ||
+    lower.includes("permission denied")
+  ) {
+    const keyHint =
+      diag && !diag.hasServiceRoleKey
+        ? " Falta configurar SUPABASE_SERVICE_ROLE_KEY en Cloudflare Pages (solo está la clave pública/anon y las políticas RLS bloquean la escritura)."
+        : " Verifica las políticas RLS de la tabla client_licenses.";
+    return `${full}.${keyHint}`;
+  }
+  return full;
+}
+
+async function readLicensesFromCloudflareKv(): Promise<ServerLicenseState | null> {
+  const kv = getBoundCloudflareKv();
+  if (!kv) return null;
+  try {
+    const raw = await kv.get(KV_LICENSES_KEY, "text");
+    if (typeof raw === "string" && raw.trim()) {
+      const parsed = JSON.parse(raw) as Partial<ServerLicenseState>;
+      if (parsed && Array.isArray(parsed.licenses)) {
+        return {
+          requireLicense: Boolean(parsed.requireLicense),
+          licenses: parsed.licenses,
+          deletedIds: Array.isArray(parsed.deletedIds) ? parsed.deletedIds : [],
+          deletedPins: Array.isArray(parsed.deletedPins) ? parsed.deletedPins : [],
+        };
+      }
+    }
+  } catch {
+    // ignore KV read failure
+  }
+  return null;
+}
+
+async function writeLicensesToCloudflareKv(
+  state: ServerLicenseState,
+): Promise<{ ok: boolean; error?: string }> {
+  const kv = getBoundCloudflareKv();
+  if (!kv) return { ok: false, error: "Sin KV vinculado" };
+  try {
+    await kv.put(KV_LICENSES_KEY, JSON.stringify(state));
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 async function upsertLicenseRowToSupabase(
   lic: ClientLicense,
   notesOverride?: string,
   authBearerToken?: string | null,
 ): Promise<{ ok: boolean; error?: string; resolvedId?: string }> {
+  const diag = getSupabaseCloudDiagnostics();
+  const realClient = createRealSupabaseAdminClient();
+  const hasKv = Boolean(getBoundCloudflareKv());
+
+  if (!realClient) {
+    if (hasKv) {
+      const kvRes = await writeLicensesToCloudflareKv(serverLicenseState);
+      if (kvRes.ok) {
+        return { ok: true, resolvedId: lic.id };
+      }
+      return { ok: false, error: kvRes.error || "Error guardando en Cloudflare KV" };
+    }
+    return {
+      ok: false,
+      error:
+        diag.reason ||
+        "No hay base de datos en la nube configurada (configura SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY en Cloudflare Pages).",
+    };
+  }
+
   const sbId = toSupabaseLicenseUuid(lic.id, lic.pin_code);
   const payload = {
     id: sbId,
@@ -247,16 +340,19 @@ async function upsertLicenseRowToSupabase(
   };
 
   const runUpsert = async (
-    client: typeof supabaseAdmin,
+    client: NonNullable<typeof realClient>,
   ): Promise<{ ok: boolean; error?: string; resolvedId?: string }> => {
     try {
       let targetId = sbId;
       if (lic.pin_code) {
-        const { data: existingByPin } = await client
+        const { data: existingByPin, error: selectErr } = await client
           .from("client_licenses")
           .select("id")
           .eq("pin_code", lic.pin_code)
           .maybeSingle();
+        if (selectErr) {
+          return { ok: false, error: formatSupabaseLicenseError(selectErr, diag) };
+        }
         if (
           existingByPin &&
           typeof existingByPin.id === "string" &&
@@ -266,16 +362,29 @@ async function upsertLicenseRowToSupabase(
         }
       }
 
-      const { error } = await client
+      const { data: upsertedRows, error } = await client
         .from("client_licenses")
-        .upsert({ ...payload, id: targetId }, { onConflict: "id" });
-      if (!error) {
-        return { ok: true, resolvedId: targetId };
+        .upsert({ ...payload, id: targetId }, { onConflict: "id" })
+        .select("id");
+      if (!error && Array.isArray(upsertedRows) && upsertedRows.length > 0) {
+        return { ok: true, resolvedId: upsertedRows[0]?.id || targetId };
       }
 
-      // If id conflict or UUID mismatch occurred, retry insert without id or update by pin_code
-      if (error.code === "22P02" && lic.pin_code) {
-        const { error: updateErr } = await client
+      if (!error && (!upsertedRows || upsertedRows.length === 0)) {
+        return {
+          ok: false,
+          error: formatSupabaseLicenseError(
+            {
+              code: "42501",
+              message: "Supabase no confirmó filas guardadas en client_licenses",
+            },
+            diag,
+          ),
+        };
+      }
+
+      if ((error?.code === "22P02" || error?.code === "23505") && lic.pin_code) {
+        const { data: updatedRows, error: updateErr } = await client
           .from("client_licenses")
           .update({
             client_name: payload.client_name,
@@ -285,31 +394,41 @@ async function upsertLicenseRowToSupabase(
             bound_device_ids: payload.bound_device_ids,
             notes: payload.notes,
           })
-          .eq("pin_code", lic.pin_code);
-        if (!updateErr) {
-          return { ok: true, resolvedId: targetId };
+          .eq("pin_code", lic.pin_code)
+          .select("id");
+        if (!updateErr && Array.isArray(updatedRows) && updatedRows.length > 0) {
+          return { ok: true, resolvedId: updatedRows[0]?.id || targetId };
+        }
+        if (updateErr) {
+          return { ok: false, error: formatSupabaseLicenseError(updateErr, diag) };
         }
       }
-      return { ok: false, error: error.message };
+      return { ok: false, error: formatSupabaseLicenseError(error || "Error al guardar", diag) };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
   };
 
-  const adminRes = await runUpsert(supabaseAdmin);
-  if (adminRes.ok) return adminRes;
-
-  if (authBearerToken) {
+  let res = await runUpsert(realClient);
+  if (!res.ok && authBearerToken) {
     const authClient = createSupabaseClientWithToken(authBearerToken);
     if (authClient) {
-      const authRes = await runUpsert(authClient as unknown as typeof supabaseAdmin);
-      if (authRes.ok) return authRes;
-      return authRes;
+      const authRes = await runUpsert(authClient);
+      if (authRes.ok) {
+        res = authRes;
+      } else if (authRes.error) {
+        res = authRes;
+      }
     }
   }
 
-  console.warn("[supabase-license-upsert-warn]", adminRes.error);
-  return adminRes;
+  if (res.ok && hasKv) {
+    await writeLicensesToCloudflareKv(serverLicenseState);
+  }
+  if (!res.ok) {
+    console.warn("[supabase-license-upsert-warn]", res.error);
+  }
+  return res;
 }
 
 async function deleteLicenseRowFromSupabase(
@@ -317,9 +436,27 @@ async function deleteLicenseRowFromSupabase(
   pinCode?: string | null,
   authBearerToken?: string | null,
 ): Promise<{ ok: boolean; error?: string }> {
+  const diag = getSupabaseCloudDiagnostics();
+  const realClient = createRealSupabaseAdminClient();
+  const hasKv = Boolean(getBoundCloudflareKv());
+
+  if (!realClient) {
+    if (hasKv) {
+      const kvRes = await writeLicensesToCloudflareKv(serverLicenseState);
+      if (kvRes.ok) return { ok: true };
+      return { ok: false, error: kvRes.error || "Error eliminando en Cloudflare KV" };
+    }
+    return {
+      ok: false,
+      error:
+        diag.reason ||
+        "No hay base de datos en la nube configurada (configura SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY en Cloudflare Pages).",
+    };
+  }
+
   const sbId = toSupabaseLicenseUuid(id, pinCode);
   const runDelete = async (
-    client: typeof supabaseAdmin,
+    client: NonNullable<typeof realClient>,
   ): Promise<{ ok: boolean; error?: string }> => {
     try {
       const targetIds = Array.from(
@@ -327,11 +464,11 @@ async function deleteLicenseRowFromSupabase(
       ) as string[];
       for (const tid of targetIds) {
         const { error } = await client.from("client_licenses").delete().eq("id", tid);
-        if (error) return { ok: false, error: error.message };
+        if (error) return { ok: false, error: formatSupabaseLicenseError(error, diag) };
       }
       if (pinCode) {
         const { error } = await client.from("client_licenses").delete().eq("pin_code", pinCode);
-        if (error) return { ok: false, error: error.message };
+        if (error) return { ok: false, error: formatSupabaseLicenseError(error, diag) };
       }
       return { ok: true };
     } catch (err) {
@@ -339,19 +476,21 @@ async function deleteLicenseRowFromSupabase(
     }
   };
 
-  const adminRes = await runDelete(supabaseAdmin);
-  if (adminRes.ok) return adminRes;
-
-  if (authBearerToken) {
+  let res = await runDelete(realClient);
+  if (!res.ok && authBearerToken) {
     const authClient = createSupabaseClientWithToken(authBearerToken);
     if (authClient) {
-      const authRes = await runDelete(authClient as unknown as typeof supabaseAdmin);
-      if (authRes.ok) return authRes;
-      return authRes;
+      const authRes = await runDelete(authClient);
+      if (authRes.ok || authRes.error) {
+        res = authRes;
+      }
     }
   }
 
-  return adminRes;
+  if (res.ok && hasKv) {
+    await writeLicensesToCloudflareKv(serverLicenseState);
+  }
+  return res;
 }
 
 export async function syncLicensesWithSupabase(force = false): Promise<void> {
@@ -364,9 +503,30 @@ export async function syncLicensesWithSupabase(force = false): Promise<void> {
   }
 
   const run = (async () => {
+    const diag = getSupabaseCloudDiagnostics();
+    const realClient = createRealSupabaseAdminClient();
+
+    if (!realClient) {
+      const kvState = await readLicensesFromCloudflareKv();
+      if (kvState) {
+        serverLicenseState = kvState;
+        lastCloudLicenseReadError = null;
+        lastLicensesCloudSyncAt = Date.now();
+        saveServerLicenses();
+      } else {
+        lastCloudLicenseReadError = diag.reason;
+      }
+      return;
+    }
+
     try {
-      const { data, error } = await supabaseAdmin.from("client_licenses").select("*");
-      if (!error && Array.isArray(data)) {
+      const { data, error } = await realClient.from("client_licenses").select("*");
+      if (error) {
+        lastCloudLicenseReadError = formatSupabaseLicenseError(error, diag);
+        return;
+      }
+      if (Array.isArray(data)) {
+        lastCloudLicenseReadError = null;
         lastLicensesCloudSyncAt = Date.now();
         const mapped: ClientLicense[] = data.map((d: Record<string, unknown>) => ({
           id: String(d["id"]),
@@ -394,8 +554,6 @@ export async function syncLicensesWithSupabase(force = false): Promise<void> {
         }
 
         if (mapped.length > 0) {
-          // Supabase has records: treat Supabase as authoritative across stateless isolates,
-          // while respecting mutations performed in THIS isolate in the last few seconds.
           for (const sLic of mapped) {
             if (deletedSet.has(sLic.id) || deletedPinSet.has(sLic.pin_code)) {
               if (isRecentLocalLicenseMutation(sLic.id)) {
@@ -437,7 +595,6 @@ export async function syncLicensesWithSupabase(force = false): Promise<void> {
             }
           }
 
-          // Preserve any recently created license from THIS isolate not yet returned by Supabase
           for (const lic of serverLicenseState.licenses) {
             if (
               !mergedMap.has(lic.id) &&
@@ -451,7 +608,6 @@ export async function syncLicensesWithSupabase(force = false): Promise<void> {
             }
           }
         } else {
-          // Empty Supabase table: seed current state (first initialization)
           for (const lic of serverLicenseState.licenses) {
             if (
               !deletedSet.has(lic.id) &&
@@ -465,7 +621,6 @@ export async function syncLicensesWithSupabase(force = false): Promise<void> {
           }
         }
 
-        // Ensure master PIN is always present
         if (!Array.from(mergedMap.values()).some((l) => l.pin_code === "291007")) {
           const masterLic: ClientLicense = {
             id: toSupabaseLicenseUuid("lic-master-admin", "291007"),
@@ -498,9 +653,12 @@ export async function syncLicensesWithSupabase(force = false): Promise<void> {
         );
         serverLicenseState.licenses = nextLicenses;
         saveServerLicenses();
+        if (diag.hasKvBinding) {
+          await writeLicensesToCloudflareKv(serverLicenseState);
+        }
       }
-    } catch {
-      // If Supabase table isn't created yet or network is offline, rely on persistent state
+    } catch (err) {
+      lastCloudLicenseReadError = err instanceof Error ? err.message : String(err);
     } finally {
       licensesCloudSyncPromise = null;
     }
@@ -1480,6 +1638,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
           };
         }
 
+        const cloudDiag = getSupabaseCloudDiagnostics();
         return noStoreJson({
           status: "ok",
           serverLotteryDate: serverToday,
@@ -1500,6 +1659,10 @@ export const Route = createFileRoute("/api/public/results/sync")({
           clientLicenses: isPoll ? null : serverLicenseState.licenses,
           deletedIds: isPoll ? null : serverLicenseState.deletedIds || [],
           deletedPins: isPoll ? null : serverLicenseState.deletedPins || [],
+          cloudLicenseConfigured: cloudDiag.configured || cloudDiag.hasKvBinding,
+          cloudLicenseError:
+            lastCloudLicenseReadError ||
+            (!cloudDiag.configured && !cloudDiag.hasKvBinding ? cloudDiag.reason : null),
         });
       },
       POST: async ({ request }) => {
@@ -1570,9 +1733,13 @@ export const Route = createFileRoute("/api/public/results/sync")({
           } | null = null;
 
           const authHeader = request.headers.get("authorization") || "";
-          const bearerToken = authHeader.toLowerCase().startsWith("bearer ")
+          const rawToken = authHeader.toLowerCase().startsWith("bearer ")
             ? authHeader.slice(7).trim()
             : null;
+          const bearerToken =
+            rawToken && !rawToken.startsWith("mock-token-") && rawToken.split(".").length === 3
+              ? rawToken
+              : null;
           let cloudLicenseSyncOk: boolean | null = null;
           let cloudLicenseError: string | null = null;
           const trackCloudResult = (res: { ok: boolean; error?: string }) => {
@@ -1582,6 +1749,21 @@ export const Route = createFileRoute("/api/public/results/sync")({
 
           if (licenseAction && typeof licenseAction === "object") {
             await syncLicensesWithSupabase(true);
+            const prevLicenseSnapshot = JSON.parse(
+              JSON.stringify(serverLicenseState),
+            ) as ServerLicenseState;
+            const prevMutationKeys = new Set(recentLocalLicenseMutations.keys());
+            const rollbackIfCloudFailed = (isAdminMutation: boolean) => {
+              if (isAdminMutation && cloudLicenseSyncOk === false) {
+                serverLicenseState = prevLicenseSnapshot;
+                for (const key of Array.from(recentLocalLicenseMutations.keys())) {
+                  if (!prevMutationKeys.has(key)) {
+                    recentLocalLicenseMutations.delete(key);
+                  }
+                }
+                saveServerLicenses();
+              }
+            };
             const act = licenseAction as {
               type: string;
               requireLicense?: boolean;
@@ -1887,6 +2069,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 bearerToken,
               );
               trackCloudResult(cloudRes);
+              rollbackIfCloudFailed(true);
             } else if (act.type === "activate_pin") {
               const cleanPin = (act.pin_code || "").replace(/[^0-9]/g, "");
               const devId = (act.device_id || "TV-DEFAULT").trim();
@@ -1912,9 +2095,10 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 let match = serverLicenseState.licenses.find((l) => l.pin_code === cleanPin);
 
                 // Direct Supabase lookup fallback if cold isolate didn't list it yet
-                if (!match && cleanPin) {
+                const realClient = createRealSupabaseAdminClient();
+                if (!match && cleanPin && realClient) {
                   try {
-                    const { data: directRow } = await supabaseAdmin
+                    const { data: directRow } = await realClient
                       .from("client_licenses")
                       .select("*")
                       .eq("pin_code", cleanPin)
@@ -1946,7 +2130,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
                   }
                 }
 
-                // Fallback for stateless Cloudflare isolates when created locally before Supabase sync
+                // Fallback only if client explicitly supplied an existing cloud-synced record and server hasn't deleted it
                 if (
                   !match &&
                   act.fallbackLicense &&
@@ -1964,7 +2148,8 @@ export const Route = createFileRoute("/api/public/results/sync")({
                   serverLicenseState.licenses.unshift(match);
                   markLocalLicenseMutation(match.id);
                   saveServerLicenses();
-                  await upsertLicenseRowToSupabase(match, undefined, bearerToken);
+                  const cloudRes = await upsertLicenseRowToSupabase(match, undefined, bearerToken);
+                  trackCloudResult(cloudRes);
                 }
 
                 if (!match) {
@@ -1994,7 +2179,14 @@ export const Route = createFileRoute("/api/public/results/sync")({
                       match.bound_device_ids.push(devId);
                       markLocalLicenseMutation(match.id);
                       saveServerLicenses();
-                      await upsertLicenseRowToSupabase(match, undefined, bearerToken);
+                      const cloudRes = await upsertLicenseRowToSupabase(
+                        match,
+                        undefined,
+                        bearerToken,
+                      );
+                      trackCloudResult(cloudRes);
+                    } else {
+                      cloudLicenseSyncOk = true;
                     }
                     licenseActivation = {
                       valid: true,
@@ -2003,6 +2195,14 @@ export const Route = createFileRoute("/api/public/results/sync")({
                   }
                 }
               }
+            }
+
+            if (
+              act.type !== "activate_pin" &&
+              act.type !== "restore_batch" &&
+              cloudLicenseSyncOk === false
+            ) {
+              rollbackIfCloudFailed(true);
             }
           }
 
