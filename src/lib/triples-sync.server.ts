@@ -8,9 +8,9 @@ import { lotteryDate } from "@/lib/lottery-date";
 
 export const LOTERIADEHOY_TRIPLES_URL = "https://loteriadehoy.com/loterias/resultados/";
 export const TUAZAR_TRIPLES_PRIMARY_URL = "https://tuazar.com/loteria/resultados/";
-export const TUAZAR_TRIPLES_FALLBACK_URL = "https://www.tuazar.com/loteria/resultados/";
+export const TUAZAR_TRIPLES_FALLBACK_URL = "https://casino.tuazar.com/loteria/resultados";
 
-const FETCH_TIMEOUT_MS = 10_000;
+const FETCH_TIMEOUT_MS = 15_000;
 
 const BROWSER_HEADERS: Record<string, string> = {
   "User-Agent":
@@ -20,7 +20,39 @@ const BROWSER_HEADERS: Record<string, string> = {
   "Cache-Control": "no-cache",
 };
 
-async function fetchHtmlWithTimeout(url: string): Promise<string> {
+function isTransientFetchError(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 4 && current && typeof current === "object"; depth++) {
+    const e = current as { name?: unknown; message?: unknown; code?: unknown; cause?: unknown };
+    const name = typeof e.name === "string" ? e.name : "";
+    const msg = typeof e.message === "string" ? e.message.toLowerCase() : "";
+    const code = typeof e.code === "string" ? e.code.toUpperCase() : "";
+    if (
+      name === "AbortError" ||
+      name === "ConnectTimeoutError" ||
+      name === "HeadersTimeoutError" ||
+      name === "BodyTimeoutError" ||
+      name === "SocketError" ||
+      code.startsWith("UND_ERR_") ||
+      code === "ETIMEDOUT" ||
+      code === "ECONNRESET" ||
+      code === "ECONNREFUSED" ||
+      code === "EAI_AGAIN" ||
+      code === "ENETUNREACH" ||
+      code === "EHOSTUNREACH" ||
+      code === "EPIPE" ||
+      msg.includes("operation was aborted") ||
+      msg.includes("connect timeout") ||
+      msg === "fetch failed"
+    ) {
+      return true;
+    }
+    current = e.cause;
+  }
+  return false;
+}
+
+async function fetchHtmlOnce(url: string): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
@@ -36,12 +68,25 @@ async function fetchHtmlWithTimeout(url: string): Promise<string> {
   }
 }
 
+async function fetchHtmlWithTimeout(url: string): Promise<string> {
+  try {
+    return await fetchHtmlOnce(url);
+  } catch (err) {
+    if (isTransientFetchError(err)) {
+      return await fetchHtmlOnce(url);
+    }
+    throw err;
+  }
+}
+
 export async function fetchLoteriaDeHoyTriples(drawDate: string): Promise<TripleResult[]> {
   try {
     const html = await fetchHtmlWithTimeout(LOTERIADEHOY_TRIPLES_URL);
     return parseLoteriaDeHoyTriplesHtml(html, drawDate);
   } catch (err) {
-    console.warn("[triples-sync] LoteriaDeHoy fetch failed:", err);
+    if (!isTransientFetchError(err)) {
+      console.warn("[triples-sync] LoteriaDeHoy fetch failed:", err);
+    }
     return [];
   }
 }
@@ -55,7 +100,9 @@ export async function fetchTuAzarTriples(drawDate: string): Promise<TripleResult
       const fallbackHtml = await fetchHtmlWithTimeout(TUAZAR_TRIPLES_FALLBACK_URL);
       return parseTuazarTriplesHtml(fallbackHtml, drawDate);
     } catch (fallbackErr) {
-      console.warn("[triples-sync] TuAzar fetch failed:", primaryErr, fallbackErr);
+      if (!isTransientFetchError(primaryErr) && !isTransientFetchError(fallbackErr)) {
+        console.warn("[triples-sync] TuAzar fetch failed:", primaryErr, fallbackErr);
+      }
       return [];
     }
   }

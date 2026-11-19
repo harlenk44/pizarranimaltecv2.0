@@ -42,6 +42,7 @@ export interface LicenseContextValue {
   transitionSeconds: number;
   voiceConfig: ClientVoiceConfig | null;
   designConfig: ClientDesignConfig | null;
+  fullscreenAuto: boolean;
   isGameAllowed: (gameIdOrSlug?: string | null) => boolean;
 }
 
@@ -53,6 +54,7 @@ export const LicenseContext = createContext<LicenseContextValue>({
   transitionSeconds: DEFAULT_TRANSITION_SECONDS,
   voiceConfig: null,
   designConfig: null,
+  fullscreenAuto: false,
   isGameAllowed: () => true,
 });
 
@@ -209,7 +211,7 @@ export default function LicenseGate({
   const syncLicenseState = useCallback(async () => {
     try {
       const [res] = await Promise.all([
-        fetch("/api/public/results/sync"),
+        fetch("/api/public/results/sync", { cache: "no-store" }),
         ensureCustomCatalogLoaded().catch(() => {}),
       ]);
       if (res.ok) {
@@ -229,6 +231,7 @@ export default function LicenseGate({
             data.clientLicenses,
             data.deletedIds,
             data.deletedPins,
+            { allowOverrideServer: false },
           );
           const nextJson = JSON.stringify(reconciled.licenses);
           if (lastLicensesJsonRef.current !== nextJson) {
@@ -236,19 +239,6 @@ export default function LicenseGate({
             setLicenses(reconciled.licenses);
           }
           saveLocalLicensesSnapshot(nextRequire, reconciled.licenses);
-
-          if (reconciled.needsServerSync.length > 0) {
-            fetch("/api/public/results/sync", {
-              method: "PUT",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                licenseAction: {
-                  type: "restore_batch",
-                  licenses: reconciled.needsServerSync,
-                },
-              }),
-            }).catch(() => {});
-          }
         }
       }
     } catch {
@@ -298,11 +288,22 @@ export default function LicenseGate({
     const handleLocalLicenseEvent = () => {
       syncLicenseState();
     };
+    const handleStorage = (e: StorageEvent) => {
+      if (
+        e.key === LICENSE_CACHE_STORAGE_KEY ||
+        e.key === "pizarra_license_overrides_v3" ||
+        e.key === "pizarra_client_licenses_cache_v2"
+      ) {
+        syncLicenseState();
+      }
+    };
     window.addEventListener("pizarra:licenses-updated", handleLocalLicenseEvent);
+    window.addEventListener("storage", handleStorage);
     return () => {
       clearInterval(timer);
       bc?.close();
       window.removeEventListener("pizarra:licenses-updated", handleLocalLicenseEvent);
+      window.removeEventListener("storage", handleStorage);
     };
   }, [syncLicenseState]);
 
@@ -373,6 +374,7 @@ export default function LicenseGate({
     parsedLicenseInfo?.transitionSeconds ?? DEFAULT_TRANSITION_SECONDS;
   const voiceConfig = parsedLicenseInfo?.voiceConfig ?? null;
   const designConfig = parsedLicenseInfo?.designConfig ?? null;
+  const fullscreenAuto = parsedLicenseInfo?.fullscreenAuto ?? false;
 
   const isGameAllowed = useCallback(
     (gameIdOrSlug?: string | null) => {
@@ -390,6 +392,7 @@ export default function LicenseGate({
       transitionSeconds,
       voiceConfig,
       designConfig,
+      fullscreenAuto,
       isGameAllowed,
     }),
     [
@@ -400,6 +403,7 @@ export default function LicenseGate({
       transitionSeconds,
       voiceConfig,
       designConfig,
+      fullscreenAuto,
       isGameAllowed,
     ],
   );
@@ -420,6 +424,7 @@ export default function LicenseGate({
             type: "activate_pin",
             pin_code: matchedLicense.pin_code,
             device_id: deviceId,
+            fallbackLicense: matchedLicense,
           },
         }),
       })
@@ -430,6 +435,7 @@ export default function LicenseGate({
               data.clientLicenses,
               data.deletedIds,
               data.deletedPins,
+              { allowOverrideServer: false },
             );
             setLicenses(reconciled.licenses);
           }
@@ -497,6 +503,7 @@ export default function LicenseGate({
     }
 
     try {
+      const localCandidate = licenses.find((l) => l.pin_code === cleanPin);
       const res = await fetch("/api/public/results/sync", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -505,6 +512,7 @@ export default function LicenseGate({
             type: "activate_pin",
             pin_code: cleanPin,
             device_id: deviceId,
+            ...(localCandidate ? { fallbackLicense: localCandidate } : {}),
           },
         }),
       });
@@ -516,7 +524,9 @@ export default function LicenseGate({
             data.clientLicenses,
             data.deletedIds,
             data.deletedPins,
+            { allowOverrideServer: false },
           );
+          lastLicensesJsonRef.current = JSON.stringify(reconciled.licenses);
           setLicenses(reconciled.licenses);
           saveLocalLicensesSnapshot(requireLicense, reconciled.licenses);
         }

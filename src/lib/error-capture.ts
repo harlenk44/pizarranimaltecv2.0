@@ -52,13 +52,20 @@ function isErrorLike(value: unknown): value is Error {
 export function isBenignAbortError(error: unknown): boolean {
   let current: unknown = error;
   for (let depth = 0; depth < CAUSE_DEPTH_LIMIT && current != null; depth++) {
-    if (current instanceof Error) {
-      const msg = (current.message || "").trim().toLowerCase();
-      const name = (current.name || "").trim().toLowerCase();
-      const code = String((current as { code?: unknown }).code ?? "").toUpperCase();
+    if (typeof current === "object") {
+      const errObj = current as {
+        message?: unknown;
+        name?: unknown;
+        code?: unknown;
+        cause?: unknown;
+      };
+      const msg = typeof errObj.message === "string" ? errObj.message.trim().toLowerCase() : "";
+      const name = typeof errObj.name === "string" ? errObj.name.trim().toLowerCase() : "";
+      const code = String(errObj.code ?? "").toUpperCase();
       if (
         msg === "aborted" ||
         msg === "the operation was aborted" ||
+        msg === "this operation was aborted" ||
         msg === "request aborted" ||
         msg.includes("premature close") ||
         name === "aborterror" ||
@@ -68,10 +75,16 @@ export function isBenignAbortError(error: unknown): boolean {
       ) {
         return true;
       }
-      current = current.cause;
+      current = errObj.cause;
     } else if (typeof current === "string") {
       const lower = current.trim().toLowerCase();
-      if (lower === "aborted" || lower === "error: aborted") return true;
+      if (
+        lower === "aborted" ||
+        lower === "error: aborted" ||
+        lower.includes("aborterror: this operation was aborted")
+      ) {
+        return true;
+      }
       break;
     } else {
       break;
@@ -85,7 +98,9 @@ export function isBenignAbortError(error: unknown): boolean {
 // recorded for consumeLastCapturedError and expanded before serialization.
 const originalConsoleError = console.error.bind(console);
 console.error = (...args: unknown[]) => {
-  if (args.some((arg) => isBenignAbortError(arg))) {
+  const benignArg = args.find((arg) => isBenignAbortError(arg));
+  if (benignArg !== undefined) {
+    record(benignArg);
     return;
   }
   const expanded = args.map((arg) => {

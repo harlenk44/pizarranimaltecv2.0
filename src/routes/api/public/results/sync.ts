@@ -187,102 +187,212 @@ function saveServerLicenses() {
   }
 }
 
-export async function syncLicensesWithSupabase() {
-  try {
-    const { data, error } = await supabaseAdmin.from("client_licenses").select("*");
-    if (!error && Array.isArray(data)) {
-      const mapped: ClientLicense[] = data.map((d: Record<string, unknown>) => ({
-        id: String(d["id"]),
-        client_name: String(d["client_name"] || "Cliente"),
-        pin_code: String(d["pin_code"] || ""),
-        status: d["status"] === "paused" ? "paused" : "active",
-        expires_at: d["expires_at"] ? new Date(d["expires_at"] as string).toISOString() : null,
-        max_devices: Number(d["max_devices"]) || 1,
-        bound_device_ids: Array.isArray(d["bound_device_ids"])
-          ? (d["bound_device_ids"] as string[])
-          : [],
-        notes: typeof d["notes"] === "string" ? d["notes"] : "",
-        created_at: d["created_at"]
-          ? new Date(d["created_at"] as string).toISOString()
-          : new Date().toISOString(),
-      }));
+const CLOUD_SYNC_TTL_MS = 3000;
+const LOCAL_MUTATION_GRACE_MS = 8000;
+let lastLicensesCloudSyncAt = 0;
+let licensesCloudSyncPromise: Promise<void> | null = null;
+const recentLocalLicenseMutations = new Map<string, number>();
 
-      // Safe bidirectional merge: combine Supabase and local persistent licenses by ID or PIN
-      const deletedSet = new Set<string>(serverLicenseState.deletedIds || []);
-      const deletedPinSet = new Set<string>(serverLicenseState.deletedPins || []);
-      const mergedMap = new Map<string, ClientLicense>();
-      // 1. Retain all local persistent licenses (excluding deleted ones)
-      for (const lic of serverLicenseState.licenses) {
-        if (!deletedSet.has(lic.id) && !deletedPinSet.has(lic.pin_code)) {
-          mergedMap.set(lic.id, lic);
-        }
-      }
-      // 2. Merge records from Supabase
-      for (const sLic of mapped) {
-        if (deletedSet.has(sLic.id) || deletedPinSet.has(sLic.pin_code)) {
-          // Permanently cleanup deleted license from Supabase as well
-          supabaseAdmin
-            .from("client_licenses")
-            .delete()
-            .eq("id", sLic.id)
-            .catch(() => {});
-          continue;
-        }
-        const existing =
-          mergedMap.get(sLic.id) ||
-          Array.from(mergedMap.values()).find((l) => l.pin_code === sLic.pin_code);
-        if (existing) {
-          // Local server state (e.g. paused, renewed) has priority over Supabase's older status
-          mergedMap.set(existing.id, {
-            ...sLic,
-            ...existing,
-            bound_device_ids: Array.from(
-              new Set([...existing.bound_device_ids, ...sLic.bound_device_ids]),
-            ),
-          });
-        } else {
-          mergedMap.set(sLic.id, sLic);
-        }
-      }
-      // 3. Ensure master PIN is always present
-      if (!Array.from(mergedMap.values()).some((l) => l.pin_code === "291007")) {
-        mergedMap.set("lic-master-admin", {
-          id: "lic-master-admin",
-          client_name: "Administrador Maestro",
-          pin_code: "291007",
-          status: "active",
-          expires_at: new Date(Date.now() + 3650 * 86400000).toISOString(),
-          max_devices: 999,
-          bound_device_ids: [],
-          notes: "PIN Maestro: 291007",
-          created_at: new Date().toISOString(),
-        });
-      }
+function markLocalLicenseMutation(id: string) {
+  recentLocalLicenseMutations.set(id, Date.now());
+}
 
-      serverLicenseState.licenses = Array.from(mergedMap.values());
-      saveServerLicenses();
+function isRecentLocalLicenseMutation(id: string): boolean {
+  const ts = recentLocalLicenseMutations.get(id);
+  if (!ts) return false;
+  if (Date.now() - ts <= LOCAL_MUTATION_GRACE_MS) return true;
+  recentLocalLicenseMutations.delete(id);
+  return false;
+}
 
-      // 4. Ensure any local licenses not yet in Supabase are uploaded
-      for (const lic of serverLicenseState.licenses) {
-        await supabaseAdmin
-          .from("client_licenses")
-          .upsert({
-            id: lic.id,
-            client_name: lic.client_name,
-            pin_code: lic.pin_code,
-            status: lic.status,
-            expires_at: lic.expires_at,
-            max_devices: lic.max_devices,
-            bound_device_ids: lic.bound_device_ids,
-            notes: lic.notes ?? "",
-            created_at: lic.created_at,
-          })
-          .catch(() => {});
-      }
-    }
-  } catch {
-    // If Supabase table isn't created yet or network is offline, rely on persistent file
+function noStoreJson(payload: unknown, init?: ResponseInit): Response {
+  const headers = new Headers(init?.headers);
+  headers.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+  headers.set("Pragma", "no-cache");
+  headers.set("Expires", "0");
+  return Response.json(payload, { ...init, headers });
+}
+
+function packMasterNotesWithRequire(requireLicense: boolean): string {
+  return requireLicense ? "PIN Maestro: 291007" : "PIN Maestro: 291007||REQUIRE:0";
+}
+
+function parseRequireFromMasterNotes(notes?: string | null): boolean | null {
+  if (!notes) return null;
+  if (notes.includes("||REQUIRE:0")) return false;
+  if (notes.includes("||REQUIRE:1")) return true;
+  return null;
+}
+
+export async function syncLicensesWithSupabase(force = false): Promise<void> {
+  const now = Date.now();
+  if (!force && licensesCloudSyncPromise) {
+    return licensesCloudSyncPromise;
   }
+  if (!force && now - lastLicensesCloudSyncAt < CLOUD_SYNC_TTL_MS) {
+    return;
+  }
+
+  const run = (async () => {
+    try {
+      const { data, error } = await supabaseAdmin.from("client_licenses").select("*");
+      if (!error && Array.isArray(data)) {
+        lastLicensesCloudSyncAt = Date.now();
+        const mapped: ClientLicense[] = data.map((d: Record<string, unknown>) => ({
+          id: String(d["id"]),
+          client_name: String(d["client_name"] || "Cliente"),
+          pin_code: String(d["pin_code"] || ""),
+          status: d["status"] === "paused" ? "paused" : "active",
+          expires_at: d["expires_at"] ? new Date(d["expires_at"] as string).toISOString() : null,
+          max_devices: Number(d["max_devices"]) || 1,
+          bound_device_ids: Array.isArray(d["bound_device_ids"])
+            ? (d["bound_device_ids"] as string[])
+            : [],
+          notes: typeof d["notes"] === "string" ? d["notes"] : "",
+          created_at: d["created_at"]
+            ? new Date(d["created_at"] as string).toISOString()
+            : new Date().toISOString(),
+        }));
+
+        const deletedSet = new Set<string>(serverLicenseState.deletedIds || []);
+        const deletedPinSet = new Set<string>(serverLicenseState.deletedPins || []);
+        const mergedMap = new Map<string, ClientLicense>();
+        const localById = new Map<string, ClientLicense>();
+        for (const lic of serverLicenseState.licenses) {
+          localById.set(lic.id, lic);
+        }
+
+        if (mapped.length > 0) {
+          // Supabase has records: treat Supabase as authoritative across stateless isolates,
+          // while respecting mutations performed in THIS isolate in the last few seconds.
+          for (const sLic of mapped) {
+            if (deletedSet.has(sLic.id) || deletedPinSet.has(sLic.pin_code)) {
+              if (isRecentLocalLicenseMutation(sLic.id)) {
+                await supabaseAdmin
+                  .from("client_licenses")
+                  .delete()
+                  .eq("id", sLic.id)
+                  .catch(() => {});
+                continue;
+              }
+              // Was previously deleted locally long ago or resurrected remotely: allow remote if not recently deleted
+            }
+
+            if (sLic.id === "lic-master-admin" || sLic.pin_code === "291007") {
+              if (!isRecentLocalLicenseMutation("require-license-toggle")) {
+                const parsedReq = parseRequireFromMasterNotes(sLic.notes);
+                if (parsedReq !== null) {
+                  serverLicenseState.requireLicense = parsedReq;
+                }
+              }
+            }
+
+            const existing =
+              localById.get(sLic.id) ||
+              serverLicenseState.licenses.find((l) => l.pin_code === sLic.pin_code);
+
+            if (existing && isRecentLocalLicenseMutation(existing.id)) {
+              mergedMap.set(existing.id, {
+                ...sLic,
+                ...existing,
+                bound_device_ids: Array.from(
+                  new Set([...existing.bound_device_ids, ...sLic.bound_device_ids]),
+                ),
+              });
+            } else {
+              mergedMap.set(sLic.id, sLic);
+            }
+          }
+
+          // Preserve any recently created license from THIS isolate not yet returned by Supabase
+          for (const lic of serverLicenseState.licenses) {
+            if (
+              !mergedMap.has(lic.id) &&
+              !deletedSet.has(lic.id) &&
+              !deletedPinSet.has(lic.pin_code) &&
+              isRecentLocalLicenseMutation(lic.id)
+            ) {
+              mergedMap.set(lic.id, lic);
+            }
+          }
+        } else {
+          // Empty Supabase table: seed current state (first initialization)
+          for (const lic of serverLicenseState.licenses) {
+            if (!deletedSet.has(lic.id) && !deletedPinSet.has(lic.pin_code)) {
+              mergedMap.set(lic.id, lic);
+            }
+          }
+        }
+
+        // Ensure master PIN is always present
+        if (!Array.from(mergedMap.values()).some((l) => l.pin_code === "291007")) {
+          const masterLic: ClientLicense = {
+            id: "lic-master-admin",
+            client_name: "Administrador Maestro",
+            pin_code: "291007",
+            status: "active",
+            expires_at: new Date(Date.now() + 3650 * 86400000).toISOString(),
+            max_devices: 999,
+            bound_device_ids: [],
+            notes: packMasterNotesWithRequire(serverLicenseState.requireLicense),
+            created_at: new Date().toISOString(),
+          };
+          mergedMap.set(masterLic.id, masterLic);
+          await supabaseAdmin
+            .from("client_licenses")
+            .upsert({
+              id: masterLic.id,
+              client_name: masterLic.client_name,
+              pin_code: masterLic.pin_code,
+              status: masterLic.status,
+              expires_at: masterLic.expires_at,
+              max_devices: masterLic.max_devices,
+              bound_device_ids: masterLic.bound_device_ids,
+              notes: masterLic.notes ?? "",
+              created_at: masterLic.created_at,
+            })
+            .catch(() => {});
+        }
+
+        if (mapped.length === 0) {
+          for (const lic of Array.from(mergedMap.values())) {
+            await supabaseAdmin
+              .from("client_licenses")
+              .upsert({
+                id: lic.id,
+                client_name: lic.client_name,
+                pin_code: lic.pin_code,
+                status: lic.status,
+                expires_at: lic.expires_at,
+                max_devices: lic.max_devices,
+                bound_device_ids: lic.bound_device_ids,
+                notes: lic.notes ?? "",
+                created_at: lic.created_at,
+              })
+              .catch(() => {});
+          }
+        }
+
+        const nextLicenses = Array.from(mergedMap.values()).map((l) =>
+          l.id === "lic-master-admin" || l.pin_code === "291007"
+            ? {
+                ...l,
+                notes: l.notes?.replace(/\|\|REQUIRE:[01]/g, "").trim() || "PIN Maestro: 291007",
+              }
+            : l,
+        );
+        serverLicenseState.licenses = nextLicenses;
+        saveServerLicenses();
+      }
+    } catch {
+      // If Supabase table isn't created yet or network is offline, rely on persistent state
+    } finally {
+      licensesCloudSyncPromise = null;
+    }
+  })();
+
+  licensesCloudSyncPromise = run;
+  return run;
 }
 
 function sanitizeResultsList(results: unknown[]): typeof mockStore.results {
@@ -615,39 +725,157 @@ function saveServerGames() {
   }
 }
 
-export async function syncGamesWithSupabase() {
-  try {
-    loadServerGames();
-    const { data, error } = await supabaseAdmin.from("games").select("*");
-    if (!error && Array.isArray(data)) {
-      let changed = false;
-      for (const row of data as Array<Record<string, unknown>>) {
-        const id = String(row["id"] || "").trim();
-        const slug = String(row["slug"] || "").trim();
-        const logoUrl = typeof row["logo_url"] === "string" ? row["logo_url"] : null;
-        if (logoUrl && isCustomUploadedGameLogo(logoUrl)) {
-          if (id && serverCustomGameLogos[id.toLowerCase()] !== logoUrl) {
-            serverCustomGameLogos[id.toLowerCase()] = logoUrl;
-            changed = true;
+let lastGamesCloudSyncAt = 0;
+let gamesCloudSyncPromise: Promise<void> | null = null;
+const recentLocalGameMutations = new Map<string, number>();
+
+function markLocalGameMutation(id: string) {
+  recentLocalGameMutations.set(id, Date.now());
+}
+
+function isRecentLocalGameMutation(id: string): boolean {
+  const ts = recentLocalGameMutations.get(id);
+  if (!ts) return false;
+  if (Date.now() - ts <= LOCAL_MUTATION_GRACE_MS) return true;
+  recentLocalGameMutations.delete(id);
+  return false;
+}
+
+export async function syncGamesWithSupabase(force = false): Promise<void> {
+  const now = Date.now();
+  if (!force && gamesCloudSyncPromise) {
+    return gamesCloudSyncPromise;
+  }
+  if (!force && now - lastGamesCloudSyncAt < CLOUD_SYNC_TTL_MS) {
+    return;
+  }
+
+  const run = (async () => {
+    try {
+      loadServerGames();
+      const { data, error } = await supabaseAdmin.from("games").select("*").order("display_order");
+      if (!error && Array.isArray(data) && data.length > 0) {
+        lastGamesCloudSyncAt = Date.now();
+        let changed = false;
+        for (const row of data as Array<Record<string, unknown>>) {
+          const id = String(row["id"] || "").trim();
+          const slug = String(row["slug"] || "").trim();
+          if (!id && !slug) continue;
+
+          const logoUrl = typeof row["logo_url"] === "string" ? row["logo_url"] : null;
+          if (logoUrl && isCustomUploadedGameLogo(logoUrl)) {
+            if (id && serverCustomGameLogos[id.toLowerCase()] !== logoUrl) {
+              serverCustomGameLogos[id.toLowerCase()] = logoUrl;
+              changed = true;
+            }
+            if (slug && serverCustomGameLogos[slug.toLowerCase()] !== logoUrl) {
+              serverCustomGameLogos[slug.toLowerCase()] = logoUrl;
+              changed = true;
+            }
           }
-          if (slug && serverCustomGameLogos[slug.toLowerCase()] !== logoUrl) {
-            serverCustomGameLogos[slug.toLowerCase()] = logoUrl;
-            changed = true;
-          }
-          const gameObj = mockStore.games.find((g) => g.id === id || g.slug === slug);
-          if (gameObj && gameObj.logo_url !== logoUrl) {
-            gameObj.logo_url = logoUrl;
+
+          const gameObj = mockStore.games.find((g) => g.id === id || (slug && g.slug === slug));
+          if (gameObj) {
+            if (isRecentLocalGameMutation(gameObj.id)) {
+              continue;
+            }
+            if (typeof row["is_active"] === "boolean" && gameObj.is_active !== row["is_active"]) {
+              gameObj.is_active = row["is_active"];
+              changed = true;
+            }
+            if (
+              typeof row["display_order"] === "number" &&
+              gameObj.display_order !== row["display_order"]
+            ) {
+              gameObj.display_order = row["display_order"];
+              changed = true;
+            }
+            if (
+              typeof row["color"] === "string" &&
+              row["color"] &&
+              gameObj.color !== row["color"]
+            ) {
+              gameObj.color = row["color"];
+              changed = true;
+            }
+            if (typeof row["name"] === "string" && row["name"] && gameObj.name !== row["name"]) {
+              gameObj.name = row["name"];
+              changed = true;
+            }
+            if (
+              typeof row["loading_mode"] === "string" &&
+              (row["loading_mode"] === "manual" || row["loading_mode"] === "automatic") &&
+              gameObj.loading_mode !== row["loading_mode"]
+            ) {
+              gameObj.loading_mode = row["loading_mode"];
+              gameObj.mode = row["loading_mode"];
+              changed = true;
+            }
+            if (
+              Array.isArray(row["schedule_times"]) &&
+              row["schedule_times"].length > 0 &&
+              JSON.stringify(gameObj.schedule_times) !== JSON.stringify(row["schedule_times"])
+            ) {
+              gameObj.schedule_times = row["schedule_times"] as string[];
+              changed = true;
+            }
+            if (logoUrl && isCustomUploadedGameLogo(logoUrl) && gameObj.logo_url !== logoUrl) {
+              gameObj.logo_url = logoUrl;
+              changed = true;
+            }
+          } else if (id) {
+            const newMode =
+              row["loading_mode"] === "manual" ? ("manual" as const) : ("automatic" as const);
+            const resolvedLogo =
+              logoUrl && isCustomUploadedGameLogo(logoUrl)
+                ? logoUrl
+                : getGameLogo(
+                    {
+                      id,
+                      slug: slug || id,
+                      name: String(row["name"] || slug || "JUEGO"),
+                      color: typeof row["color"] === "string" ? row["color"] : "#1a56db",
+                    },
+                    typeof row["color"] === "string" ? row["color"] : "#1a56db",
+                  );
+            mockStore.games.push({
+              id,
+              name: String(row["name"] || "JUEGO"),
+              slug: slug || id,
+              color: typeof row["color"] === "string" ? row["color"] : "#1a56db",
+              logo_url: resolvedLogo,
+              display_order:
+                typeof row["display_order"] === "number"
+                  ? row["display_order"]
+                  : mockStore.games.length + 1,
+              is_active: typeof row["is_active"] === "boolean" ? row["is_active"] : true,
+              loading_mode: newMode,
+              mode: newMode,
+              schedule_times: Array.isArray(row["schedule_times"])
+                ? (row["schedule_times"] as string[])
+                : getDefaultGameScheduleTimes(slug || id),
+              created_at:
+                typeof row["created_at"] === "string"
+                  ? row["created_at"]
+                  : new Date().toISOString(),
+            });
             changed = true;
           }
         }
+        if (changed) {
+          mockStore.games.sort((a, b) => (a.display_order ?? 99) - (b.display_order ?? 99));
+          saveServerGames();
+        }
       }
-      if (changed) {
-        saveServerGames();
-      }
+    } catch {
+      // ignore
+    } finally {
+      gamesCloudSyncPromise = null;
     }
-  } catch {
-    // ignore
-  }
+  })();
+
+  gamesCloudSyncPromise = run;
+  return run;
 }
 
 function loadServerAppSettings() {
@@ -1092,6 +1320,16 @@ export const Route = createFileRoute("/api/public/results/sync")({
           }
         }
 
+        // Ensure cloud-backed licenses, games, and app settings are fresh for this Worker isolate
+        await Promise.race([
+          Promise.all([
+            syncLicensesWithSupabase(!isPoll),
+            syncGamesWithSupabase(!isPoll),
+            syncAppSettingsWithSupabase(),
+          ]),
+          new Promise((resolve) => setTimeout(resolve, 2500)),
+        ]);
+
         const shouldSendLogos =
           !clientLogosVer || clientLogosVer !== String(serverCustomGameLogosVersion);
         const shouldSendGames = !clientGamesVer || clientGamesVer !== String(serverGamesVersion);
@@ -1127,7 +1365,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
           };
         }
 
-        return Response.json({
+        return noStoreJson({
           status: "ok",
           serverLotteryDate: serverToday,
           results: mockStore.results,
@@ -1170,14 +1408,14 @@ export const Route = createFileRoute("/api/public/results/sync")({
           saveServerResults();
           serverTripleResults = triplesSync.merged;
           saveServerTripleResults();
-          return Response.json({
+          return noStoreJson({
             reports,
             results: mockStore.results,
             tripleResults: serverTripleResults,
           });
         } catch (err) {
           console.error("[sync-error]", err);
-          return Response.json(
+          return noStoreJson(
             {
               error: "No se pudo sincronizar",
               details: err instanceof Error ? err.message : String(err),
@@ -1203,6 +1441,9 @@ export const Route = createFileRoute("/api/public/results/sync")({
             animalImagesBatch,
             deleteAnimalImage,
             gameUpdate,
+            gameCreate,
+            gameDelete,
+            gameReorder,
             customGameLogosBatch,
             licenseAction,
             appSettings,
@@ -1214,6 +1455,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
           } | null = null;
 
           if (licenseAction && typeof licenseAction === "object") {
+            await syncLicensesWithSupabase(true);
             const act = licenseAction as {
               type: string;
               requireLicense?: boolean;
@@ -1225,11 +1467,35 @@ export const Route = createFileRoute("/api/public/results/sync")({
               notes?: string;
               device_id?: string;
               licenses?: ClientLicense[];
+              license?: ClientLicense;
+              fallbackLicense?: ClientLicense;
             };
 
             if (act.type === "toggle_enforcement") {
               serverLicenseState.requireLicense = Boolean(act.requireLicense);
+              markLocalLicenseMutation("require-license-toggle");
               saveServerLicenses();
+              const masterLic = serverLicenseState.licenses.find(
+                (l) => l.id === "lic-master-admin" || l.pin_code === "291007",
+              );
+              if (masterLic) {
+                markLocalLicenseMutation(masterLic.id);
+                try {
+                  await supabaseAdmin.from("client_licenses").upsert({
+                    id: masterLic.id,
+                    client_name: masterLic.client_name,
+                    pin_code: masterLic.pin_code,
+                    status: masterLic.status,
+                    expires_at: masterLic.expires_at,
+                    max_devices: masterLic.max_devices,
+                    bound_device_ids: masterLic.bound_device_ids,
+                    notes: packMasterNotesWithRequire(serverLicenseState.requireLicense),
+                    created_at: masterLic.created_at,
+                  });
+                } catch {
+                  // ignore
+                }
+              }
             } else if (act.type === "restore_batch" && Array.isArray(act.licenses)) {
               const deletedSet = new Set<string>(serverLicenseState.deletedIds || []);
               const deletedPinSet = new Set<string>(serverLicenseState.deletedPins || []);
@@ -1335,7 +1601,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
                   ? new Date(Date.now() + daysNum * 86400000).toISOString()
                   : null;
               const newLic: ClientLicense = {
-                id: `lic-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                id: act.id?.trim() || `lic-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
                 client_name: (act.client_name || "Cliente").trim(),
                 pin_code: cleanPin,
                 status: "active",
@@ -1355,7 +1621,13 @@ export const Route = createFileRoute("/api/public/results/sync")({
                   (pin) => pin !== cleanPin,
                 );
               }
-              serverLicenseState.licenses.unshift(newLic);
+              serverLicenseState.licenses = [
+                newLic,
+                ...serverLicenseState.licenses.filter(
+                  (l) => l.id !== newLic.id && l.pin_code !== cleanPin,
+                ),
+              ];
+              markLocalLicenseMutation(newLic.id);
               saveServerLicenses();
 
               // Persistent write in Supabase
@@ -1375,7 +1647,14 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 console.warn("[supabase-create-license-warn]", err);
               }
             } else if (act.type === "renew" && act.id) {
-              const target = serverLicenseState.licenses.find((l) => l.id === act.id);
+              let target = serverLicenseState.licenses.find(
+                (l) =>
+                  l.id === act.id || (act.license?.pin_code && l.pin_code === act.license.pin_code),
+              );
+              if (!target && act.license) {
+                target = { ...act.license };
+                serverLicenseState.licenses.unshift(target);
+              }
               if (target) {
                 if (act.days === null) {
                   target.expires_at = null;
@@ -1389,53 +1668,89 @@ export const Route = createFileRoute("/api/public/results/sync")({
                   ).toISOString();
                 }
                 target.status = "active";
+                markLocalLicenseMutation(target.id);
                 saveServerLicenses();
 
-                // Update only expires_at and status in Supabase (preserving PIN, name, bound devices)
+                // Upsert in Supabase so cold/remote records always persist
                 try {
-                  await supabaseAdmin
-                    .from("client_licenses")
-                    .update({
-                      expires_at: target.expires_at,
-                      status: target.status,
-                    })
-                    .eq("id", target.id);
+                  await supabaseAdmin.from("client_licenses").upsert({
+                    id: target.id,
+                    client_name: target.client_name,
+                    pin_code: target.pin_code,
+                    status: target.status,
+                    expires_at: target.expires_at,
+                    max_devices: target.max_devices,
+                    bound_device_ids: target.bound_device_ids,
+                    notes: target.notes ?? "",
+                    created_at: target.created_at,
+                  });
                 } catch (err: unknown) {
                   console.warn("[supabase-renew-license-warn]", err);
                 }
               }
             } else if (act.type === "toggle_status" && act.id) {
-              const target = serverLicenseState.licenses.find((l) => l.id === act.id);
+              let target = serverLicenseState.licenses.find(
+                (l) =>
+                  l.id === act.id || (act.license?.pin_code && l.pin_code === act.license.pin_code),
+              );
+              if (!target && act.license) {
+                target = { ...act.license };
+                serverLicenseState.licenses.unshift(target);
+              }
               if (target) {
-                target.status = target.status === "active" ? "paused" : "active";
+                target.status =
+                  act.license?.status === "paused" || act.license?.status === "active"
+                    ? act.license.status
+                    : target.status === "active"
+                      ? "paused"
+                      : "active";
+                markLocalLicenseMutation(target.id);
                 saveServerLicenses();
 
-                // Update in Supabase
+                // Upsert in Supabase
                 try {
-                  await supabaseAdmin
-                    .from("client_licenses")
-                    .update({
-                      status: target.status,
-                    })
-                    .eq("id", target.id);
+                  await supabaseAdmin.from("client_licenses").upsert({
+                    id: target.id,
+                    client_name: target.client_name,
+                    pin_code: target.pin_code,
+                    status: target.status,
+                    expires_at: target.expires_at,
+                    max_devices: target.max_devices,
+                    bound_device_ids: target.bound_device_ids,
+                    notes: target.notes ?? "",
+                    created_at: target.created_at,
+                  });
                 } catch (err: unknown) {
                   console.warn("[supabase-toggle-status-warn]", err);
                 }
               }
             } else if (act.type === "reset_devices" && act.id) {
-              const target = serverLicenseState.licenses.find((l) => l.id === act.id);
+              let target = serverLicenseState.licenses.find(
+                (l) =>
+                  l.id === act.id || (act.license?.pin_code && l.pin_code === act.license.pin_code),
+              );
+              if (!target && act.license) {
+                target = { ...act.license };
+                serverLicenseState.licenses.unshift(target);
+              }
               if (target) {
                 target.bound_device_ids = [];
+                markLocalLicenseMutation(target.id);
                 saveServerLicenses();
 
-                // Update in Supabase
+                // Upsert in Supabase
                 try {
-                  await supabaseAdmin
-                    .from("client_licenses")
-                    .update({
-                      bound_device_ids: target.bound_device_ids,
-                    })
-                    .eq("id", target.id);
+                  await supabaseAdmin.from("client_licenses").upsert({
+                    id: target.id,
+                    client_name: target.client_name,
+                    pin_code: target.pin_code,
+                    status: target.status,
+                    expires_at: target.expires_at,
+                    max_devices: target.max_devices,
+                    bound_device_ids: target.bound_device_ids,
+                    notes: target.notes ?? "",
+                    created_at: target.created_at,
+                  });
                 } catch (err: unknown) {
                   console.warn("[supabase-reset-devices-warn]", err);
                 }
@@ -1445,19 +1760,32 @@ export const Route = createFileRoute("/api/public/results/sync")({
               act.id &&
               typeof act.client_name === "string"
             ) {
-              const target = serverLicenseState.licenses.find((l) => l.id === act.id);
+              let target = serverLicenseState.licenses.find(
+                (l) =>
+                  l.id === act.id || (act.license?.pin_code && l.pin_code === act.license.pin_code),
+              );
+              if (!target && act.license) {
+                target = { ...act.license };
+                serverLicenseState.licenses.unshift(target);
+              }
               if (target) {
                 target.client_name = act.client_name.trim();
+                markLocalLicenseMutation(target.id);
                 saveServerLicenses();
 
-                // Persistent update of client_name in Supabase
+                // Persistent upsert of client_name in Supabase
                 try {
-                  await supabaseAdmin
-                    .from("client_licenses")
-                    .update({
-                      client_name: target.client_name,
-                    })
-                    .eq("id", target.id);
+                  await supabaseAdmin.from("client_licenses").upsert({
+                    id: target.id,
+                    client_name: target.client_name,
+                    pin_code: target.pin_code,
+                    status: target.status,
+                    expires_at: target.expires_at,
+                    max_devices: target.max_devices,
+                    bound_device_ids: target.bound_device_ids,
+                    notes: target.notes ?? "",
+                    created_at: target.created_at,
+                  });
                 } catch (err: unknown) {
                   console.warn("[supabase-update-lotteries-warn]", err);
                 }
@@ -1482,6 +1810,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
               ) {
                 serverLicenseState.deletedPins.push(targetToDelete.pin_code);
               }
+              markLocalLicenseMutation(act.id);
               saveServerLicenses();
 
               // Delete in Supabase
@@ -1512,7 +1841,76 @@ export const Route = createFileRoute("/api/public/results/sync")({
                   },
                 };
               } else {
-                const match = serverLicenseState.licenses.find((l) => l.pin_code === cleanPin);
+                let match = serverLicenseState.licenses.find((l) => l.pin_code === cleanPin);
+
+                // Direct Supabase lookup fallback if cold isolate didn't list it yet
+                if (!match) {
+                  try {
+                    const { data: directRow } = await supabaseAdmin
+                      .from("client_licenses")
+                      .select("*")
+                      .eq("pin_code", cleanPin)
+                      .maybeSingle();
+                    if (directRow && typeof directRow === "object") {
+                      const d = directRow as Record<string, unknown>;
+                      match = {
+                        id: String(d["id"]),
+                        client_name: String(d["client_name"] || "Cliente"),
+                        pin_code: String(d["pin_code"] || cleanPin),
+                        status: d["status"] === "paused" ? "paused" : "active",
+                        expires_at: d["expires_at"]
+                          ? new Date(d["expires_at"] as string).toISOString()
+                          : null,
+                        max_devices: Number(d["max_devices"]) || 1,
+                        bound_device_ids: Array.isArray(d["bound_device_ids"])
+                          ? (d["bound_device_ids"] as string[])
+                          : [],
+                        notes: typeof d["notes"] === "string" ? d["notes"] : "",
+                        created_at: d["created_at"]
+                          ? new Date(d["created_at"] as string).toISOString()
+                          : new Date().toISOString(),
+                      };
+                      serverLicenseState.licenses.unshift(match);
+                      saveServerLicenses();
+                    }
+                  } catch {
+                    // ignore
+                  }
+                }
+
+                // Fallback for stateless Cloudflare isolates when created locally before Supabase sync
+                if (
+                  !match &&
+                  act.fallbackLicense &&
+                  act.fallbackLicense.pin_code === cleanPin &&
+                  !(serverLicenseState.deletedPins || []).includes(cleanPin) &&
+                  !(serverLicenseState.deletedIds || []).includes(act.fallbackLicense.id)
+                ) {
+                  match = {
+                    ...act.fallbackLicense,
+                    bound_device_ids: Array.isArray(act.fallbackLicense.bound_device_ids)
+                      ? [...act.fallbackLicense.bound_device_ids]
+                      : [],
+                  };
+                  serverLicenseState.licenses.unshift(match);
+                  markLocalLicenseMutation(match.id);
+                  saveServerLicenses();
+                  try {
+                    await supabaseAdmin.from("client_licenses").upsert({
+                      id: match.id,
+                      client_name: match.client_name,
+                      pin_code: match.pin_code,
+                      status: match.status,
+                      expires_at: match.expires_at,
+                      max_devices: match.max_devices,
+                      bound_device_ids: match.bound_device_ids,
+                      notes: match.notes ?? "",
+                      created_at: match.created_at,
+                    });
+                  } catch {
+                    // ignore
+                  }
+                }
 
                 if (!match) {
                   licenseActivation = {
@@ -1539,16 +1937,20 @@ export const Route = createFileRoute("/api/public/results/sync")({
                   } else {
                     if (!alreadyBound) {
                       match.bound_device_ids.push(devId);
+                      markLocalLicenseMutation(match.id);
                       saveServerLicenses();
 
-                      // Update device binding in Supabase
-                      supabaseAdmin
-                        .from("client_licenses")
-                        .update({
-                          bound_device_ids: match.bound_device_ids,
-                        })
-                        .eq("id", match.id)
-                        .catch((err: unknown) => console.warn("[supabase-bind-device-warn]", err));
+                      // Update device binding in Supabase (awaited so Worker doesn't cancel fetch)
+                      try {
+                        await supabaseAdmin
+                          .from("client_licenses")
+                          .update({
+                            bound_device_ids: match.bound_device_ids,
+                          })
+                          .eq("id", match.id);
+                      } catch (err: unknown) {
+                        console.warn("[supabase-bind-device-warn]", err);
+                      }
                     }
                     licenseActivation = {
                       valid: true,
@@ -1608,6 +2010,58 @@ export const Route = createFileRoute("/api/public/results/sync")({
             saveServerTripleResults();
           }
 
+          if (gameCreate && typeof gameCreate === "object") {
+            const created = gameCreate as (typeof mockStore.games)[0];
+            if (created.id && created.name) {
+              const existingIdx = mockStore.games.findIndex(
+                (g) => g.id === created.id || g.slug === created.slug,
+              );
+              if (existingIdx >= 0) {
+                mockStore.games[existingIdx] = { ...mockStore.games[existingIdx], ...created };
+              } else {
+                mockStore.games.push(created);
+              }
+              markLocalGameMutation(created.id);
+              saveServerGames();
+              try {
+                await supabaseAdmin.from("games").upsert(created);
+              } catch {
+                // ignore
+              }
+            }
+          }
+
+          if (gameDelete && typeof gameDelete === "object" && gameDelete.id) {
+            mockStore.games = mockStore.games.filter((g) => g.id !== gameDelete.id);
+            markLocalGameMutation(String(gameDelete.id));
+            saveServerGames();
+            try {
+              await supabaseAdmin.from("games").delete().eq("id", gameDelete.id);
+            } catch {
+              // ignore
+            }
+          }
+
+          if (Array.isArray(gameReorder)) {
+            for (const item of gameReorder as Array<{ id: string; display_order: number }>) {
+              const target = mockStore.games.find((g) => g.id === item.id);
+              if (target && typeof item.display_order === "number") {
+                target.display_order = item.display_order;
+                markLocalGameMutation(target.id);
+                try {
+                  await supabaseAdmin
+                    .from("games")
+                    .update({ display_order: item.display_order })
+                    .eq("id", target.id);
+                } catch {
+                  // ignore
+                }
+              }
+            }
+            mockStore.games.sort((a, b) => (a.display_order ?? 99) - (b.display_order ?? 99));
+            saveServerGames();
+          }
+
           if (gameUpdate) {
             const {
               id,
@@ -1619,6 +2073,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
               name,
               is_active,
               logo_url,
+              display_order,
             } = gameUpdate;
             const targetGame = mockStore.games.find(
               (g) => g.id === id || (slug && g.slug === slug),
@@ -1635,7 +2090,8 @@ export const Route = createFileRoute("/api/public/results/sync")({
               }
               if (color !== undefined) targetGame.color = color;
               if (name !== undefined) targetGame.name = name;
-              if (is_active !== undefined) targetGame.is_active = is_active;
+              if (is_active !== undefined) targetGame.is_active = Boolean(is_active);
+              if (display_order !== undefined) targetGame.display_order = Number(display_order);
               if (logo_url !== undefined) {
                 const idKey = targetGame.id.trim().toLowerCase();
                 const slugKey = (targetGame.slug || "").trim().toLowerCase();
@@ -1657,6 +2113,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
                   );
                 }
               }
+              markLocalGameMutation(targetGame.id);
               saveServerGames();
               try {
                 await supabaseAdmin
@@ -1665,6 +2122,12 @@ export const Route = createFileRoute("/api/public/results/sync")({
                     ...(color !== undefined ? { color: targetGame.color } : {}),
                     ...(name !== undefined ? { name: targetGame.name } : {}),
                     ...(is_active !== undefined ? { is_active: targetGame.is_active } : {}),
+                    ...(display_order !== undefined
+                      ? { display_order: targetGame.display_order }
+                      : {}),
+                    ...(loading_mode !== undefined || mode !== undefined
+                      ? { loading_mode: targetGame.loading_mode }
+                      : {}),
                     ...(logo_url !== undefined ? { logo_url: targetGame.logo_url } : {}),
                   })
                   .eq("id", targetGame.id);
@@ -1813,7 +2276,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
             }
           }
 
-          return Response.json({
+          return noStoreJson({
             status: "ok",
             results: mockStore.results,
             tripleResults: serverTripleResults,
@@ -1832,7 +2295,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
             licenseActivation,
           });
         } catch (err) {
-          return Response.json(
+          return noStoreJson(
             { error: "Error updating result", details: String(err) },
             { status: 500 },
           );

@@ -181,7 +181,7 @@ function sanitizeDesignConfig(raw: unknown): ClientDesignConfig | null {
 
 /**
  * Parses client_name to extract clean display name, allowed lotteries array, cardsPerScreen,
- * transitionSeconds, voiceConfig, and designConfig.
+ * transitionSeconds, voiceConfig, designConfig, and fullscreenAuto.
  */
 export function parseClientLicenseName(rawName?: string | null): {
   cleanName: string;
@@ -190,6 +190,7 @@ export function parseClientLicenseName(rawName?: string | null): {
   transitionSeconds: number;
   voiceConfig: ClientVoiceConfig | null;
   designConfig: ClientDesignConfig | null;
+  fullscreenAuto: boolean;
 } {
   if (!rawName) {
     return {
@@ -199,6 +200,7 @@ export function parseClientLicenseName(rawName?: string | null): {
       transitionSeconds: DEFAULT_TRANSITION_SECONDS,
       voiceConfig: null,
       designConfig: null,
+      fullscreenAuto: false,
     };
   }
 
@@ -211,6 +213,7 @@ export function parseClientLicenseName(rawName?: string | null): {
       transitionSeconds: DEFAULT_TRANSITION_SECONDS,
       voiceConfig: null,
       designConfig: null,
+      fullscreenAuto: false,
     };
   }
 
@@ -226,6 +229,7 @@ export function parseClientLicenseName(rawName?: string | null): {
       transitionSeconds: DEFAULT_TRANSITION_SECONDS,
       voiceConfig: null,
       designConfig: null,
+      fullscreenAuto: false,
     };
   }
 
@@ -235,11 +239,12 @@ export function parseClientLicenseName(rawName?: string | null): {
       const sanitized = parsed.map((item) => String(item).trim()).filter(Boolean);
       return {
         cleanName,
-        allowedLotteries: sanitized.length > 0 ? sanitized : null,
+        allowedLotteries: sanitized,
         cardsPerScreen: DEFAULT_CARDS_PER_SCREEN,
         transitionSeconds: DEFAULT_TRANSITION_SECONDS,
         voiceConfig: null,
         designConfig: null,
+        fullscreenAuto: false,
       };
     }
 
@@ -248,9 +253,10 @@ export function parseClientLicenseName(rawName?: string | null): {
       const rawLotteries = obj.loterias ?? obj.allowedLotteries ?? null;
       let allowedLotteries: string[] | null = null;
 
-      if (Array.isArray(rawLotteries)) {
-        const sanitized = rawLotteries.map((item) => String(item).trim()).filter(Boolean);
-        allowedLotteries = sanitized.length > 0 ? sanitized : null;
+      if (typeof rawLotteries === "string" && rawLotteries.trim().toUpperCase() === "NINGUNA") {
+        allowedLotteries = [];
+      } else if (Array.isArray(rawLotteries)) {
+        allowedLotteries = rawLotteries.map((item) => String(item).trim()).filter(Boolean);
       }
 
       const cardsPerScreen = normalizeCardsPerScreen(
@@ -263,6 +269,7 @@ export function parseClientLicenseName(rawName?: string | null): {
 
       const voiceConfig = sanitizeVoiceConfig(obj.voz ?? obj.voiceConfig ?? null);
       const designConfig = sanitizeDesignConfig(obj.diseno ?? obj.designConfig ?? null);
+      const fullscreenAuto = Boolean(obj.pantallaCompleta ?? obj.fullscreenAuto ?? false);
 
       return {
         cleanName,
@@ -271,6 +278,7 @@ export function parseClientLicenseName(rawName?: string | null): {
         transitionSeconds,
         voiceConfig,
         designConfig,
+        fullscreenAuto,
       };
     }
   } catch {
@@ -288,6 +296,7 @@ export function parseClientLicenseName(rawName?: string | null): {
         transitionSeconds: DEFAULT_TRANSITION_SECONDS,
         voiceConfig: null,
         designConfig: null,
+        fullscreenAuto: false,
       };
     }
   }
@@ -299,12 +308,13 @@ export function parseClientLicenseName(rawName?: string | null): {
     transitionSeconds: DEFAULT_TRANSITION_SECONDS,
     voiceConfig: null,
     designConfig: null,
+    fullscreenAuto: false,
   };
 }
 
 /**
  * Formats clean client name with selected allowed lotteries, cardsPerScreen, transitionSeconds,
- * voiceConfig, and designConfig.
+ * voiceConfig, designConfig, and fullscreenAuto.
  */
 export function formatClientLicenseName(
   cleanName: string,
@@ -314,13 +324,14 @@ export function formatClientLicenseName(
   transitionSeconds: number = DEFAULT_TRANSITION_SECONDS,
   voiceConfig?: ClientVoiceConfig | null,
   designConfig?: ClientDesignConfig | null,
+  fullscreenAuto: boolean = false,
 ): string {
   const name = cleanName.trim() || "Cliente";
   const normalizedCards = normalizeCardsPerScreen(cardsPerScreen);
   const normalizedTransition = normalizeTransitionSeconds(transitionSeconds);
   const isAllLotteries =
-    !allowedLotteries ||
-    allowedLotteries.length === 0 ||
+    allowedLotteries === null ||
+    allowedLotteries === undefined ||
     Boolean(totalAvailableCount && allowedLotteries.length >= totalAvailableCount);
 
   const hasCustomVoice = Boolean(voiceConfig);
@@ -336,12 +347,14 @@ export function formatClientLicenseName(
       designConfig.card_style === "solid" ||
       (designConfig.game_colors && Object.keys(designConfig.game_colors).length > 0)),
   );
+  const hasFullscreenAuto = Boolean(fullscreenAuto);
 
   if (
     normalizedCards === DEFAULT_CARDS_PER_SCREEN &&
     normalizedTransition === DEFAULT_TRANSITION_SECONDS &&
     !hasCustomVoice &&
-    !hasCustomDesign
+    !hasCustomDesign &&
+    !hasFullscreenAuto
   ) {
     if (isAllLotteries) {
       return name;
@@ -364,20 +377,43 @@ export function formatClientLicenseName(
       useCustomDesign: true,
     };
   }
+  if (hasFullscreenAuto) {
+    payloadObj.pantallaCompleta = true;
+  }
 
   return `${name}||${JSON.stringify(payloadObj)}`;
 }
 
+const LOTTERY_SLUG_ALIASES: Record<string, string[]> = {
+  granjita: ["la-granjita", "lagranjita"],
+  "la-granjita": ["granjita"],
+  guacharo: ["el-guacharo", "guacharo-activo"],
+  "el-guacharo": ["guacharo", "guacharo-activo"],
+  "guacharo-activo": ["guacharo", "el-guacharo"],
+  guacharito: ["el-guacharito", "el-guacharito-millonario"],
+  "el-guacharito": ["guacharito", "el-guacharito-millonario"],
+  "el-guacharito-millonario": ["guacharito", "el-guacharito"],
+  "lotto-activo-internacional": ["lotto-activo-rd", "lotto-activo-rd-internacional"],
+  "lotto-activo-rd": ["lotto-activo-internacional"],
+  "lotto-activo-rd-internacional": ["lotto-activo-internacional"],
+  "loto-chaim-a": ["loto-chaima"],
+  "loto-chaima": ["loto-chaim-a"],
+};
+
 /**
  * Checks whether a given lottery (by ID, UUID, or slug) is permitted.
- * If allowedLotteries is null, all lotteries are permitted.
+ * If allowedLotteries is null/undefined, all lotteries are permitted.
+ * If allowedLotteries is an empty array [], no lotteries are permitted.
  */
 export function isLotteryPermitted(
   gameIdOrSlug?: string | null,
   allowedLotteries?: string[] | null,
 ): boolean {
-  if (!allowedLotteries || allowedLotteries.length === 0) {
+  if (allowedLotteries === null || allowedLotteries === undefined) {
     return true;
+  }
+  if (allowedLotteries.length === 0) {
+    return false;
   }
   if (!gameIdOrSlug) {
     return true;
@@ -385,22 +421,17 @@ export function isLotteryPermitted(
 
   const raw = String(gameIdOrSlug).trim().toLowerCase();
   const slugFromUuid = KNOWN_UUID_TO_SLUG[raw] || raw;
+  const candidateKeys = new Set<string>([
+    raw,
+    slugFromUuid,
+    ...(LOTTERY_SLUG_ALIASES[raw] ?? []),
+    ...(LOTTERY_SLUG_ALIASES[slugFromUuid] ?? []),
+  ]);
 
   return allowedLotteries.some((al) => {
-    const target = String(al).trim().toLowerCase();
-    if (target === raw || target === slugFromUuid) return true;
-
-    if (
-      (slugFromUuid === "granjita" && target === "la-granjita") ||
-      (slugFromUuid === "la-granjita" && target === "granjita")
-    ) {
-      return true;
-    }
-
-    if (target.length >= 4 && slugFromUuid.includes(target)) return true;
-    if (slugFromUuid.length >= 4 && target.includes(slugFromUuid)) return true;
-
-    return false;
+    const targetRaw = String(al).trim().toLowerCase();
+    const targetCanonical = KNOWN_UUID_TO_SLUG[targetRaw] || targetRaw;
+    return candidateKeys.has(targetRaw) || candidateKeys.has(targetCanonical);
   });
 }
 
@@ -575,10 +606,27 @@ export function getLastConfiguredLicenseId(): string | null {
   }
 }
 
+export interface ReconcileLicenseOptions {
+  /**
+   * When true (Admin panel), very recent local mutations bridge isolate propagation lag.
+   * When false (Board / LicenseGate client), server/Supabase changes take priority faster.
+   */
+  allowOverrideServer?: boolean;
+  /**
+   * Optional clock override for testing.
+   */
+  nowMs?: number;
+}
+
+const ADMIN_OVERRIDE_WINDOW_MS = 25_000;
+const CLIENT_OVERRIDE_WINDOW_MS = 8_000;
+const EXTRA_CREATED_WINDOW_MS = 120_000;
+
 export function reconcileClientLicensesWithLocal(
   serverLicenses: ClientLicense[],
   serverDeletedIds?: string[],
   serverDeletedPins?: string[],
+  options?: ReconcileLicenseOptions,
 ): { licenses: ClientLicense[]; needsServerSync: ClientLicense[] } {
   const safeServer = Array.isArray(serverLicenses) ? serverLicenses : [];
   if (typeof window === "undefined") {
@@ -586,6 +634,12 @@ export function reconcileClientLicensesWithLocal(
   }
 
   try {
+    const nowMs = options?.nowMs ?? Date.now();
+    const allowOverrideServer = options?.allowOverrideServer ?? true;
+    const overrideWindowMs = allowOverrideServer
+      ? ADMIN_OVERRIDE_WINDOW_MS
+      : CLIENT_OVERRIDE_WINDOW_MS;
+
     const localDeletedRaw = localStorage.getItem(DELETED_LICENSES_STORAGE_KEY);
     const localDeleted = localDeletedRaw ? JSON.parse(localDeletedRaw) : { ids: [], pins: [] };
     const deletedIdSet = new Set<string>([
@@ -600,6 +654,7 @@ export function reconcileClientLicensesWithLocal(
     const overridesRaw = localStorage.getItem(LICENSE_OVERRIDES_STORAGE_KEY);
     const overridesMap: Record<string, StoredLicenseOverride> =
       overridesRaw && typeof JSON.parse(overridesRaw) === "object" ? JSON.parse(overridesRaw) : {};
+    let overridesMutated = false;
 
     const needsServerSync: ClientLicense[] = [];
     const seenIds = new Set<string>();
@@ -612,31 +667,72 @@ export function reconcileClientLicensesWithLocal(
         continue;
       }
 
+      const ovById = overridesMap[sLic.id];
+      const ovByPin = sLic.pin_code ? overridesMap[`pin:${sLic.pin_code}`] : undefined;
       const ov =
-        overridesMap[sLic.id] || (sLic.pin_code ? overridesMap[`pin:${sLic.pin_code}`] : undefined);
+        ovById && ovByPin
+          ? ovById.updatedAt >= ovByPin.updatedAt
+            ? ovById
+            : ovByPin
+          : ovById || ovByPin;
 
       if (ov && ov.license) {
-        const mergedBound = Array.from(
-          new Set([...(sLic.bound_device_ids || []), ...(ov.license.bound_device_ids || [])]),
-        );
-        const merged: ClientLicense = {
-          ...sLic,
-          ...ov.license,
-          id: sLic.id,
-          pin_code: ov.license.pin_code || sLic.pin_code,
-          bound_device_ids: mergedBound,
-        };
-        if (
-          sLic.client_name !== merged.client_name ||
-          sLic.status !== merged.status ||
-          sLic.expires_at !== merged.expires_at ||
-          sLic.max_devices !== merged.max_devices
-        ) {
-          needsServerSync.push(merged);
+        const matchesServer =
+          sLic.client_name === ov.license.client_name &&
+          sLic.status === ov.license.status &&
+          sLic.expires_at === ov.license.expires_at &&
+          sLic.max_devices === ov.license.max_devices;
+
+        const ageMs = nowMs - (Number(ov.updatedAt) || 0);
+        const isFreshOverride = ageMs >= -5000 && ageMs <= overrideWindowMs;
+
+        if (matchesServer || !isFreshOverride) {
+          // Confirmed on server or superseded by newer server state: clean up local override
+          if (overridesMap[sLic.id]) {
+            delete overridesMap[sLic.id];
+            overridesMutated = true;
+          }
+          if (sLic.pin_code && overridesMap[`pin:${sLic.pin_code}`]) {
+            delete overridesMap[`pin:${sLic.pin_code}`];
+            overridesMutated = true;
+          }
+          result.push(sLic);
+          seenIds.add(sLic.id);
+          if (sLic.pin_code) seenPins.add(sLic.pin_code);
+        } else if (!allowOverrideServer) {
+          const mergedBound = Array.from(
+            new Set([...(sLic.bound_device_ids || []), ...(ov.license.bound_device_ids || [])]),
+          );
+          const merged: ClientLicense = {
+            ...sLic,
+            bound_device_ids: mergedBound,
+          };
+          result.push(merged);
+          seenIds.add(merged.id);
+          if (merged.pin_code) seenPins.add(merged.pin_code);
+        } else {
+          const mergedBound = Array.from(
+            new Set([...(sLic.bound_device_ids || []), ...(ov.license.bound_device_ids || [])]),
+          );
+          const merged: ClientLicense = {
+            ...sLic,
+            ...ov.license,
+            id: sLic.id,
+            pin_code: ov.license.pin_code || sLic.pin_code,
+            bound_device_ids: mergedBound,
+          };
+          if (
+            sLic.client_name !== merged.client_name ||
+            sLic.status !== merged.status ||
+            sLic.expires_at !== merged.expires_at ||
+            sLic.max_devices !== merged.max_devices
+          ) {
+            needsServerSync.push(merged);
+          }
+          result.push(merged);
+          seenIds.add(merged.id);
+          if (merged.pin_code) seenPins.add(merged.pin_code);
         }
-        result.push(merged);
-        seenIds.add(merged.id);
-        if (merged.pin_code) seenPins.add(merged.pin_code);
       } else {
         result.push(sLic);
         seenIds.add(sLic.id);
@@ -644,35 +740,58 @@ export function reconcileClientLicensesWithLocal(
       }
     }
 
-    // Also include any locally created/cached licenses that the stateless Worker isolate didn't have
-    const extraCandidates: ClientLicense[] = [];
+    // Include ONLY recently created/edited local overrides that are missing from a cold isolate.
+    // Never resurrect old cached entries from snapshot when server already returned licenses.
     for (const key of Object.keys(overridesMap)) {
-      if (!key.startsWith("pin:") && overridesMap[key]?.license) {
-        extraCandidates.push(overridesMap[key].license);
+      if (key.startsWith("pin:")) continue;
+      const entry = overridesMap[key];
+      const candidate = entry?.license;
+      if (!candidate || !candidate.id || !candidate.pin_code) continue;
+      if (deletedIdSet.has(candidate.id) || deletedPinSet.has(candidate.pin_code)) {
+        delete overridesMap[key];
+        delete overridesMap[`pin:${candidate.pin_code}`];
+        overridesMutated = true;
+        continue;
+      }
+      if (seenIds.has(candidate.id) || seenPins.has(candidate.pin_code)) continue;
+
+      const ageMs = nowMs - (Number(entry.updatedAt) || 0);
+      if (ageMs <= EXTRA_CREATED_WINDOW_MS) {
+        seenIds.add(candidate.id);
+        seenPins.add(candidate.pin_code);
+        result.unshift(candidate);
+        if (allowOverrideServer) {
+          needsServerSync.push(candidate);
+        }
+      } else {
+        delete overridesMap[key];
+        delete overridesMap[`pin:${candidate.pin_code}`];
+        overridesMutated = true;
       }
     }
 
-    const cachedRaw =
-      localStorage.getItem(CLIENT_LICENSES_CACHE_KEY) ||
-      localStorage.getItem(LICENSE_CACHE_STORAGE_KEY);
-    if (cachedRaw) {
-      const cachedParsed = JSON.parse(cachedRaw);
-      if (Array.isArray(cachedParsed?.licenses)) {
-        for (const cLic of cachedParsed.licenses as ClientLicense[]) {
-          if (cLic && cLic.id) extraCandidates.push(cLic);
+    // Only fall back to local cache snapshot if server returned 0 licenses (e.g. offline mode)
+    if (safeServer.length === 0) {
+      const cachedRaw =
+        localStorage.getItem(CLIENT_LICENSES_CACHE_KEY) ||
+        localStorage.getItem(LICENSE_CACHE_STORAGE_KEY);
+      if (cachedRaw) {
+        const cachedParsed = JSON.parse(cachedRaw);
+        if (Array.isArray(cachedParsed?.licenses)) {
+          for (const candidate of cachedParsed.licenses as ClientLicense[]) {
+            if (!candidate || !candidate.id || !candidate.pin_code) continue;
+            if (deletedIdSet.has(candidate.id) || deletedPinSet.has(candidate.pin_code)) continue;
+            if (seenIds.has(candidate.id) || seenPins.has(candidate.pin_code)) continue;
+            seenIds.add(candidate.id);
+            seenPins.add(candidate.pin_code);
+            result.push(candidate);
+          }
         }
       }
     }
 
-    for (const candidate of extraCandidates) {
-      if (!candidate || !candidate.id || !candidate.pin_code) continue;
-      if (deletedIdSet.has(candidate.id) || deletedPinSet.has(candidate.pin_code)) continue;
-      if (seenIds.has(candidate.id) || seenPins.has(candidate.pin_code)) continue;
-
-      seenIds.add(candidate.id);
-      seenPins.add(candidate.pin_code);
-      result.unshift(candidate);
-      needsServerSync.push(candidate);
+    if (overridesMutated) {
+      localStorage.setItem(LICENSE_OVERRIDES_STORAGE_KEY, JSON.stringify(overridesMap));
     }
 
     return { licenses: result, needsServerSync };

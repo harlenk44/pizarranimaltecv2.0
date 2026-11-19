@@ -312,6 +312,7 @@ export default function DesignManager() {
         parsed.transitionSeconds,
         userVoiceDraft,
         designPayload,
+        parsed.fullscreenAuto,
       );
 
       console.log(
@@ -356,6 +357,7 @@ export default function DesignManager() {
               type: "update_lotteries",
               id: selectedLicense.id,
               client_name: packedName,
+              license: updatedLicense,
             },
           }),
         });
@@ -366,6 +368,7 @@ export default function DesignManager() {
               data.clientLicenses,
               data.deletedIds,
               data.deletedPins,
+              { allowOverrideServer: true },
             );
             setLicenses(reconciled.licenses);
             saveLocalLicensesSnapshot(
@@ -425,6 +428,7 @@ export default function DesignManager() {
       parsed.transitionSeconds,
       DEFAULT_CLIENT_VOICE_CONFIG,
       null,
+      parsed.fullscreenAuto,
     );
     const resetLicense: ClientLicense = {
       ...selectedLicense,

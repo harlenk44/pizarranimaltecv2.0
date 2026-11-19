@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { supabase } from "@/lib/supabase";
 import {
   KeyRound,
   Plus,
@@ -24,6 +25,8 @@ import {
   Volume2,
   VolumeX,
   Sparkles,
+  Maximize,
+  Minimize,
 } from "lucide-react";
 import type { ClientLicense } from "@/lib/types";
 import LicenseGate from "@/components/LicenseGate";
@@ -76,6 +79,10 @@ export default function LicensesManager() {
   const [loading, setLoading] = useState<boolean>(true);
   const [saving, setSaving] = useState<boolean>(false);
   const [previewClientScreen, setPreviewClientScreen] = useState<boolean>(false);
+  const licensesRef = useRef<ClientLicense[]>([]);
+  licensesRef.current = licenses;
+  const requireLicenseRef = useRef<boolean>(false);
+  requireLicenseRef.current = requireLicense;
 
   // New license form state
   const [showForm, setShowForm] = useState<boolean>(false);
@@ -97,6 +104,7 @@ export default function LicensesManager() {
     DEFAULT_CLIENT_VOICE_CONFIG,
   );
   const [formCardStyle, setFormCardStyle] = useState<"global" | "neon" | "solid">("global");
+  const [formFullscreenAuto, setFormFullscreenAuto] = useState<boolean>(false);
 
   // Edit lotteries, voice & design modal state
   const [editingLicense, setEditingLicense] = useState<ClientLicense | null>(null);
@@ -110,6 +118,7 @@ export default function LicensesManager() {
     DEFAULT_CLIENT_VOICE_CONFIG,
   );
   const [editingDesignConfig, setEditingDesignConfig] = useState<ClientDesignConfig>({});
+  const [editingFullscreenAuto, setEditingFullscreenAuto] = useState<boolean>(false);
 
   // Copy feedback
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -124,59 +133,104 @@ export default function LicensesManager() {
 
   const fetchLicenses = useCallback(async () => {
     try {
-      const res = await fetch("/api/public/results/sync");
+      const res = await fetch("/api/public/results/sync", { cache: "no-store" });
       if (res.ok) {
         const data = await res.json();
         const nextRequire =
-          typeof data.requireLicense === "boolean" ? data.requireLicense : requireLicense;
+          typeof data.requireLicense === "boolean"
+            ? data.requireLicense
+            : requireLicenseRef.current;
         if (typeof data.requireLicense === "boolean") {
           setRequireLicense(data.requireLicense);
         }
-        if (Array.isArray(data.clientLicenses)) {
-          const reconciled = reconcileClientLicensesWithLocal(
-            data.clientLicenses,
-            data.deletedIds,
-            data.deletedPins,
-          );
-          let finalLicenses: ClientLicense[] = reconciled.licenses;
 
-          if (reconciled.needsServerSync.length > 0) {
-            try {
-              const restoreRes = await fetch("/api/public/results/sync", {
-                method: "PUT",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  licenseAction: {
-                    type: "restore_batch",
-                    licenses: reconciled.needsServerSync,
-                  },
-                }),
-              });
-              if (restoreRes.ok) {
-                const restoreData = await restoreRes.json();
-                if (Array.isArray(restoreData.clientLicenses)) {
-                  finalLicenses = reconcileClientLicensesWithLocal(
-                    restoreData.clientLicenses,
-                    restoreData.deletedIds,
-                    restoreData.deletedPins,
-                  ).licenses;
-                }
-              }
-            } catch {
-              // ignore
+        let serverList: ClientLicense[] = Array.isArray(data.clientLicenses)
+          ? data.clientLicenses
+          : [];
+
+        // If external Supabase is configured in browser and server list failed to reach Supabase, also merge direct admin query
+        const sbUrl = import.meta.env["VITE_SUPABASE_URL"];
+        if (typeof sbUrl === "string" && sbUrl.includes(".supabase.co")) {
+          try {
+            const { data: sbRows, error: sbErr } = await supabase
+              .from("client_licenses")
+              .select("*");
+            if (!sbErr && Array.isArray(sbRows) && sbRows.length > 0) {
+              const mappedSb: ClientLicense[] = sbRows.map((d: Record<string, unknown>) => ({
+                id: String(d["id"]),
+                client_name: String(d["client_name"] || "Cliente"),
+                pin_code: String(d["pin_code"] || ""),
+                status: d["status"] === "paused" ? "paused" : "active",
+                expires_at: d["expires_at"]
+                  ? new Date(d["expires_at"] as string).toISOString()
+                  : null,
+                max_devices: Number(d["max_devices"]) || 1,
+                bound_device_ids: Array.isArray(d["bound_device_ids"])
+                  ? (d["bound_device_ids"] as string[])
+                  : [],
+                notes:
+                  typeof d["notes"] === "string"
+                    ? d["notes"].replace(/\|\|REQUIRE:[01]/g, "").trim()
+                    : "",
+                created_at: d["created_at"]
+                  ? new Date(d["created_at"] as string).toISOString()
+                  : new Date().toISOString(),
+              }));
+              const mapById = new Map<string, ClientLicense>();
+              for (const l of serverList) mapById.set(l.id, l);
+              for (const l of mappedSb) mapById.set(l.id, l);
+              serverList = Array.from(mapById.values());
             }
+          } catch {
+            // ignore
           }
-
-          saveLocalLicensesSnapshot(nextRequire, finalLicenses);
-          setLicenses(finalLicenses);
         }
+
+        const reconciled = reconcileClientLicensesWithLocal(
+          serverList,
+          data.deletedIds,
+          data.deletedPins,
+          { allowOverrideServer: true },
+        );
+        let finalLicenses: ClientLicense[] = reconciled.licenses;
+
+        if (reconciled.needsServerSync.length > 0) {
+          try {
+            const restoreRes = await fetch("/api/public/results/sync", {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                licenseAction: {
+                  type: "restore_batch",
+                  licenses: reconciled.needsServerSync,
+                },
+              }),
+            });
+            if (restoreRes.ok) {
+              const restoreData = await restoreRes.json();
+              if (Array.isArray(restoreData.clientLicenses)) {
+                finalLicenses = reconcileClientLicensesWithLocal(
+                  restoreData.clientLicenses,
+                  restoreData.deletedIds,
+                  restoreData.deletedPins,
+                  { allowOverrideServer: true },
+                ).licenses;
+              }
+            }
+          } catch {
+            // ignore
+          }
+        }
+
+        saveLocalLicensesSnapshot(nextRequire, finalLicenses);
+        setLicenses(finalLicenses);
       }
     } catch {
       // ignore
     } finally {
       setLoading(false);
     }
-  }, [requireLicense]);
+  }, []);
 
   useEffect(() => {
     fetchLicenses();
@@ -197,47 +251,80 @@ export default function LicensesManager() {
 
   const runLicenseAction = async (actionPayload: Record<string, unknown>, successText?: string) => {
     setSaving(true);
-    // Optimistic local update so UI reflects action immediately without flicker
-    if (actionPayload.type === "delete" && typeof actionPayload.id === "string") {
-      setLicenses((prev) => {
-        const targetToDelete = prev.find((l) => l.id === actionPayload.id);
-        const next = prev.filter((l) => l.id !== actionPayload.id);
-        try {
-          removeLocalLicenseOverride(actionPayload.id as string, targetToDelete?.pin_code);
-          const localDeletedRaw = localStorage.getItem("pizarra_deleted_licenses_v2");
-          const localDeleted = localDeletedRaw
-            ? JSON.parse(localDeletedRaw)
-            : { ids: [], pins: [] };
-          const ids = Array.isArray(localDeleted.ids) ? localDeleted.ids : [];
-          const pins = Array.isArray(localDeleted.pins) ? localDeleted.pins : [];
-          if (!ids.includes(actionPayload.id)) ids.push(actionPayload.id);
-          if (targetToDelete?.pin_code && !pins.includes(targetToDelete.pin_code)) {
-            pins.push(targetToDelete.pin_code);
-          }
-          localStorage.setItem("pizarra_deleted_licenses_v2", JSON.stringify({ ids, pins }));
-          saveLocalLicensesSnapshot(requireLicense, next);
-        } catch {
-          // ignore
+    const enrichedPayload: Record<string, unknown> = { ...actionPayload };
+    let updatedSnapshot: ClientLicense | null = null;
+    const currentReq = requireLicenseRef.current;
+    const prevList = licensesRef.current;
+
+    // Optimistic local update + snapshot preparation so stateless Cloudflare isolates never miss an edit
+    if (actionPayload.type === "create") {
+      const daysVal = actionPayload.days as number | null | undefined;
+      const expiresAt =
+        typeof daysVal === "number" && daysVal > 0
+          ? new Date(Date.now() + daysVal * 86400000).toISOString()
+          : null;
+      const newLic: ClientLicense = {
+        id:
+          typeof actionPayload.id === "string" && actionPayload.id
+            ? actionPayload.id
+            : `lic-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        client_name: String(actionPayload.client_name || "Cliente").trim(),
+        pin_code: String(actionPayload.pin_code || generateRandomPin()),
+        status: "active",
+        expires_at: expiresAt,
+        max_devices: Math.max(1, Number(actionPayload.max_devices) || 1),
+        bound_device_ids: [],
+        notes: typeof actionPayload.notes === "string" ? actionPayload.notes : "",
+        created_at: new Date().toISOString(),
+      };
+      enrichedPayload.id = newLic.id;
+      enrichedPayload.pin_code = newLic.pin_code;
+      enrichedPayload.license = newLic;
+      updatedSnapshot = newLic;
+      saveLocalLicenseOverride(newLic);
+      const next = [
+        newLic,
+        ...prevList.filter((l) => l.id !== newLic.id && l.pin_code !== newLic.pin_code),
+      ];
+      saveLocalLicensesSnapshot(currentReq, next);
+      setLicenses(next);
+      broadcastLicenseChange();
+    } else if (actionPayload.type === "delete" && typeof actionPayload.id === "string") {
+      const targetToDelete = prevList.find((l) => l.id === actionPayload.id);
+      const next = prevList.filter((l) => l.id !== actionPayload.id);
+      try {
+        removeLocalLicenseOverride(actionPayload.id, targetToDelete?.pin_code);
+        const localDeletedRaw = localStorage.getItem("pizarra_deleted_licenses_v2");
+        const localDeleted = localDeletedRaw ? JSON.parse(localDeletedRaw) : { ids: [], pins: [] };
+        const ids = Array.isArray(localDeleted.ids) ? localDeleted.ids : [];
+        const pins = Array.isArray(localDeleted.pins) ? localDeleted.pins : [];
+        if (!ids.includes(actionPayload.id)) ids.push(actionPayload.id);
+        if (targetToDelete?.pin_code && !pins.includes(targetToDelete.pin_code)) {
+          pins.push(targetToDelete.pin_code);
         }
-        return next;
-      });
+        localStorage.setItem("pizarra_deleted_licenses_v2", JSON.stringify({ ids, pins }));
+        saveLocalLicensesSnapshot(currentReq, next);
+      } catch {
+        // ignore
+      }
+      setLicenses(next);
       broadcastLicenseChange();
     } else if (actionPayload.type === "toggle_status" && typeof actionPayload.id === "string") {
-      setLicenses((prev) => {
-        const next = prev.map((l) => {
-          if (l.id === actionPayload.id) {
-            const updated: ClientLicense = {
-              ...l,
-              status: l.status === "active" ? ("paused" as const) : ("active" as const),
-            };
-            saveLocalLicenseOverride(updated);
-            return updated;
-          }
-          return l;
-        });
-        saveLocalLicensesSnapshot(requireLicense, next);
-        return next;
+      const next = prevList.map((l) => {
+        if (l.id === actionPayload.id) {
+          const updated: ClientLicense = {
+            ...l,
+            status: l.status === "active" ? ("paused" as const) : ("active" as const),
+          };
+          updatedSnapshot = updated;
+          saveLocalLicenseOverride(updated);
+          return updated;
+        }
+        return l;
       });
+      if (updatedSnapshot) enrichedPayload.license = updatedSnapshot;
+      saveLocalLicensesSnapshot(currentReq, next);
+      setLicenses(next);
       broadcastLicenseChange();
     } else if (
       actionPayload.type === "update_lotteries" &&
@@ -245,56 +332,109 @@ export default function LicensesManager() {
       typeof actionPayload.client_name === "string"
     ) {
       const updatedClientName = actionPayload.client_name.trim();
-      setLicenses((prev) => {
-        const next = prev.map((l) => {
-          if (l.id === actionPayload.id) {
-            const updated: ClientLicense = {
-              ...l,
-              client_name: updatedClientName,
-            };
-            saveLocalLicenseOverride(updated);
-            return updated;
-          }
-          return l;
-        });
-        saveLocalLicensesSnapshot(requireLicense, next);
-        return next;
+      const next = prevList.map((l) => {
+        if (l.id === actionPayload.id) {
+          const updated: ClientLicense = {
+            ...l,
+            client_name: updatedClientName,
+          };
+          updatedSnapshot = updated;
+          saveLocalLicenseOverride(updated);
+          return updated;
+        }
+        return l;
       });
+      if (updatedSnapshot) enrichedPayload.license = updatedSnapshot;
+      saveLocalLicensesSnapshot(currentReq, next);
+      setLicenses(next);
+      broadcastLicenseChange();
+    } else if (actionPayload.type === "renew" && typeof actionPayload.id === "string") {
+      const next = prevList.map((l) => {
+        if (l.id === actionPayload.id) {
+          const daysToAdd =
+            actionPayload.days === null
+              ? null
+              : Math.max(1, Math.min(365, Number(actionPayload.days) || 30));
+          const isStillActive = l.expires_at && new Date(l.expires_at).getTime() > Date.now();
+          const baseDate = isStillActive && l.expires_at ? new Date(l.expires_at) : new Date();
+          const updated: ClientLicense = {
+            ...l,
+            status: "active",
+            expires_at:
+              daysToAdd === null
+                ? null
+                : new Date(baseDate.getTime() + daysToAdd * 86400000).toISOString(),
+          };
+          updatedSnapshot = updated;
+          saveLocalLicenseOverride(updated);
+          return updated;
+        }
+        return l;
+      });
+      if (updatedSnapshot) enrichedPayload.license = updatedSnapshot;
+      saveLocalLicensesSnapshot(currentReq, next);
+      setLicenses(next);
       broadcastLicenseChange();
     } else if (actionPayload.type === "reset_devices" && typeof actionPayload.id === "string") {
-      setLicenses((prev) => {
-        const next = prev.map((l) => {
-          if (l.id === actionPayload.id) {
-            const updated: ClientLicense = { ...l, bound_device_ids: [] };
-            saveLocalLicenseOverride(updated);
-            return updated;
-          }
-          return l;
-        });
-        saveLocalLicensesSnapshot(requireLicense, next);
-        return next;
+      const next = prevList.map((l) => {
+        if (l.id === actionPayload.id) {
+          const updated: ClientLicense = { ...l, bound_device_ids: [] };
+          updatedSnapshot = updated;
+          saveLocalLicenseOverride(updated);
+          return updated;
+        }
+        return l;
       });
+      if (updatedSnapshot) enrichedPayload.license = updatedSnapshot;
+      saveLocalLicensesSnapshot(currentReq, next);
+      setLicenses(next);
       broadcastLicenseChange();
+    }
+
+    // Direct Supabase write using authenticated Admin session when external Supabase is configured
+    const sbUrl = import.meta.env["VITE_SUPABASE_URL"];
+    if (typeof sbUrl === "string" && sbUrl.includes(".supabase.co")) {
+      try {
+        if (actionPayload.type === "delete" && typeof actionPayload.id === "string") {
+          await supabase.from("client_licenses").delete().eq("id", actionPayload.id);
+        } else if (updatedSnapshot) {
+          const snap: ClientLicense = updatedSnapshot;
+          await supabase.from("client_licenses").upsert({
+            id: snap.id,
+            client_name: snap.client_name,
+            pin_code: snap.pin_code,
+            status: snap.status,
+            expires_at: snap.expires_at,
+            max_devices: snap.max_devices,
+            bound_device_ids: snap.bound_device_ids,
+            notes: snap.notes ?? "",
+            created_at: snap.created_at,
+          });
+        }
+      } catch {
+        // ignore if RLS / table unavailable; server API route handles fallback
+      }
     }
 
     try {
       const res = await fetch("/api/public/results/sync", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ licenseAction: actionPayload }),
+        body: JSON.stringify({ licenseAction: enrichedPayload }),
       });
       if (res.ok) {
         const data = await res.json();
         const nextRequire =
-          typeof data.requireLicense === "boolean" ? data.requireLicense : requireLicense;
+          typeof data.requireLicense === "boolean" ? data.requireLicense : currentReq;
         if (typeof data.requireLicense === "boolean") {
           setRequireLicense(data.requireLicense);
         }
         if (Array.isArray(data.clientLicenses)) {
           if (actionPayload.type === "create" || actionPayload.type === "renew") {
             const targetPin =
-              typeof actionPayload.pin_code === "string" ? actionPayload.pin_code : undefined;
-            const targetId = typeof actionPayload.id === "string" ? actionPayload.id : undefined;
+              typeof enrichedPayload.pin_code === "string" ? enrichedPayload.pin_code : undefined;
+            const targetId =
+              typeof enrichedPayload.id === "string" ? enrichedPayload.id : undefined;
             const createdOrRenewed = (data.clientLicenses as ClientLicense[]).find(
               (l) => (targetId && l.id === targetId) || (targetPin && l.pin_code === targetPin),
             );
@@ -306,12 +446,15 @@ export default function LicensesManager() {
             data.clientLicenses,
             data.deletedIds,
             data.deletedPins,
+            { allowOverrideServer: true },
           );
           setLicenses(reconciled.licenses);
           saveLocalLicensesSnapshot(nextRequire, reconciled.licenses);
           broadcastLicenseChange();
         }
         if (successText) showToast(successText);
+      } else if (successText) {
+        showToast("Configuración guardada localmente.");
       }
     } catch {
       showToast("Configuración guardada localmente.");
@@ -331,18 +474,23 @@ export default function LicensesManager() {
   };
 
   const handleOpenEditLotteries = (lic: ClientLicense) => {
-    const { allowedLotteries, cardsPerScreen, transitionSeconds, voiceConfig, designConfig } =
-      parseClientLicenseName(lic.client_name);
+    const {
+      allowedLotteries,
+      cardsPerScreen,
+      transitionSeconds,
+      voiceConfig,
+      designConfig,
+      fullscreenAuto,
+    } = parseClientLicenseName(lic.client_name);
     setEditingLicense(lic);
     setEditingLotteries(
-      allowedLotteries && allowedLotteries.length > 0
-        ? [...allowedLotteries]
-        : ALL_AVAILABLE_LOTTERIES.map((l) => l.id),
+      allowedLotteries !== null ? [...allowedLotteries] : ALL_AVAILABLE_LOTTERIES.map((l) => l.id),
     );
     setEditingCardsPerScreen(cardsPerScreen ?? DEFAULT_CARDS_PER_SCREEN);
     setEditingTransitionSeconds(transitionSeconds ?? DEFAULT_TRANSITION_SECONDS);
     setEditingVoiceConfig(voiceConfig ?? DEFAULT_CLIENT_VOICE_CONFIG);
     setEditingDesignConfig(designConfig ?? {});
+    setEditingFullscreenAuto(Boolean(fullscreenAuto));
   };
 
   const handleSaveEditLotteries = async () => {
@@ -356,17 +504,19 @@ export default function LicensesManager() {
       editingTransitionSeconds,
       editingVoiceConfig,
       editingDesignConfig,
+      editingFullscreenAuto,
     );
     const cardsLabel =
       editingCardsPerScreen === "TODAS" ? "Todas" : `${editingCardsPerScreen} por pantalla`;
     const voiceLabel = editingVoiceConfig.enabled ? "Voz Activa" : "Voz Silenciada";
+    const fsLabel = editingFullscreenAuto ? "Pantalla Completa AUTO" : "Pantalla Normal";
     await runLicenseAction(
       {
         type: "update_lotteries",
         id: editingLicense.id,
         client_name: packedName,
       },
-      `Configuración actualizada para ${cleanName} (${editingLotteries.length}/${ALL_AVAILABLE_LOTTERIES.length} loterías · ${cardsLabel} · ${voiceLabel})`,
+      `Configuración actualizada para ${cleanName} (${editingLotteries.length}/${ALL_AVAILABLE_LOTTERIES.length} loterías · ${cardsLabel} · ${voiceLabel} · ${fsLabel})`,
     );
     setEditingLicense(null);
   };
@@ -375,8 +525,14 @@ export default function LicensesManager() {
     lic: ClientLicense,
     newCards: CardsPerScreenOption,
   ) => {
-    const { cleanName, allowedLotteries, transitionSeconds, voiceConfig, designConfig } =
-      parseClientLicenseName(lic.client_name);
+    const {
+      cleanName,
+      allowedLotteries,
+      transitionSeconds,
+      voiceConfig,
+      designConfig,
+      fullscreenAuto,
+    } = parseClientLicenseName(lic.client_name);
     const packedName = formatClientLicenseName(
       cleanName,
       allowedLotteries,
@@ -385,6 +541,7 @@ export default function LicensesManager() {
       transitionSeconds,
       voiceConfig,
       designConfig,
+      fullscreenAuto,
     );
     const cardsLabel = newCards === "TODAS" ? "Todas" : `${newCards} productos por pantalla`;
     await runLicenseAction(
@@ -398,8 +555,14 @@ export default function LicensesManager() {
   };
 
   const handleQuickChangeTransitionSeconds = async (lic: ClientLicense, newSeconds: number) => {
-    const { cleanName, allowedLotteries, cardsPerScreen, voiceConfig, designConfig } =
-      parseClientLicenseName(lic.client_name);
+    const {
+      cleanName,
+      allowedLotteries,
+      cardsPerScreen,
+      voiceConfig,
+      designConfig,
+      fullscreenAuto,
+    } = parseClientLicenseName(lic.client_name);
     const packedName = formatClientLicenseName(
       cleanName,
       allowedLotteries,
@@ -408,6 +571,7 @@ export default function LicensesManager() {
       newSeconds,
       voiceConfig,
       designConfig,
+      fullscreenAuto,
     );
     await runLicenseAction(
       {
@@ -427,6 +591,7 @@ export default function LicensesManager() {
       transitionSeconds,
       voiceConfig,
       designConfig,
+      fullscreenAuto,
     } = parseClientLicenseName(lic.client_name);
     const nextVoice: ClientVoiceConfig = {
       ...(voiceConfig ?? DEFAULT_CLIENT_VOICE_CONFIG),
@@ -440,6 +605,7 @@ export default function LicensesManager() {
       transitionSeconds,
       nextVoice,
       designConfig,
+      fullscreenAuto,
     );
     await runLicenseAction(
       {
@@ -448,6 +614,37 @@ export default function LicensesManager() {
         client_name: packedName,
       },
       `${cleanName}: locución de voz ${nextVoice.enabled ? "ACTIVADA" : "DESACTIVADA"}`,
+    );
+  };
+
+  const handleQuickToggleFullscreen = async (lic: ClientLicense) => {
+    const {
+      cleanName,
+      allowedLotteries,
+      cardsPerScreen,
+      transitionSeconds,
+      voiceConfig,
+      designConfig,
+      fullscreenAuto,
+    } = parseClientLicenseName(lic.client_name);
+    const nextFullscreen = !fullscreenAuto;
+    const packedName = formatClientLicenseName(
+      cleanName,
+      allowedLotteries,
+      ALL_AVAILABLE_LOTTERIES.length,
+      cardsPerScreen,
+      transitionSeconds,
+      voiceConfig,
+      designConfig,
+      nextFullscreen,
+    );
+    await runLicenseAction(
+      {
+        type: "update_lotteries",
+        id: lic.id,
+        client_name: packedName,
+      },
+      `${cleanName}: pantalla completa automática (APK/TV) ${nextFullscreen ? "ACTIVADA" : "DESACTIVADA"}`,
     );
   };
 
@@ -468,16 +665,21 @@ export default function LicensesManager() {
       formTransitionSeconds,
       formVoiceConfig,
       initialDesign,
+      formFullscreenAuto,
     );
 
     const cardsLabel =
       formCardsPerScreen === "TODAS" ? "Todas" : `${formCardsPerScreen} por pantalla`;
 
+    const cleanPin = pinCode.replace(/[^0-9]/g, "").slice(0, 6) || generateRandomPin();
+    const newId = `lic-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
     await runLicenseAction(
       {
         type: "create",
+        id: newId,
         client_name: packedName,
-        pin_code: pinCode.replace(/[^0-9]/g, "").slice(0, 6) || generateRandomPin(),
+        pin_code: cleanPin,
         days,
         max_devices: maxDevices,
         notes: notes.trim(),
@@ -493,6 +695,7 @@ export default function LicensesManager() {
     setFormTransitionSeconds(DEFAULT_TRANSITION_SECONDS);
     setFormVoiceConfig(DEFAULT_CLIENT_VOICE_CONFIG);
     setFormCardStyle("global");
+    setFormFullscreenAuto(false);
     setShowForm(false);
   };
 
@@ -965,6 +1168,37 @@ export default function LicensesManager() {
             </div>
           </div>
 
+          {/* Pantalla Completa Automática (APK Android / TV) */}
+          <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="space-y-0.5">
+              <div className="flex items-center gap-2">
+                {formFullscreenAuto ? (
+                  <Maximize className="w-4 h-4 text-cyan-400" />
+                ) : (
+                  <Minimize className="w-4 h-4 text-slate-400" />
+                )}
+                <span className="text-xs font-bold text-white uppercase tracking-wider">
+                  Pantalla Completa Automática (APK Android / Smart TV)
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-400">
+                Activa automáticamente el modo presentación a pantalla completa sin necesidad de
+                buscar el botón en la APK o TV.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setFormFullscreenAuto((prev) => !prev)}
+              className={`px-3.5 py-2 rounded-lg text-xs font-bold border transition cursor-pointer shrink-0 ${
+                formFullscreenAuto
+                  ? "bg-cyan-950/70 border-cyan-500 text-cyan-300"
+                  : "bg-slate-900 border-slate-700 text-slate-400 hover:text-white"
+              }`}
+            >
+              {formFullscreenAuto ? "📺 Pantalla Completa: ACTIVA" : "Vista Normal"}
+            </button>
+          </div>
+
           {/* Loterías Permitidas Selector */}
           <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-4 space-y-3">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800/80 pb-2.5">
@@ -1174,12 +1408,18 @@ export default function LicensesManager() {
                     transitionSeconds,
                     voiceConfig,
                     designConfig,
+                    fullscreenAuto,
                   } = parseClientLicenseName(lic.client_name);
                   const isAll =
-                    !allowedLotteries || allowedLotteries.length >= ALL_AVAILABLE_LOTTERIES.length;
-                  const totalAllowedCount = allowedLotteries
-                    ? allowedLotteries.length
-                    : ALL_AVAILABLE_LOTTERIES.length;
+                    allowedLotteries === null ||
+                    allowedLotteries.length >= ALL_AVAILABLE_LOTTERIES.length;
+                  const totalAllowedCount =
+                    allowedLotteries !== null
+                      ? allowedLotteries.length
+                      : ALL_AVAILABLE_LOTTERIES.length;
+                  const cleanNotes = lic.notes
+                    ? lic.notes.replace(/\|\|REQUIRE:[01]/g, "").trim()
+                    : "";
                   const isVoiceOn = voiceConfig?.enabled ?? true;
                   const customCardStyle = designConfig?.card_style;
 
@@ -1188,26 +1428,32 @@ export default function LicensesManager() {
                       {/* Client Name & Notes */}
                       <td className="py-3.5 px-4">
                         <div className="font-bold text-white">{cleanName}</div>
-                        {lic.notes && (
-                          <div className="text-xs text-slate-400 mt-0.5">{lic.notes}</div>
+                        {cleanNotes && (
+                          <div className="text-xs text-slate-400 mt-0.5">{cleanNotes}</div>
                         )}
                         <div className="mt-1.5 flex items-center gap-2 flex-wrap">
                           <span
                             className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold border ${
                               isAll
                                 ? "bg-emerald-950/60 text-emerald-300 border-emerald-700/50"
-                                : "bg-blue-950/60 text-blue-300 border-blue-700/50"
+                                : totalAllowedCount === 0
+                                  ? "bg-red-950/60 text-red-300 border-red-700/50"
+                                  : "bg-blue-950/60 text-blue-300 border-blue-700/50"
                             }`}
                             title={
                               isAll
                                 ? "Tiene acceso a todas las loterías"
-                                : `Loterías activas: ${allowedLotteries.join(", ")}`
+                                : totalAllowedCount === 0
+                                  ? "Ninguna lotería seleccionada"
+                                  : `Loterías activas: ${allowedLotteries?.join(", ")}`
                             }
                           >
                             <ListFilter className="w-3 h-3" />
                             {isAll
                               ? `Todas (${ALL_AVAILABLE_LOTTERIES.length} loterías)`
-                              : `${totalAllowedCount} de ${ALL_AVAILABLE_LOTTERIES.length} loterías`}
+                              : totalAllowedCount === 0
+                                ? `0 de ${ALL_AVAILABLE_LOTTERIES.length} (Ninguna)`
+                                : `${totalAllowedCount} de ${ALL_AVAILABLE_LOTTERIES.length} loterías`}
                           </span>
 
                           {/* Selector rápido de Productos por Pantalla en la fila */}
@@ -1283,6 +1529,26 @@ export default function LicensesManager() {
                               <VolumeX className="w-3 h-3 text-red-400" />
                             )}
                             <span>{isVoiceOn ? "Voz ON" : "Voz OFF"}</span>
+                          </button>
+
+                          {/* Botón rápido de Pantalla Completa Automática (APK/TV) */}
+                          <button
+                            type="button"
+                            disabled={saving}
+                            onClick={() => handleQuickToggleFullscreen(lic)}
+                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold border transition cursor-pointer ${
+                              fullscreenAuto
+                                ? "bg-cyan-950/60 text-cyan-300 border-cyan-600/60 hover:bg-cyan-900/50"
+                                : "bg-slate-900/80 text-slate-400 border-slate-700/70 hover:text-slate-200 hover:bg-slate-800"
+                            }`}
+                            title="Activar o desactivar la pantalla completa automática en APK Android y TV para este usuario"
+                          >
+                            {fullscreenAuto ? (
+                              <Maximize className="w-3 h-3 text-cyan-400" />
+                            ) : (
+                              <Minimize className="w-3 h-3 text-slate-400" />
+                            )}
+                            <span>{fullscreenAuto ? "Pant. Completa ON" : "Pant. Normal"}</span>
                           </button>
 
                           {customCardStyle && (
@@ -1753,6 +2019,37 @@ export default function LicensesManager() {
                   })}
                 </div>
               </div>
+            </div>
+
+            {/* Pantalla Completa Automática por Usuario (APK / TV) en el Modal */}
+            <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+              <div className="space-y-0.5">
+                <div className="flex items-center gap-2">
+                  {editingFullscreenAuto ? (
+                    <Maximize className="w-4 h-4 text-cyan-400" />
+                  ) : (
+                    <Minimize className="w-4 h-4 text-slate-400" />
+                  )}
+                  <span className="text-xs font-bold text-white uppercase tracking-wider">
+                    Pantalla Completa Automática (APK Android / TV)
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400">
+                  Expande automáticamente la pizarra a pantalla completa al abrirla con este PIN,
+                  sin necesidad de ubicar el botón manualmente.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingFullscreenAuto((prev) => !prev)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition cursor-pointer shrink-0 ${
+                  editingFullscreenAuto
+                    ? "bg-cyan-600/25 border-cyan-400 text-cyan-200"
+                    : "bg-slate-900 border-slate-700 text-slate-400 hover:text-white"
+                }`}
+              >
+                {editingFullscreenAuto ? "📺 Pantalla Completa: ACTIVA" : "Vista Normal"}
+              </button>
             </div>
 
             {/* Quick buttons */}

@@ -44,9 +44,27 @@ function isInactiveSupabaseUrl(url?: string): boolean {
   return INACTIVE_SUPABASE_HOSTS.some((host) => url.includes(host));
 }
 
+function readServerEnv(key: string): string | undefined {
+  if (typeof process !== "undefined" && process.env && process.env[key]) {
+    return process.env[key];
+  }
+  try {
+    const metaEnv = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
+    if (metaEnv && metaEnv[key]) {
+      return metaEnv[key];
+    }
+  } catch {
+    // ignore
+  }
+  return undefined;
+}
+
 function createSupabaseAdminClient() {
-  const SUPABASE_URL = process.env["SUPABASE_URL"];
-  const SUPABASE_SERVICE_ROLE_KEY = process.env["SUPABASE_SERVICE_ROLE_KEY"];
+  const SUPABASE_URL = readServerEnv("SUPABASE_URL") || readServerEnv("VITE_SUPABASE_URL");
+  const SUPABASE_SERVICE_ROLE_KEY =
+    readServerEnv("SUPABASE_SERVICE_ROLE_KEY") ||
+    readServerEnv("SUPABASE_PUBLISHABLE_KEY") ||
+    readServerEnv("VITE_SUPABASE_PUBLISHABLE_KEY");
 
   if (
     _supabaseAdminOffline ||

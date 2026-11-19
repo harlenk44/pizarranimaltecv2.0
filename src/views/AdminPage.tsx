@@ -127,7 +127,7 @@ export default function AdminPage({ onBack }: AdminPageProps) {
 
     let serverGames: Game[] = [];
     try {
-      const syncRes = await fetch("/api/public/results/sync");
+      const syncRes = await fetch("/api/public/results/sync", { cache: "no-store" });
       if (syncRes.ok) {
         const syncData = await syncRes.json();
         if (syncData?.customGameLogos && typeof syncData.customGameLogos === "object") {
@@ -143,7 +143,7 @@ export default function AdminPage({ onBack }: AdminPageProps) {
 
     const { data } = await supabase.from("games").select("*").order("display_order");
     const dbGames = (data ?? []) as Game[];
-    const merged = mergeGamesPreserveCustomLogos(dbGames, serverGames, localGames);
+    const merged = mergeGamesPreserveCustomLogos(localGames, dbGames, serverGames);
     mockStore.games = merged;
     if (typeof window !== "undefined") {
       try {
@@ -858,20 +858,71 @@ function GamesManager({ games, onRefresh }: { games: Game[]; onRefresh: () => vo
       .replace(/^-+|-+$/g, "");
   }
 
+  function broadcastGamesUpdated() {
+    try {
+      const bc = new BroadcastChannel("pizarra_lottery_channel");
+      bc.postMessage({ type: "GAMES_UPDATED" });
+      setTimeout(() => bc.close(), 1000);
+    } catch {
+      // ignore
+    }
+  }
+
   async function handleAddGame() {
     if (!name.trim()) return;
     setSaving(true);
     setError(null);
-    const { error: insertError } = await supabase.from("games").insert({
+    const newSlug = slugify(name);
+    const newId =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `game-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const newGamePayload: Game = {
+      id: newId,
       name: name.trim().toUpperCase(),
-      slug: slugify(name),
+      slug: newSlug,
       color,
+      logo_url: getGameLogo(newSlug, color),
       display_order: games.length + 1,
+      is_active: true,
+      loading_mode: "automatic",
+      mode: "automatic",
+      schedule_times: getDefaultGameScheduleTimes(newSlug),
+      created_at: new Date().toISOString(),
+    };
+    const { error: insertError } = await supabase.from("games").insert({
+      id: newGamePayload.id,
+      name: newGamePayload.name,
+      slug: newGamePayload.slug,
+      color: newGamePayload.color,
+      logo_url: newGamePayload.logo_url,
+      display_order: newGamePayload.display_order,
       is_active: true,
     });
     if (insertError) {
       setError(insertError.message);
     } else {
+      if (typeof window !== "undefined") {
+        try {
+          const raw = localStorage.getItem("pizarra_persisted_games");
+          const storedGames: Game[] = raw ? JSON.parse(raw) : [...mockStore.games];
+          storedGames.push(newGamePayload);
+          mockStore.games = storedGames;
+          localStorage.setItem("pizarra_persisted_games", JSON.stringify(storedGames));
+        } catch {
+          // ignore
+        }
+      }
+      try {
+        await fetch("/api/public/results/sync", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ gameCreate: newGamePayload }),
+        });
+      } catch {
+        // ignore
+      }
+      broadcastGamesUpdated();
       setName("");
       setColor("#1a56db");
       setShowForm(false);
@@ -881,7 +932,39 @@ function GamesManager({ games, onRefresh }: { games: Game[]; onRefresh: () => vo
   }
 
   async function handleToggleActive(game: Game) {
-    await supabase.from("games").update({ is_active: !game.is_active }).eq("id", game.id);
+    const nextActive = !game.is_active;
+    await supabase.from("games").update({ is_active: nextActive }).eq("id", game.id);
+    if (typeof window !== "undefined") {
+      try {
+        const raw = localStorage.getItem("pizarra_persisted_games");
+        const storedGames: Game[] = raw ? JSON.parse(raw) : [...mockStore.games];
+        const idx = storedGames.findIndex((g: Game) => g.id === game.id || g.slug === game.slug);
+        if (idx >= 0) {
+          storedGames[idx] = { ...storedGames[idx]!, is_active: nextActive };
+        } else {
+          storedGames.push({ ...game, is_active: nextActive });
+        }
+        localStorage.setItem("pizarra_persisted_games", JSON.stringify(storedGames));
+        const mIdx = mockStore.games.findIndex((g) => g.id === game.id || g.slug === game.slug);
+        if (mIdx >= 0) {
+          mockStore.games[mIdx] = { ...mockStore.games[mIdx]!, is_active: nextActive };
+        }
+      } catch {
+        // ignore
+      }
+    }
+    try {
+      await fetch("/api/public/results/sync", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          gameUpdate: { id: game.id, slug: game.slug, is_active: nextActive },
+        }),
+      });
+    } catch {
+      // ignore
+    }
+    broadcastGamesUpdated();
     onRefresh();
   }
 
@@ -894,10 +977,21 @@ function GamesManager({ games, onRefresh }: { games: Game[]; onRefresh: () => vo
           const list = JSON.parse(saved).filter((g: Game) => g.id !== id);
           localStorage.setItem("pizarra_persisted_games", JSON.stringify(list));
         }
+        mockStore.games = mockStore.games.filter((g) => g.id !== id);
       } catch {
         // ignore
       }
     }
+    try {
+      await fetch("/api/public/results/sync", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ gameDelete: { id } }),
+      });
+    } catch {
+      // ignore
+    }
+    broadcastGamesUpdated();
     onRefresh();
   }
 
@@ -910,11 +1004,41 @@ function GamesManager({ games, onRefresh }: { games: Game[]; onRefresh: () => vo
       setOrderingGame(null);
       return;
     }
-    const swapGame = sorted[swapIdx];
+    const swapGame = sorted[swapIdx]!;
     await Promise.all([
-      supabase.from("games").update({ display_order: swapGame!.display_order }).eq("id", game.id),
-      supabase.from("games").update({ display_order: game.display_order }).eq("id", swapGame!.id),
+      supabase.from("games").update({ display_order: swapGame.display_order }).eq("id", game.id),
+      supabase.from("games").update({ display_order: game.display_order }).eq("id", swapGame.id),
     ]);
+    const reorderedUpdates = [
+      { id: game.id, display_order: swapGame.display_order },
+      { id: swapGame.id, display_order: game.display_order },
+    ];
+    if (typeof window !== "undefined") {
+      try {
+        const raw = localStorage.getItem("pizarra_persisted_games");
+        const storedGames: Game[] = raw ? JSON.parse(raw) : [...mockStore.games];
+        for (const u of reorderedUpdates) {
+          const item = storedGames.find((g) => g.id === u.id);
+          if (item) item.display_order = u.display_order;
+          const mItem = mockStore.games.find((g) => g.id === u.id);
+          if (mItem) mItem.display_order = u.display_order;
+        }
+        storedGames.sort((a, b) => a.display_order - b.display_order);
+        localStorage.setItem("pizarra_persisted_games", JSON.stringify(storedGames));
+      } catch {
+        // ignore
+      }
+    }
+    try {
+      await fetch("/api/public/results/sync", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ gameReorder: reorderedUpdates }),
+      });
+    } catch {
+      // ignore
+    }
+    broadcastGamesUpdated();
     onRefresh();
     setOrderingGame(null);
   }

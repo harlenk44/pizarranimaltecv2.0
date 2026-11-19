@@ -5,6 +5,8 @@ import {
   isLotteryPermitted,
   getResponsiveBoardGridStyle,
   ALL_AVAILABLE_LOTTERIES,
+  saveLocalLicenseOverride,
+  reconcileClientLicensesWithLocal,
 } from "@/lib/license-lotteries";
 
 describe("license-lotteries utilities", () => {
@@ -153,5 +155,130 @@ describe("license-lotteries utilities", () => {
     expect(grid8.gridTemplateColumns).toBe("repeat(4, minmax(0, 1fr))");
     expect(grid8.gridTemplateRows).toBe("repeat(2, minmax(0, 1fr))");
     expect(grid8["--card-density-scale"]).toBe(1);
+  });
+
+  it("packs and parses per-user fullscreenAuto without breaking defaults", () => {
+    const defaultParsed = parseClientLicenseName("Agencia Normal");
+    expect(defaultParsed.fullscreenAuto).toBe(false);
+
+    const packedDefault = formatClientLicenseName(
+      "Agencia Normal",
+      ALL_AVAILABLE_LOTTERIES.map((l) => l.id),
+      ALL_AVAILABLE_LOTTERIES.length,
+      8,
+      25,
+      null,
+      null,
+      false,
+    );
+    expect(packedDefault).toBe("Agencia Normal");
+
+    const packedFullscreen = formatClientLicenseName(
+      "Agencia APK",
+      ["lotto-activo", "granjita"],
+      ALL_AVAILABLE_LOTTERIES.length,
+      4,
+      20,
+      null,
+      null,
+      true,
+    );
+    const parsedFullscreen = parseClientLicenseName(packedFullscreen);
+    expect(parsedFullscreen.cleanName).toBe("Agencia APK");
+    expect(parsedFullscreen.fullscreenAuto).toBe(true);
+    expect(parsedFullscreen.cardsPerScreen).toBe(4);
+    expect(parsedFullscreen.transitionSeconds).toBe(20);
+  });
+});
+
+describe("license-lotteries regression guards", () => {
+  it("prevents substring slug collisions between lotto-activo and lotto-activo-internacional", () => {
+    // Only lotto-activo allowed: lotto-activo-internacional MUST NOT match
+    expect(isLotteryPermitted("lotto-activo", ["lotto-activo"])).toBe(true);
+    expect(isLotteryPermitted("7d21a00b-0dfa-4bdc-9edf-8115802df1d6", ["lotto-activo"])).toBe(true);
+    expect(isLotteryPermitted("lotto-activo-internacional", ["lotto-activo"])).toBe(false);
+    expect(isLotteryPermitted("a8f5e0c2-7b4d-4d62-9c31-1f8e7d6c5b4a", ["lotto-activo"])).toBe(
+      false,
+    );
+
+    // Only lotto-activo-internacional allowed: lotto-activo MUST NOT match
+    expect(isLotteryPermitted("lotto-activo-internacional", ["lotto-activo-internacional"])).toBe(
+      true,
+    );
+    expect(isLotteryPermitted("lotto-activo", ["lotto-activo-internacional"])).toBe(false);
+    expect(
+      isLotteryPermitted("7d21a00b-0dfa-4bdc-9edf-8115802df1d6", ["lotto-activo-internacional"]),
+    ).toBe(false);
+  });
+
+  it("treats explicit empty lotteries [] as no lotteries allowed instead of falling back to all", () => {
+    const formattedEmpty = formatClientLicenseName(
+      "Agencia Cero",
+      [],
+      ALL_AVAILABLE_LOTTERIES.length,
+      4,
+      20,
+    );
+    const parsedEmpty = parseClientLicenseName(formattedEmpty);
+    expect(parsedEmpty.cleanName).toBe("Agencia Cero");
+    expect(parsedEmpty.cardsPerScreen).toBe(4);
+    expect(parsedEmpty.transitionSeconds).toBe(20);
+    expect(parsedEmpty.allowedLotteries).toEqual([]);
+    expect(isLotteryPermitted("lotto-activo", parsedEmpty.allowedLotteries)).toBe(false);
+    expect(isLotteryPermitted("triple-ricachona", parsedEmpty.allowedLotteries)).toBe(false);
+
+    const parsedLegacyEmpty = parseClientLicenseName("Agencia Legacy||[]");
+    expect(parsedLegacyEmpty.allowedLotteries).toEqual([]);
+    expect(isLotteryPermitted("lotto-activo", parsedLegacyEmpty.allowedLotteries)).toBe(false);
+  });
+
+  it("lets authoritative server updates prevail on TV clients and does not revert cardsPerScreen", () => {
+    const store = new Map<string, string>();
+    const fakeStorage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        store.set(k, v);
+      },
+      removeItem: (k: string) => {
+        store.delete(k);
+      },
+    };
+    const origWindow = globalThis.window;
+    const origStorage = globalThis.localStorage;
+    Object.defineProperty(globalThis, "window", { value: globalThis, configurable: true });
+    Object.defineProperty(globalThis, "localStorage", { value: fakeStorage, configurable: true });
+
+    try {
+      const staleLocalLicense = {
+        id: "lic-test-1",
+        client_name: formatClientLicenseName("Agencia Uno", ["lotto-activo"], 20, 8, 25),
+        pin_code: "654321",
+        status: "active" as const,
+        max_devices: 2,
+        bound_device_ids: [],
+        expires_at: "2027-01-01T00:00:00.000Z",
+        notes: "",
+        created_at: "2026-01-01T00:00:00.000Z",
+      };
+      saveLocalLicenseOverride(staleLocalLicense);
+
+      const serverUpdatedLicense = {
+        ...staleLocalLicense,
+        client_name: formatClientLicenseName("Agencia Uno", ["granjita"], 20, 2, 15),
+      };
+
+      // TV client (allowOverrideServer: false) must accept server update cleanly
+      const tvReconciled = reconcileClientLicensesWithLocal([serverUpdatedLicense], [], [], {
+        allowOverrideServer: false,
+      });
+      expect(tvReconciled.needsServerSync).toHaveLength(0);
+      expect(tvReconciled.licenses).toHaveLength(1);
+      const parsedTv = parseClientLicenseName(tvReconciled.licenses[0]!.client_name);
+      expect(parsedTv.cardsPerScreen).toBe(2);
+      expect(parsedTv.allowedLotteries).toEqual(["granjita"]);
+    } finally {
+      Object.defineProperty(globalThis, "window", { value: origWindow, configurable: true });
+      Object.defineProperty(globalThis, "localStorage", { value: origStorage, configurable: true });
+    }
   });
 });

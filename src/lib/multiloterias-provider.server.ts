@@ -8,7 +8,39 @@ export const MULTILOTERIAS_RESULTS_URL = "https://api.multiloterias.net/api/publ
 export const MULTILOTERIAS_BASE_URL = "https://api.multiloterias.net/api/public";
 
 const CACHE_FILE_ITEMS = "/tmp/multiloterias_items_cache.json";
-const FETCH_TIMEOUT_MS = 10_000;
+const FETCH_TIMEOUT_MS = 15_000;
+
+function isTransientFetchError(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 4 && current && typeof current === "object"; depth++) {
+    const e = current as { name?: unknown; message?: unknown; code?: unknown; cause?: unknown };
+    const name = typeof e.name === "string" ? e.name : "";
+    const msg = typeof e.message === "string" ? e.message.toLowerCase() : "";
+    const code = typeof e.code === "string" ? e.code.toUpperCase() : "";
+    if (
+      name === "AbortError" ||
+      name === "ConnectTimeoutError" ||
+      name === "HeadersTimeoutError" ||
+      name === "BodyTimeoutError" ||
+      name === "SocketError" ||
+      code.startsWith("UND_ERR_") ||
+      code === "ETIMEDOUT" ||
+      code === "ECONNRESET" ||
+      code === "ECONNREFUSED" ||
+      code === "EAI_AGAIN" ||
+      code === "ENETUNREACH" ||
+      code === "EHOSTUNREACH" ||
+      code === "EPIPE" ||
+      msg.includes("operation was aborted") ||
+      msg.includes("connect timeout") ||
+      msg === "fetch failed"
+    ) {
+      return true;
+    }
+    current = e.cause;
+  }
+  return false;
+}
 
 export interface MultiloteriasItem {
   number: string;
@@ -70,26 +102,51 @@ const SERVER_HEADERS: Record<string, string> = {
  * Fetch Multiloterias today's results without any browser Origin header
  * to strictly prevent CORS 500 error from the Multiloterias server.
  */
-export async function fetchMultiloteriasToday(): Promise<MultiloteriasTodayResponse | null> {
+async function fetchMultiloteriasJsonOnce<T>(
+  url: string,
+): Promise<{ status: number; data: T | null }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(MULTILOTERIAS_RESULTS_URL, {
+    const res = await fetch(url, {
       method: "GET",
       headers: SERVER_HEADERS,
       signal: controller.signal,
     });
     if (!res.ok) {
-      console.warn(`[multiloterias] Fetch today returned status ${res.status}`);
-      return null;
+      return { status: res.status, data: null };
     }
-    const data = (await res.json()) as MultiloteriasTodayResponse;
-    return data;
-  } catch (err) {
-    console.warn("[multiloterias] Fetch today failed:", err);
-    return null;
+    const data = (await res.json()) as T;
+    return { status: res.status, data };
   } finally {
     clearTimeout(timer);
+  }
+}
+
+export async function fetchMultiloteriasToday(): Promise<MultiloteriasTodayResponse | null> {
+  try {
+    let result: { status: number; data: MultiloteriasTodayResponse | null };
+    try {
+      result =
+        await fetchMultiloteriasJsonOnce<MultiloteriasTodayResponse>(MULTILOTERIAS_RESULTS_URL);
+    } catch (err) {
+      if (isTransientFetchError(err)) {
+        result =
+          await fetchMultiloteriasJsonOnce<MultiloteriasTodayResponse>(MULTILOTERIAS_RESULTS_URL);
+      } else {
+        throw err;
+      }
+    }
+    if (result.status !== 200 && !result.data) {
+      console.warn(`[multiloterias] Fetch today returned status ${result.status}`);
+      return null;
+    }
+    return result.data;
+  } catch (err) {
+    if (!isTransientFetchError(err)) {
+      console.warn("[multiloterias] Fetch today failed:", err);
+    }
+    return null;
   }
 }
 
@@ -101,28 +158,36 @@ export async function fetchMultiloteriasItems(
   gameSlug: "lotoanimalito" | "lottopantera",
 ): Promise<MultiloteriasItem[]> {
   const url = `${MULTILOTERIAS_BASE_URL}/games/${gameSlug}/items`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(url, {
-      method: "GET",
-      headers: SERVER_HEADERS,
-      signal: controller.signal,
-    });
-    if (!res.ok) {
-      console.warn(`[multiloterias] Fetch items for ${gameSlug} returned status ${res.status}`);
+    let result: { status: number; data: { success?: boolean; data?: MultiloteriasItem[] } | null };
+    try {
+      result = await fetchMultiloteriasJsonOnce<{ success?: boolean; data?: MultiloteriasItem[] }>(
+        url,
+      );
+    } catch (err) {
+      if (isTransientFetchError(err)) {
+        result = await fetchMultiloteriasJsonOnce<{
+          success?: boolean;
+          data?: MultiloteriasItem[];
+        }>(url);
+      } else {
+        throw err;
+      }
+    }
+    if (result.status !== 200 && !result.data) {
+      console.warn(`[multiloterias] Fetch items for ${gameSlug} returned status ${result.status}`);
       return [];
     }
-    const parsed = (await res.json()) as { success?: boolean; data?: MultiloteriasItem[] };
+    const parsed = result.data;
     if (parsed && Array.isArray(parsed.data)) {
       return parsed.data;
     }
     return [];
   } catch (err) {
-    console.warn(`[multiloterias] Fetch items for ${gameSlug} failed:`, err);
+    if (!isTransientFetchError(err)) {
+      console.warn(`[multiloterias] Fetch items for ${gameSlug} failed:`, err);
+    }
     return [];
-  } finally {
-    clearTimeout(timer);
   }
 }
 

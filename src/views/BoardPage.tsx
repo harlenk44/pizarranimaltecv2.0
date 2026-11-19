@@ -964,7 +964,9 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       if (lastSettingsVersionRef.current)
         q.set("settingsVersion", String(lastSettingsVersionRef.current));
 
-      const syncRes = await fetch(`/api/public/results/sync?${q.toString()}`);
+      const syncRes = await fetch(`/api/public/results/sync?${q.toString()}`, {
+        cache: "no-store",
+      });
       if (syncRes.ok) {
         syncData = await syncRes.json();
 
@@ -1030,21 +1032,22 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           }
         }
 
-        // Sync custom game logos and games configuration ONLY if server sent them
+        // Sync custom game logos ONLY if server sent them
         if (syncData?.customGameLogos && typeof syncData.customGameLogos === "object") {
           const serverLogosMap = syncData.customGameLogos as Record<string, string>;
           mergeCustomGameLogosMap(serverLogosMap);
+        }
 
-          if (Array.isArray(syncData?.games) && syncData.games.length > 0) {
-            mockStore.games = mergeGamesPreserveCustomLogos(
-              mockStore.games,
-              syncData.games as Game[],
-            );
-            try {
-              localStorage.setItem("pizarra_persisted_games", JSON.stringify(mockStore.games));
-            } catch {
-              // ignore
-            }
+        // Sync games configuration (active state, display_order, additions/deletions) whenever sent by server
+        if (Array.isArray(syncData?.games) && syncData.games.length > 0) {
+          const serverGames = syncData.games as Game[];
+          const serverIds = new Set(serverGames.map((g) => g.id));
+          const prunedLocal = mockStore.games.filter((g) => serverIds.has(g.id));
+          mockStore.games = mergeGamesPreserveCustomLogos(prunedLocal, serverGames);
+          try {
+            localStorage.setItem("pizarra_persisted_games", JSON.stringify(mockStore.games));
+          } catch {
+            // ignore
           }
         }
 
@@ -1081,30 +1084,60 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     }
 
     let loadedGames = cachedGamesDataRef.current;
-    if (!gamesLoadedRef.current || (Array.isArray(syncData?.games) && syncData.games.length > 0)) {
+    const hasServerGamesUpdate = Array.isArray(syncData?.games) && syncData.games.length > 0;
+    if (!gamesLoadedRef.current || hasServerGamesUpdate) {
       let resolvedGames: Game[] = [];
-      try {
-        const { data: gamesData } = await supabase
-          .from("games")
-          .select("*")
-          .eq("is_active", true)
-          .order("display_order");
-        if (Array.isArray(gamesData) && gamesData.length > 0) {
-          resolvedGames = gamesData as Game[];
+      let fetchedFromSource = false;
+      const hasExternalSupabase =
+        typeof import.meta.env["VITE_SUPABASE_URL"] === "string" &&
+        import.meta.env["VITE_SUPABASE_URL"].includes(".supabase.co");
+
+      if (hasExternalSupabase) {
+        try {
+          const { data: gamesData, error: gamesErr } = await supabase
+            .from("games")
+            .select("*")
+            .eq("is_active", true)
+            .order("display_order");
+          if (!gamesErr && Array.isArray(gamesData)) {
+            resolvedGames = gamesData as Game[];
+            fetchedFromSource = true;
+          }
+        } catch {
+          // Fallback when external Supabase is unreachable
         }
-      } catch {
-        // Fallback when external Supabase is unreachable
       }
 
-      if (resolvedGames.length === 0) {
-        if (Array.isArray(syncData?.games) && syncData.games.length > 0) {
-          resolvedGames = (syncData.games as Game[]).filter((g) => g.is_active !== false);
+      if (!fetchedFromSource) {
+        if (hasServerGamesUpdate) {
+          resolvedGames = (mockStore.games as Game[])
+            .filter((g) => g.is_active !== false)
+            .sort((a, b) => a.display_order - b.display_order);
+          fetchedFromSource = true;
         } else {
-          resolvedGames = (mockStore.games as Game[]).filter((g) => g.is_active !== false);
+          try {
+            const { data: gamesData, error: gamesErr } = await supabase
+              .from("games")
+              .select("*")
+              .eq("is_active", true)
+              .order("display_order");
+            if (!gamesErr && Array.isArray(gamesData)) {
+              resolvedGames = gamesData as Game[];
+              fetchedFromSource = true;
+            }
+          } catch {
+            // Fallback
+          }
+          if (!fetchedFromSource) {
+            resolvedGames = (mockStore.games as Game[])
+              .filter((g) => g.is_active !== false)
+              .sort((a, b) => a.display_order - b.display_order);
+            fetchedFromSource = true;
+          }
         }
       }
 
-      if (resolvedGames.length > 0) {
+      if (fetchedFromSource) {
         cachedGamesDataRef.current = resolvedGames;
         loadedGames = resolvedGames;
         getCustomGameLogosMap();
@@ -1121,7 +1154,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       }
     }
 
-    if (!loadedGames || loadedGames.length === 0) return;
+    if (!loadedGames) return;
 
     let imgMap = cachedImgMapRef.current;
     let nameMap = cachedNameMapRef.current;
@@ -1455,6 +1488,11 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           fetchAll();
         } else if (event.data?.type === "ANIMAL_MEDIA_UPDATED") {
           fetchAll();
+        } else if (event.data?.type === "GAMES_UPDATED") {
+          gamesLoadedRef.current = false;
+          fetchAll();
+        } else if (event.data?.type === "LICENSES_UPDATED") {
+          fetchAll();
         } else if (event.data?.type === "APP_SETTINGS_UPDATED") {
           if (event.data.settings) {
             updateSettings(event.data.settings);
@@ -1488,6 +1526,9 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     const onStorage = (e: StorageEvent) => {
       if (e.key === "pizarra_pending_result_alerts") {
         checkPendingAlerts();
+      } else if (e.key === "pizarra_persisted_games") {
+        gamesLoadedRef.current = false;
+        fetchAll();
       } else if (
         e.key === "pizarra_custom_animal_images" ||
         e.key === "pizarra_user_custom_animal_images_v2"
