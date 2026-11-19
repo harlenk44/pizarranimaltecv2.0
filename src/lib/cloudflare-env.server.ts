@@ -200,12 +200,12 @@ export function getRuntimeEnvVar(key: string): string | undefined {
 }
 
 function isKvNamespace(candidate: unknown): candidate is CloudflareKvNamespace {
-  return Boolean(
-    candidate &&
-    typeof candidate === "object" &&
-    typeof (candidate as CloudflareKvNamespace).get === "function" &&
-    typeof (candidate as CloudflareKvNamespace).put === "function",
-  );
+  if (!candidate || typeof candidate !== "object") return false;
+  const rec = candidate as Record<string, unknown>;
+  // Cloudflare Fetcher / ASSETS / Service RPC proxies have `.fetch` and/or return functions for any arbitrary property name.
+  if (typeof rec["fetch"] === "function") return false;
+  if (typeof rec["__pizarra_kv_probe_nonexistent__"] === "function") return false;
+  return typeof rec["get"] === "function" && typeof rec["put"] === "function";
 }
 
 function findKvInEnv(envObj: EnvRecord | null | undefined): CloudflareKvNamespace | null {
@@ -216,7 +216,10 @@ function findKvInEnv(envObj: EnvRecord | null | undefined): CloudflareKvNamespac
       return candidate;
     }
   }
-  for (const value of Object.values(envObj)) {
+  for (const [key, value] of Object.entries(envObj)) {
+    const upper = key.toUpperCase();
+    if (upper === "ASSETS" || upper === "__STATIC_CONTENT") continue;
+    if (!(upper === "KV" || upper.endsWith("_KV") || upper.startsWith("KV_"))) continue;
     if (isKvNamespace(value)) {
       return value;
     }

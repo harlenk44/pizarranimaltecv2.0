@@ -397,4 +397,84 @@ describe("Cloud license persistence & Cloudflare runtime env", () => {
       await runWithCloudflareEnv({}, async () => {});
     }
   });
+
+  it("ignores Cloudflare Pages ASSETS Fetcher RPC proxies and uses safe fallback without RPC put errors", async () => {
+    const assetsRpcProxy = new Proxy(
+      {},
+      {
+        get(_target, prop) {
+          if (prop === "fetch") {
+            return async () => new Response("ok");
+          }
+          return async () => {
+            throw new Error(`The RPC receiver does not implement the method "${String(prop)}".`);
+          };
+        },
+      },
+    );
+
+    const serverHandlers = (
+      SyncRoute as unknown as {
+        options: {
+          server: {
+            handlers: {
+              GET: (ctx: { request: Request }) => Promise<Response>;
+              PUT: (ctx: { request: Request }) => Promise<Response>;
+            };
+          };
+        };
+      }
+    ).options.server.handlers;
+
+    await runWithCloudflareEnv(
+      {
+        ASSETS: assetsRpcProxy,
+        SUPABASE_URL: "https://ebpunrzbagmcdtammjqn.supabase.co",
+      },
+      async () => {
+        expect(getBoundCloudflareKv()).toBeNull();
+
+        const getRes = await serverHandlers.GET({
+          request: new Request("http://localhost/api/public/results/sync"),
+        });
+        const getJson = await getRes.json();
+        expect(getJson.cloudLicenseError).toBeNull();
+        expect(getJson.cloudLicenseStorageMode).toBe("local-memory");
+
+        const testId = generateLicenseUuid();
+        const putRes = await serverHandlers.PUT({
+          request: new Request("http://localhost/api/public/results/sync", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              licenseAction: {
+                type: "create",
+                id: testId,
+                client_name: "prueba sin rpc error",
+                pin_code: "445566",
+                days: 30,
+                max_devices: 1,
+              },
+            }),
+          }),
+        });
+        const putJson = await putRes.json();
+        expect(putJson.cloudLicenseSyncOk).toBe(true);
+        expect(putJson.cloudLicenseError).toBeNull();
+
+        await serverHandlers.PUT({
+          request: new Request("http://localhost/api/public/results/sync", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              licenseAction: {
+                type: "delete",
+                id: testId,
+              },
+            }),
+          }),
+        });
+      },
+    );
+  });
 });
