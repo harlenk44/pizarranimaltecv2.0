@@ -991,20 +991,49 @@ export default function LicensesManager() {
       {cloudStorageMode === "local-memory" && workspaceFileActive && !cloudErrorAlert && (
         <div
           role="status"
-          className="bg-blue-950/60 border border-blue-500/60 text-blue-100 px-4 py-3 rounded-xl text-xs space-y-1 shadow-md"
+          className="bg-blue-950/60 border border-blue-500/60 text-blue-100 px-4 py-3 rounded-xl text-xs space-y-2 shadow-md"
         >
-          <div className="flex items-center gap-2 font-bold text-blue-300">
-            <ShieldCheck className="w-4 h-4 shrink-0 text-blue-400" />
-            <span>Guardado directo en archivo del proyecto (listo para Push a GitHub)</span>
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2 font-bold text-blue-300">
+              <ShieldCheck className="w-4 h-4 shrink-0 text-blue-400" />
+              <span>Preview local (AI Studio no sube cambios en tiempo de ejecución al Push)</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                const jsonPayload = JSON.stringify(
+                  {
+                    requireLicense,
+                    licenses,
+                    deletedIds: [],
+                    deletedPins: [],
+                  },
+                  null,
+                  2,
+                );
+                navigator.clipboard?.writeText(jsonPayload);
+                showToast("JSON copiado. Pégalo en client_licenses.persisted.json en GitHub.");
+              }}
+              className="px-2.5 py-1 rounded-lg bg-blue-900/70 hover:bg-blue-800 border border-blue-600/60 text-blue-100 font-semibold text-[11px] flex items-center gap-1.5 cursor-pointer"
+            >
+              <Copy className="w-3.5 h-3.5" />
+              <span>Copiar JSON para GitHub</span>
+            </button>
           </div>
           <p className="text-[11px] leading-relaxed text-blue-100/90">
-            Todas las licencias que crees, edites o pauses aquí en Preview se guardan
-            automáticamente en{" "}
+            Nota: los cambios hechos aquí en Preview se guardan solo en esta sesión (AI Studio no
+            incluye archivos escritos en runtime al hacer Push a GitHub). Para sincronizarlos sin
+            base de datos, pulsa{" "}
+            <span className="font-semibold text-white">Copiar JSON para GitHub</span> y pégalo en{" "}
             <span className="font-mono font-semibold text-white">
               client_licenses.persisted.json
             </span>
-            . Al hacer <span className="font-semibold text-white">Push a GitHub</span>, Cloudflare
-            Pages compilará esas licencias y funcionarán en todas las pantallas y televisores.
+            , o conecta{" "}
+            <span className="font-mono font-semibold text-white">
+              CF_ACCOUNT_ID / CF_KV_NAMESPACE_ID / CF_API_TOKEN
+            </span>{" "}
+            o <span className="font-mono font-semibold text-white">SUPABASE_URL</span> en Cloudflare
+            Pages para guardar en vivo.
           </p>
         </div>
       )}
@@ -1012,24 +1041,50 @@ export default function LicensesManager() {
       {cloudStorageMode === "local-memory" && !workspaceFileActive && !cloudErrorAlert && (
         <div
           role="status"
-          className="bg-amber-950/70 border border-amber-500/60 text-amber-100 px-4 py-3 rounded-xl text-xs space-y-1 shadow-md"
+          className="bg-amber-950/70 border border-amber-500/60 text-amber-100 px-4 py-3 rounded-xl text-xs space-y-1.5 shadow-md"
         >
-          <div className="flex items-center gap-2 font-bold text-amber-300">
-            <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
-            <span>Modo empaquetado desde GitHub (sin KV ni Supabase conectado en Cloudflare)</span>
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2 font-bold text-amber-300">
+              <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
+              <span>
+                Modo empaquetado desde GitHub (sin KV ni Supabase conectado en Cloudflare)
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                const jsonPayload = JSON.stringify(
+                  {
+                    requireLicense,
+                    licenses,
+                    deletedIds: [],
+                    deletedPins: [],
+                  },
+                  null,
+                  2,
+                );
+                navigator.clipboard?.writeText(jsonPayload);
+                showToast("JSON copiado para client_licenses.persisted.json.");
+              }}
+              className="px-2.5 py-1 rounded-lg bg-amber-900/70 hover:bg-amber-800 border border-amber-600/60 text-amber-100 font-semibold text-[11px] flex items-center gap-1.5 cursor-pointer"
+            >
+              <Copy className="w-3.5 h-3.5" />
+              <span>Copiar JSON para GitHub</span>
+            </button>
           </div>
           <p className="text-[11px] leading-relaxed text-amber-100/90">
-            Las licencias guardadas en{" "}
+            En Cloudflare Pages ahora mismo solo persisten entre dispositivos las licencias
+            guardadas en{" "}
             <span className="font-mono font-semibold text-white">
               client_licenses.persisted.json
             </span>{" "}
-            desde Google AI Studio Preview + Push a GitHub ya están activas en todas las pantallas.
-            Si deseas crear licencias en vivo desde aquí sin volver a hacer Push, configura{" "}
+            en tu repositorio de GitHub. Para guardar en vivo sin hacer Push ni usar Bindings,
+            configura{" "}
             <span className="font-mono font-semibold text-white">
               CF_ACCOUNT_ID, CF_KV_NAMESPACE_ID, CF_API_TOKEN
             </span>{" "}
             o un <span className="font-mono font-semibold text-white">SUPABASE_URL</span> activo en
-            Cloudflare Pages.
+            Cloudflare Pages → Settings → Variables and Secrets.
           </p>
         </div>
       )}
