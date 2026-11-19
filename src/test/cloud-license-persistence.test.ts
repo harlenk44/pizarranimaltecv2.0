@@ -605,4 +605,68 @@ describe("Cloud license persistence & Cloudflare runtime env", () => {
       expect(getJson.cloudLicenseError).toContain("KV read timeout");
     });
   });
+
+  it("writes licenses directly to client_licenses.persisted.json and reports workspaceLicenseFileActive for GitHub push workflow", async () => {
+    const serverHandlers = (
+      SyncRoute as unknown as {
+        options: {
+          server: {
+            handlers: {
+              GET: (ctx: { request: Request }) => Promise<Response>;
+              PUT: (ctx: { request: Request }) => Promise<Response>;
+            };
+          };
+        };
+      }
+    ).options.server.handlers;
+
+    await runWithCloudflareEnv({}, async () => {
+      const testId = generateLicenseUuid();
+      const putRes = await serverHandlers.PUT({
+        request: new Request("http://localhost/api/public/results/sync", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            licenseAction: {
+              type: "create",
+              id: testId,
+              client_name: "agencia repo github",
+              pin_code: "112233",
+              days: 30,
+              max_devices: 1,
+            },
+          }),
+        }),
+      });
+      const putJson = await putRes.json();
+      expect(putJson.workspaceLicenseFileActive).toBe(true);
+      expect(putJson.cloudLicenseSyncOk).toBe(true);
+
+      const diskRaw = fs.readFileSync(WORKSPACE_LICENSES_PATH, "utf-8");
+      const diskParsed = JSON.parse(diskRaw) as {
+        licenses: Array<{ pin_code: string; client_name: string }>;
+      };
+      expect(
+        diskParsed.licenses.some(
+          (l) => l.pin_code === "112233" && l.client_name === "agencia repo github",
+        ),
+      ).toBe(true);
+
+      const getRes = await serverHandlers.GET({
+        request: new Request("http://localhost/api/public/results/sync"),
+      });
+      const getJson = await getRes.json();
+      expect(getJson.workspaceLicenseFileActive).toBe(true);
+
+      await serverHandlers.PUT({
+        request: new Request("http://localhost/api/public/results/sync", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            licenseAction: { type: "delete", id: testId },
+          }),
+        }),
+      });
+    });
+  });
 });

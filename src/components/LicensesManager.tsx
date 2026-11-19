@@ -131,6 +131,7 @@ export default function LicensesManager() {
   const [cloudStorageMode, setCloudStorageMode] = useState<
     "supabase" | "cloudflare-kv" | "local-memory" | null
   >(null);
+  const [workspaceFileActive, setWorkspaceFileActive] = useState<boolean>(false);
 
   const showToast = (msg: string) => {
     setFeedbackMsg(msg);
@@ -210,6 +211,9 @@ export default function LicensesManager() {
           data.cloudLicenseStorageMode === "local-memory"
         ) {
           setCloudStorageMode(data.cloudLicenseStorageMode);
+        }
+        if (typeof data.workspaceLicenseFileActive === "boolean") {
+          setWorkspaceFileActive(data.workspaceLicenseFileActive);
         }
 
         const isEphemeralServer = data.cloudLicenseConfigured === false;
@@ -489,6 +493,9 @@ export default function LicensesManager() {
           data.cloudLicenseStorageMode === "local-memory")
       ) {
         setCloudStorageMode(data.cloudLicenseStorageMode);
+      }
+      if (data && typeof data.workspaceLicenseFileActive === "boolean") {
+        setWorkspaceFileActive(data.workspaceLicenseFileActive);
       }
 
       const nextRequire =
@@ -888,6 +895,11 @@ export default function LicensesManager() {
                   : "NUBE ACTIVA: SUPABASE"}
               </span>
             )}
+            {cloudStorageMode === "local-memory" && workspaceFileActive && (
+              <span className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded border bg-blue-950/60 text-blue-300 border-blue-700/60">
+                GUARDADO EN REPO: client_licenses.persisted.json
+              </span>
+            )}
           </div>
           <p className="text-xs text-slate-400 max-w-2xl">
             Asigna un código PIN de 6 dígitos a cada cliente o agencia. Como administrador siempre
@@ -976,31 +988,48 @@ export default function LicensesManager() {
         </div>
       </div>
 
-      {cloudStorageMode === "local-memory" && !cloudErrorAlert && (
+      {cloudStorageMode === "local-memory" && workspaceFileActive && !cloudErrorAlert && (
+        <div
+          role="status"
+          className="bg-blue-950/60 border border-blue-500/60 text-blue-100 px-4 py-3 rounded-xl text-xs space-y-1 shadow-md"
+        >
+          <div className="flex items-center gap-2 font-bold text-blue-300">
+            <ShieldCheck className="w-4 h-4 shrink-0 text-blue-400" />
+            <span>Guardado directo en archivo del proyecto (listo para Push a GitHub)</span>
+          </div>
+          <p className="text-[11px] leading-relaxed text-blue-100/90">
+            Todas las licencias que crees, edites o pauses aquí en Preview se guardan
+            automáticamente en{" "}
+            <span className="font-mono font-semibold text-white">
+              client_licenses.persisted.json
+            </span>
+            . Al hacer <span className="font-semibold text-white">Push a GitHub</span>, Cloudflare
+            Pages compilará esas licencias y funcionarán en todas las pantallas y televisores.
+          </p>
+        </div>
+      )}
+
+      {cloudStorageMode === "local-memory" && !workspaceFileActive && !cloudErrorAlert && (
         <div
           role="status"
           className="bg-amber-950/70 border border-amber-500/60 text-amber-100 px-4 py-3 rounded-xl text-xs space-y-1 shadow-md"
         >
           <div className="flex items-center gap-2 font-bold text-amber-300">
             <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
-            <span>
-              Almacenamiento en memoria temporal (sin base de datos en la nube conectada en
-              Cloudflare)
-            </span>
+            <span>Modo empaquetado desde GitHub (sin KV ni Supabase conectado en Cloudflare)</span>
           </div>
           <p className="text-[11px] leading-relaxed text-amber-100/90">
-            Las licencias nuevas creadas en Cloudflare Pages sin base de datos conectada no se
-            comparten con otros televisores o navegadores (al intentar entrar con el PIN dirá código
-            inválido). Para persistencia global conecta{" "}
-            <span className="font-mono font-semibold text-white">PIZARRA_KV</span> en{" "}
-            <span className="font-semibold">Cloudflare Pages → Settings → Bindings</span> (o agrega
-            las variables{" "}
+            Las licencias guardadas en{" "}
+            <span className="font-mono font-semibold text-white">
+              client_licenses.persisted.json
+            </span>{" "}
+            desde Google AI Studio Preview + Push a GitHub ya están activas en todas las pantallas.
+            Si deseas crear licencias en vivo desde aquí sin volver a hacer Push, configura{" "}
             <span className="font-mono font-semibold text-white">
               CF_ACCOUNT_ID, CF_KV_NAMESPACE_ID, CF_API_TOKEN
             </span>{" "}
-            / un proyecto activo de{" "}
-            <span className="font-mono font-semibold text-white">SUPABASE_URL</span>) y vuelve a
-            desplegar.
+            o un <span className="font-mono font-semibold text-white">SUPABASE_URL</span> activo en
+            Cloudflare Pages.
           </p>
         </div>
       )}

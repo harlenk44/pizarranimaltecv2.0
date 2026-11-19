@@ -31,6 +31,7 @@ import { TRIPLE_GAMES, buildTripleAlertItem, type TripleResult } from "@/lib/tri
 import persistedGameLogosJson from "../../../../../game_logos.persisted.json";
 import persistedAnimalImagesJson from "../../../../../animal_images.persisted.json";
 import persistedAppSettingsJson from "../../../../../app_settings.persisted.json";
+import persistedClientLicensesJson from "../../../../../client_licenses.persisted.json";
 
 const RESULTS_FILE = "/tmp/lottery_results.json";
 const TRIPLE_RESULTS_FILE = "/tmp/lottery_triples_results.json";
@@ -58,6 +59,7 @@ let serverDataInitialized = false;
 let initialAutoSyncDone = false;
 let initialAnimalImagesSeeded = false;
 let initialAppSettingsSeeded = false;
+let initialClientLicensesSeeded = false;
 
 function loadServerTripleResults() {
   try {
@@ -139,8 +141,38 @@ let serverLicenseState: ServerLicenseState = {
   deletedPins: [],
 };
 
+function isWorkspaceLicensesFileActive(): boolean {
+  try {
+    return fs.existsSync(WORKSPACE_CLIENT_LICENSES_FILE);
+  } catch {
+    return false;
+  }
+}
+
 function loadServerLicenses() {
   try {
+    if (
+      !initialClientLicensesSeeded &&
+      persistedClientLicensesJson &&
+      typeof persistedClientLicensesJson === "object"
+    ) {
+      initialClientLicensesSeeded = true;
+      const bundled = persistedClientLicensesJson as Partial<ServerLicenseState>;
+      if (Array.isArray(bundled.licenses) && bundled.licenses.length > 0) {
+        serverLicenseState = {
+          requireLicense:
+            typeof bundled.requireLicense === "boolean" ? bundled.requireLicense : true,
+          licenses: bundled.licenses.map((l) => ({
+            ...l,
+            status: l.status === "paused" ? "paused" : "active",
+            bound_device_ids: Array.isArray(l.bound_device_ids) ? [...l.bound_device_ids] : [],
+          })),
+          deletedIds: Array.isArray(bundled.deletedIds) ? [...bundled.deletedIds] : [],
+          deletedPins: Array.isArray(bundled.deletedPins) ? [...bundled.deletedPins] : [],
+        };
+      }
+    }
+
     for (const file of [WORKSPACE_CLIENT_LICENSES_FILE, TMP_CLIENT_LICENSES_FILE]) {
       if (fs.existsSync(file)) {
         const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
@@ -1679,6 +1711,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
             : cloudDiag.hasKvBinding
               ? "cloudflare-kv"
               : "local-memory",
+          workspaceLicenseFileActive: isWorkspaceLicensesFileActive(),
           cloudLicenseError: lastCloudLicenseReadError,
         });
       },
@@ -2565,6 +2598,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
               : putCloudDiag.hasKvBinding
                 ? "cloudflare-kv"
                 : "local-memory",
+            workspaceLicenseFileActive: isWorkspaceLicensesFileActive(),
           });
         } catch (err) {
           return noStoreJson(
