@@ -11,6 +11,14 @@ interface AsyncStorageLike<T> {
   getStore: () => T | undefined;
 }
 
+const PREFERRED_KV_BINDINGS = [
+  "PIZARRA_KV",
+  "LICENSES_KV",
+  "KV_LICENSES",
+  "PIZARRA_LICENSES",
+  "KV",
+];
+
 let runtimeEnvAls: AsyncStorageLike<EnvRecord> | null = null;
 let alsInitPromise: Promise<void> | null = null;
 let latestRuntimeEnv: EnvRecord | null = null;
@@ -20,7 +28,18 @@ let workersModuleChecked = false;
 function asNonEmptyRecord(candidate: unknown): EnvRecord | null {
   if (!candidate || typeof candidate !== "object") return null;
   const rec = candidate as EnvRecord;
-  return Object.keys(rec).length > 0 ? rec : null;
+  if (Object.keys(rec).length > 0) return rec;
+  for (const k of PREFERRED_KV_BINDINGS) {
+    if (rec[k] !== undefined) return rec;
+  }
+  if (
+    rec["ASSETS"] !== undefined ||
+    rec["SUPABASE_URL"] !== undefined ||
+    rec["VITE_SUPABASE_URL"] !== undefined
+  ) {
+    return rec;
+  }
+  return null;
 }
 
 async function loadCloudflareWorkersModuleEnv(): Promise<EnvRecord | null> {
@@ -95,7 +114,7 @@ export async function ensureCloudflareEnvFromRequest(
   ctx?: unknown,
 ): Promise<EnvRecord | null> {
   const resolved = await resolveCloudflareRuntimeEnv(request, directEnv, ctx);
-  if (resolved && Object.keys(resolved).length > 0) {
+  if (resolved && asNonEmptyRecord(resolved)) {
     latestRuntimeEnv = resolved;
   }
   return resolved;
@@ -133,7 +152,7 @@ export async function runWithCloudflareEnv<T>(env: unknown, fn: () => Promise<T>
 export function getActiveRuntimeEnv(): EnvRecord | null {
   const fromAls = runtimeEnvAls?.getStore();
   if (fromAls) return fromAls;
-  if (latestRuntimeEnv && Object.keys(latestRuntimeEnv).length > 0) {
+  if (asNonEmptyRecord(latestRuntimeEnv)) {
     return latestRuntimeEnv;
   }
   const fromGlobal = asNonEmptyRecord((globalThis as { __env__?: unknown }).__env__);
@@ -189,14 +208,6 @@ function isKvNamespace(candidate: unknown): candidate is CloudflareKvNamespace {
   );
 }
 
-const PREFERRED_KV_BINDINGS = [
-  "PIZARRA_KV",
-  "LICENSES_KV",
-  "KV_LICENSES",
-  "PIZARRA_LICENSES",
-  "KV",
-];
-
 function findKvInEnv(envObj: EnvRecord | null | undefined): CloudflareKvNamespace | null {
   if (!envObj) return null;
   for (const name of PREFERRED_KV_BINDINGS) {
@@ -215,8 +226,6 @@ function findKvInEnv(envObj: EnvRecord | null | undefined): CloudflareKvNamespac
 
 export function getBoundCloudflareKv(): CloudflareKvNamespace | null {
   const fromAls = runtimeEnvAls?.getStore();
-  // If ALS explicitly scoped an env object (e.g. `{}` in tests), honor it first if non-empty,
-  // and if explicitly empty `{}` in tests, still allow checking global only when ALS wasn't explicitly {}
   if (fromAls) {
     return findKvInEnv(fromAls);
   }
@@ -225,4 +234,11 @@ export function getBoundCloudflareKv(): CloudflareKvNamespace | null {
     findKvInEnv(asNonEmptyRecord((globalThis as { __env__?: unknown }).__env__)) ||
     findKvInEnv(cachedWorkersModuleEnv)
   );
+}
+
+export function getCloudflareEnvKeysSummary(): string {
+  const active = getActiveRuntimeEnv();
+  if (!active) return "sin env";
+  const keys = Object.keys(active).filter(Boolean);
+  return keys.length > 0 ? keys.slice(0, 12).join(", ") : "env vacío";
 }

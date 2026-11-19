@@ -23,7 +23,11 @@ import {
   getSupabaseCloudDiagnostics,
   type SupabaseCloudDiagnostics,
 } from "@/integrations/supabase/client.server";
-import { getBoundCloudflareKv, ensureCloudflareEnvFromRequest } from "@/lib/cloudflare-env.server";
+import {
+  getBoundCloudflareKv,
+  ensureCloudflareEnvFromRequest,
+  getCloudflareEnvKeysSummary,
+} from "@/lib/cloudflare-env.server";
 import { toSupabaseLicenseUuid, generateLicenseUuid, isValidUuid } from "@/lib/license-lotteries";
 import { resolveCanonicalAnimal, parseCanonicalAnimalNumber } from "@/lib/official-animals";
 import { getGameLogo, isBrokenExternalLogo, isCustomUploadedGameLogo } from "@/lib/game-logos";
@@ -1671,7 +1675,9 @@ export const Route = createFileRoute("/api/public/results/sync")({
           cloudLicenseConfigured: cloudDiag.configured || cloudDiag.hasKvBinding,
           cloudLicenseError:
             lastCloudLicenseReadError ||
-            (!cloudDiag.configured && !cloudDiag.hasKvBinding ? cloudDiag.reason : null),
+            (!cloudDiag.configured && !cloudDiag.hasKvBinding
+              ? `${cloudDiag.reason} (PIZARRA_KV no detectado en Pages; claves runtime: ${getCloudflareEnvKeysSummary()})`
+              : null),
         });
       },
       POST: async ({ request }) => {
