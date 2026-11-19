@@ -1,8 +1,0 @@
-name = "pizarraanimal"
-compatibility_date = "2025-07-13"
-compatibility_flags = ["nodejs_compat"]
-pages_build_output_dir = "dist"
-
-[[kv_namespaces]]
-binding = "PIZARRA_KV"
-id = "d9ee146380a0409994c10462e2a4a90eb"

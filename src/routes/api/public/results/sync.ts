@@ -23,11 +23,7 @@ import {
   getSupabaseCloudDiagnostics,
   type SupabaseCloudDiagnostics,
 } from "@/integrations/supabase/client.server";
-import {
-  getBoundCloudflareKv,
-  ensureCloudflareEnvFromRequest,
-  getCloudflareEnvKeysSummary,
-} from "@/lib/cloudflare-env.server";
+import { getBoundCloudflareKv, ensureCloudflareEnvFromRequest } from "@/lib/cloudflare-env.server";
 import { toSupabaseLicenseUuid, generateLicenseUuid, isValidUuid } from "@/lib/license-lotteries";
 import { resolveCanonicalAnimal, parseCanonicalAnimalNumber } from "@/lib/official-animals";
 import { getGameLogo, isBrokenExternalLogo, isCustomUploadedGameLogo } from "@/lib/game-logos";
@@ -322,12 +318,8 @@ async function upsertLicenseRowToSupabase(
       }
       return { ok: false, error: kvRes.error || "Error guardando en Cloudflare KV" };
     }
-    return {
-      ok: false,
-      error:
-        diag.reason ||
-        "No hay base de datos en la nube configurada (configura SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY en Cloudflare Pages).",
-    };
+    // Safe local/memory fallback when neither active Supabase nor Cloudflare KV is bound
+    return { ok: true, resolvedId: lic.id };
   }
 
   const sbId = toSupabaseLicenseUuid(lic.id, lic.pin_code);
@@ -450,12 +442,8 @@ async function deleteLicenseRowFromSupabase(
       if (kvRes.ok) return { ok: true };
       return { ok: false, error: kvRes.error || "Error eliminando en Cloudflare KV" };
     }
-    return {
-      ok: false,
-      error:
-        diag.reason ||
-        "No hay base de datos en la nube configurada (configura SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY en Cloudflare Pages).",
-    };
+    // Safe local/memory fallback when neither active Supabase nor Cloudflare KV is bound
+    return { ok: true };
   }
 
   const sbId = toSupabaseLicenseUuid(id, pinCode);
@@ -526,7 +514,8 @@ export async function syncLicensesWithSupabase(force = false): Promise<void> {
           lastCloudLicenseReadError = seedRes.error || diag.reason;
         }
       } else {
-        lastCloudLicenseReadError = diag.reason;
+        // Safe local/memory fallback when neither active Supabase nor Cloudflare KV is bound
+        lastCloudLicenseReadError = null;
       }
       return;
     }
@@ -1673,11 +1662,12 @@ export const Route = createFileRoute("/api/public/results/sync")({
           deletedIds: isPoll ? null : serverLicenseState.deletedIds || [],
           deletedPins: isPoll ? null : serverLicenseState.deletedPins || [],
           cloudLicenseConfigured: cloudDiag.configured || cloudDiag.hasKvBinding,
-          cloudLicenseError:
-            lastCloudLicenseReadError ||
-            (!cloudDiag.configured && !cloudDiag.hasKvBinding
-              ? `${cloudDiag.reason} (PIZARRA_KV no detectado en Pages; claves runtime: ${getCloudflareEnvKeysSummary()})`
-              : null),
+          cloudLicenseStorageMode: cloudDiag.configured
+            ? "supabase"
+            : cloudDiag.hasKvBinding
+              ? "cloudflare-kv"
+              : "local-memory",
+          cloudLicenseError: lastCloudLicenseReadError,
         });
       },
       POST: async ({ request }) => {

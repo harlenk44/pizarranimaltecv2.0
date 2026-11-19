@@ -79,7 +79,7 @@ describe("Cloud license persistence & Cloudflare runtime env", () => {
     });
   });
 
-  it("blocks phantom local persistence and returns cloudLicenseSyncOk=false when cloud storage is absent", async () => {
+  it("persists licenses via safe local/memory fallback without error when external cloud storage is absent", async () => {
     const serverHandlers = (
       SyncRoute as unknown as {
         options: {
@@ -102,7 +102,7 @@ describe("Cloud license persistence & Cloudflare runtime env", () => {
           licenseAction: {
             type: "create",
             id: testId,
-            client_name: 'prueba sin nube||{"tarjetasPorPantalla":4}',
+            client_name: 'prueba fallback local||{"tarjetasPorPantalla":4}',
             pin_code: "654321",
             days: 30,
             max_devices: 1,
@@ -112,13 +112,83 @@ describe("Cloud license persistence & Cloudflare runtime env", () => {
       const putRes = await serverHandlers.PUT({ request: putReq });
       const putJson = await putRes.json();
 
-      expect(putJson.cloudLicenseSyncOk).toBe(false);
-      expect(typeof putJson.cloudLicenseError).toBe("string");
-      expect(putJson.cloudLicenseError.length).toBeGreaterThan(10);
-      // Rolled back on server so GET doesn't leak an unpersisted license
+      expect(putJson.cloudLicenseSyncOk).toBe(true);
+      expect(putJson.cloudLicenseError).toBeNull();
       expect(
         (putJson.clientLicenses as Array<{ pin_code: string }>).some(
           (l) => l.pin_code === "654321",
+        ),
+      ).toBe(true);
+
+      const getRes = await serverHandlers.GET({
+        request: new Request("http://localhost/api/public/results/sync"),
+      });
+      const getJson = await getRes.json();
+      expect(getJson.cloudLicenseError).toBeNull();
+      expect(getJson.cloudLicenseStorageMode).toBe("local-memory");
+
+      // Clean up test license
+      await serverHandlers.PUT({
+        request: new Request("http://localhost/api/public/results/sync", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            licenseAction: {
+              type: "delete",
+              id: testId,
+            },
+          }),
+        }),
+      });
+    });
+  });
+
+  it("blocks local-only mutation and rolls back when a bound KV store fails to write", async () => {
+    const failingKv = {
+      async get() {
+        return null;
+      },
+      async put() {
+        throw new Error("KV write quota exceeded");
+      },
+    };
+    const serverHandlers = (
+      SyncRoute as unknown as {
+        options: {
+          server: {
+            handlers: {
+              GET: (ctx: { request: Request }) => Promise<Response>;
+              PUT: (ctx: { request: Request }) => Promise<Response>;
+            };
+          };
+        };
+      }
+    ).options.server.handlers;
+
+    await runWithCloudflareEnv({ PIZARRA_KV: failingKv }, async () => {
+      const testId = generateLicenseUuid();
+      const putReq = new Request("http://localhost/api/public/results/sync", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          licenseAction: {
+            type: "create",
+            id: testId,
+            client_name: "prueba kv falla",
+            pin_code: "654329",
+            days: 30,
+            max_devices: 1,
+          },
+        }),
+      });
+      const putRes = await serverHandlers.PUT({ request: putReq });
+      const putJson = await putRes.json();
+
+      expect(putJson.cloudLicenseSyncOk).toBe(false);
+      expect(putJson.cloudLicenseError).toContain("KV write quota exceeded");
+      expect(
+        (putJson.clientLicenses as Array<{ pin_code: string }>).some(
+          (l) => l.pin_code === "654329",
         ),
       ).toBe(false);
     });

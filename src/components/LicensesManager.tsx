@@ -199,7 +199,7 @@ export default function LicensesManager() {
 
         if (typeof data.cloudLicenseError === "string" && data.cloudLicenseError.trim()) {
           setCloudErrorAlert(data.cloudLicenseError);
-        } else if (data.cloudLicenseConfigured === true) {
+        } else {
           setCloudErrorAlert(null);
         }
 
@@ -211,11 +211,7 @@ export default function LicensesManager() {
         );
         let finalLicenses: ClientLicense[] = reconciled.licenses;
 
-        if (
-          data.cloudLicenseConfigured !== false &&
-          !data.cloudLicenseError &&
-          reconciled.needsServerSync.length > 0
-        ) {
+        if (!data.cloudLicenseError && reconciled.needsServerSync.length > 0) {
           try {
             const restoreRes = await fetch("/api/public/results/sync", {
               method: "PUT",
