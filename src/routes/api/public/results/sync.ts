@@ -266,26 +266,34 @@ function formatSupabaseLicenseError(
   return full;
 }
 
-async function readLicensesFromCloudflareKv(): Promise<ServerLicenseState | null> {
+async function readLicensesFromCloudflareKv(): Promise<{
+  state: ServerLicenseState | null;
+  error?: string;
+}> {
   const kv = getBoundCloudflareKv();
-  if (!kv) return null;
+  if (!kv) return { state: null };
   try {
     const raw = await kv.get(KV_LICENSES_KEY, "text");
     if (typeof raw === "string" && raw.trim()) {
       const parsed = JSON.parse(raw) as Partial<ServerLicenseState>;
       if (parsed && Array.isArray(parsed.licenses)) {
         return {
-          requireLicense: Boolean(parsed.requireLicense),
-          licenses: parsed.licenses,
-          deletedIds: Array.isArray(parsed.deletedIds) ? parsed.deletedIds : [],
-          deletedPins: Array.isArray(parsed.deletedPins) ? parsed.deletedPins : [],
+          state: {
+            requireLicense: Boolean(parsed.requireLicense),
+            licenses: parsed.licenses,
+            deletedIds: Array.isArray(parsed.deletedIds) ? parsed.deletedIds : [],
+            deletedPins: Array.isArray(parsed.deletedPins) ? parsed.deletedPins : [],
+          },
         };
       }
     }
-  } catch {
-    // ignore KV read failure
+    return { state: null };
+  } catch (err) {
+    return {
+      state: null,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
-  return null;
 }
 
 async function writeLicensesToCloudflareKv(
@@ -499,9 +507,13 @@ export async function syncLicensesWithSupabase(force = false): Promise<void> {
     const realClient = createRealSupabaseAdminClient();
 
     if (!realClient) {
-      const kvState = await readLicensesFromCloudflareKv();
-      if (kvState) {
-        serverLicenseState = kvState;
+      const kvRead = await readLicensesFromCloudflareKv();
+      if (kvRead.error) {
+        lastCloudLicenseReadError = kvRead.error;
+        return;
+      }
+      if (kvRead.state) {
+        serverLicenseState = kvRead.state;
         lastCloudLicenseReadError = null;
         lastLicensesCloudSyncAt = Date.now();
         saveServerLicenses();
@@ -2527,6 +2539,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
             }
           }
 
+          const putCloudDiag = getSupabaseCloudDiagnostics();
           return noStoreJson({
             status: "ok",
             results: mockStore.results,
@@ -2546,6 +2559,12 @@ export const Route = createFileRoute("/api/public/results/sync")({
             licenseActivation,
             cloudLicenseSyncOk,
             cloudLicenseError,
+            cloudLicenseConfigured: putCloudDiag.configured || putCloudDiag.hasKvBinding,
+            cloudLicenseStorageMode: putCloudDiag.configured
+              ? "supabase"
+              : putCloudDiag.hasKvBinding
+                ? "cloudflare-kv"
+                : "local-memory",
           });
         } catch (err) {
           return noStoreJson(

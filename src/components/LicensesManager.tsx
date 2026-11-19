@@ -124,11 +124,13 @@ export default function LicensesManager() {
   const [editingDesignConfig, setEditingDesignConfig] = useState<ClientDesignConfig>({});
   const [editingFullscreenAuto, setEditingFullscreenAuto] = useState<boolean>(false);
 
-  // Copy feedback
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [feedbackMsg, setFeedbackMsg] = useState<string | null>(null);
   const [cloudErrorAlert, setCloudErrorAlert] = useState<string | null>(null);
   const [modalCloudError, setModalCloudError] = useState<string | null>(null);
+  const [cloudStorageMode, setCloudStorageMode] = useState<
+    "supabase" | "cloudflare-kv" | "local-memory" | null
+  >(null);
 
   const showToast = (msg: string) => {
     setFeedbackMsg(msg);
@@ -202,12 +204,20 @@ export default function LicensesManager() {
         } else {
           setCloudErrorAlert(null);
         }
+        if (
+          data.cloudLicenseStorageMode === "supabase" ||
+          data.cloudLicenseStorageMode === "cloudflare-kv" ||
+          data.cloudLicenseStorageMode === "local-memory"
+        ) {
+          setCloudStorageMode(data.cloudLicenseStorageMode);
+        }
 
+        const isEphemeralServer = data.cloudLicenseConfigured === false;
         const reconciled = reconcileClientLicensesWithLocal(
           serverList,
           data.deletedIds,
           data.deletedPins,
-          { allowOverrideServer: true },
+          { allowOverrideServer: true, preserveLocalOnEphemeralServer: isEphemeralServer },
         );
         let finalLicenses: ClientLicense[] = reconciled.licenses;
 
@@ -233,7 +243,7 @@ export default function LicensesManager() {
                   restoreData.clientLicenses,
                   restoreData.deletedIds,
                   restoreData.deletedPins,
-                  { allowOverrideServer: true },
+                  { allowOverrideServer: true, preserveLocalOnEphemeralServer: isEphemeralServer },
                 ).licenses;
               }
             }
@@ -472,6 +482,14 @@ export default function LicensesManager() {
 
       setCloudErrorAlert(null);
       setModalCloudError(null);
+      if (
+        data &&
+        (data.cloudLicenseStorageMode === "supabase" ||
+          data.cloudLicenseStorageMode === "cloudflare-kv" ||
+          data.cloudLicenseStorageMode === "local-memory")
+      ) {
+        setCloudStorageMode(data.cloudLicenseStorageMode);
+      }
 
       const nextRequire =
         data && typeof data.requireLicense === "boolean" ? data.requireLicense : currentReq;
@@ -524,7 +542,10 @@ export default function LicensesManager() {
           data.clientLicenses,
           data.deletedIds,
           data.deletedPins,
-          { allowOverrideServer: true },
+          {
+            allowOverrideServer: true,
+            preserveLocalOnEphemeralServer: data.cloudLicenseConfigured === false,
+          },
         );
         setLicenses(reconciled.licenses);
         saveLocalLicensesSnapshot(nextRequire, reconciled.licenses);
@@ -860,6 +881,13 @@ export default function LicensesManager() {
             >
               {requireLicense ? "CANDADO ACTIVO" : "ACCESO LIBRE"}
             </span>
+            {cloudStorageMode && cloudStorageMode !== "local-memory" && (
+              <span className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded border bg-emerald-950/50 text-emerald-300 border-emerald-700/50">
+                {cloudStorageMode === "cloudflare-kv"
+                  ? "NUBE ACTIVA: CLOUDFLARE KV"
+                  : "NUBE ACTIVA: SUPABASE"}
+              </span>
+            )}
           </div>
           <p className="text-xs text-slate-400 max-w-2xl">
             Asigna un código PIN de 6 dígitos a cada cliente o agencia. Como administrador siempre
@@ -947,6 +975,35 @@ export default function LicensesManager() {
           </div>
         </div>
       </div>
+
+      {cloudStorageMode === "local-memory" && !cloudErrorAlert && (
+        <div
+          role="status"
+          className="bg-amber-950/70 border border-amber-500/60 text-amber-100 px-4 py-3 rounded-xl text-xs space-y-1 shadow-md"
+        >
+          <div className="flex items-center gap-2 font-bold text-amber-300">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
+            <span>
+              Almacenamiento en memoria temporal (sin base de datos en la nube conectada en
+              Cloudflare)
+            </span>
+          </div>
+          <p className="text-[11px] leading-relaxed text-amber-100/90">
+            Las licencias nuevas creadas en Cloudflare Pages sin base de datos conectada no se
+            comparten con otros televisores o navegadores (al intentar entrar con el PIN dirá código
+            inválido). Para persistencia global conecta{" "}
+            <span className="font-mono font-semibold text-white">PIZARRA_KV</span> en{" "}
+            <span className="font-semibold">Cloudflare Pages → Settings → Bindings</span> (o agrega
+            las variables{" "}
+            <span className="font-mono font-semibold text-white">
+              CF_ACCOUNT_ID, CF_KV_NAMESPACE_ID, CF_API_TOKEN
+            </span>{" "}
+            / un proyecto activo de{" "}
+            <span className="font-mono font-semibold text-white">SUPABASE_URL</span>) y vuelve a
+            desplegar.
+          </p>
+        </div>
+      )}
 
       {cloudErrorAlert && (
         <div

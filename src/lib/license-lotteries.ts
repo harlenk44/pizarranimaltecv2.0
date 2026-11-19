@@ -678,6 +678,11 @@ export interface ReconcileLicenseOptions {
    */
   allowOverrideServer?: boolean;
   /**
+   * When true (server has no cloud DB configured and runs in ephemeral local-memory mode),
+   * keep local created licenses on the same browser beyond the 2-minute override TTL.
+   */
+  preserveLocalOnEphemeralServer?: boolean;
+  /**
    * Optional clock override for testing.
    */
   nowMs?: number;
@@ -701,6 +706,7 @@ export function reconcileClientLicensesWithLocal(
   try {
     const nowMs = options?.nowMs ?? Date.now();
     const allowOverrideServer = options?.allowOverrideServer ?? true;
+    const preserveLocalOnEphemeralServer = options?.preserveLocalOnEphemeralServer ?? false;
     const overrideWindowMs = allowOverrideServer
       ? ADMIN_OVERRIDE_WINDOW_MS
       : CLIENT_OVERRIDE_WINDOW_MS;
@@ -814,8 +820,8 @@ export function reconcileClientLicensesWithLocal(
       }
     }
 
-    // Include ONLY recently created/edited local overrides that are missing from a cold isolate.
-    // Never resurrect old cached entries from snapshot when server already returned licenses.
+    // Include ONLY recently created/edited local overrides that are missing from a cold isolate
+    // (or all non-deleted local created overrides while server is in ephemeral local-memory mode).
     for (const key of Object.keys(overridesMap)) {
       if (key.startsWith("pin:")) continue;
       const entry = overridesMap[key];
@@ -830,7 +836,7 @@ export function reconcileClientLicensesWithLocal(
       if (seenIds.has(candidate.id) || seenPins.has(candidate.pin_code)) continue;
 
       const ageMs = nowMs - (Number(entry.updatedAt) || 0);
-      if (ageMs <= EXTRA_CREATED_WINDOW_MS) {
+      if (preserveLocalOnEphemeralServer || ageMs <= EXTRA_CREATED_WINDOW_MS) {
         seenIds.add(candidate.id);
         seenPins.add(candidate.pin_code);
         result.unshift(candidate);

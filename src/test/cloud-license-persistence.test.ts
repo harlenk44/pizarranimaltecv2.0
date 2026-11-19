@@ -477,4 +477,132 @@ describe("Cloud license persistence & Cloudflare runtime env", () => {
       },
     );
   });
+
+  it("persists licenses via Cloudflare KV REST API when CF_ACCOUNT_ID, CF_API_TOKEN, and CF_KV_NAMESPACE_ID are configured", async () => {
+    const restStore = new Map<string, string>();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (
+        url.startsWith(
+          "https://api.cloudflare.com/client/v4/accounts/acc-123/storage/kv/namespaces/ns-456/values/",
+        )
+      ) {
+        const key = decodeURIComponent(url.split("/values/")[1] || "");
+        const method = (init?.method || "GET").toUpperCase();
+        if (method === "GET") {
+          const val = restStore.get(key);
+          if (val === undefined) return new Response("Not found", { status: 404 });
+          return new Response(val, { status: 200 });
+        }
+        if (method === "PUT") {
+          restStore.set(key, String(init?.body || ""));
+          return new Response(JSON.stringify({ success: true }), { status: 200 });
+        }
+      }
+      return originalFetch(input, init);
+    }) as typeof fetch;
+
+    const serverHandlers = (
+      SyncRoute as unknown as {
+        options: {
+          server: {
+            handlers: {
+              GET: (ctx: { request: Request }) => Promise<Response>;
+              PUT: (ctx: { request: Request }) => Promise<Response>;
+            };
+          };
+        };
+      }
+    ).options.server.handlers;
+
+    try {
+      await runWithCloudflareEnv(
+        {
+          CF_ACCOUNT_ID: "acc-123",
+          CF_API_TOKEN: "tok-secret",
+          CF_KV_NAMESPACE_ID: "ns-456",
+        },
+        async () => {
+          const testId = generateLicenseUuid();
+          const createRes = await serverHandlers.PUT({
+            request: new Request("http://localhost/api/public/results/sync", {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                licenseAction: {
+                  type: "create",
+                  id: testId,
+                  client_name: "cliente kv rest",
+                  pin_code: "778899",
+                  days: 30,
+                  max_devices: 1,
+                },
+              }),
+            }),
+          });
+          const createJson = await createRes.json();
+          expect(createJson.cloudLicenseSyncOk).toBe(true);
+          expect(createJson.cloudLicenseConfigured).toBe(true);
+          expect(createJson.cloudLicenseStorageMode).toBe("cloudflare-kv");
+          expect(restStore.size).toBe(1);
+
+          const getRes = await serverHandlers.GET({
+            request: new Request("http://localhost/api/public/results/sync"),
+          });
+          const getJson = await getRes.json();
+          expect(getJson.cloudLicenseStorageMode).toBe("cloudflare-kv");
+          expect(
+            (getJson.clientLicenses as Array<{ pin_code: string }>).some(
+              (l) => l.pin_code === "778899",
+            ),
+          ).toBe(true);
+
+          await serverHandlers.PUT({
+            request: new Request("http://localhost/api/public/results/sync", {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                licenseAction: { type: "delete", id: testId },
+              }),
+            }),
+          });
+        },
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("does not overwrite KV with defaults when KV read fails", async () => {
+    let putCalled = false;
+    const readErrorKv = {
+      async get() {
+        throw new Error("KV read timeout");
+      },
+      async put() {
+        putCalled = true;
+      },
+    };
+    const serverHandlers = (
+      SyncRoute as unknown as {
+        options: {
+          server: {
+            handlers: {
+              GET: (ctx: { request: Request }) => Promise<Response>;
+            };
+          };
+        };
+      }
+    ).options.server.handlers;
+
+    await runWithCloudflareEnv({ PIZARRA_KV: readErrorKv }, async () => {
+      const getRes = await serverHandlers.GET({
+        request: new Request("http://localhost/api/public/results/sync"),
+      });
+      const getJson = await getRes.json();
+      expect(putCalled).toBe(false);
+      expect(getJson.cloudLicenseError).toContain("KV read timeout");
+    });
+  });
 });

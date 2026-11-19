@@ -286,7 +286,10 @@ export default function LicenseGate({
           serverList,
           data?.deletedIds,
           data?.deletedPins,
-          { allowOverrideServer: false },
+          {
+            allowOverrideServer: false,
+            preserveLocalOnEphemeralServer: data?.cloudLicenseConfigured === false,
+          },
         );
         const nextJson = JSON.stringify(reconciled.licenses);
         if (lastLicensesJsonRef.current !== nextJson) {

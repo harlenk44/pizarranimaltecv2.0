@@ -227,7 +227,82 @@ function findKvInEnv(envObj: EnvRecord | null | undefined): CloudflareKvNamespac
   return null;
 }
 
-export function getBoundCloudflareKv(): CloudflareKvNamespace | null {
+function getRestCloudflareKvConfig(): {
+  accountId: string;
+  apiToken: string;
+  namespaceId: string;
+} | null {
+  const accountId = getRuntimeEnvVar("CF_ACCOUNT_ID") || getRuntimeEnvVar("CLOUDFLARE_ACCOUNT_ID");
+  const apiToken = getRuntimeEnvVar("CF_API_TOKEN") || getRuntimeEnvVar("CLOUDFLARE_API_TOKEN");
+  const namespaceId =
+    getRuntimeEnvVar("CF_KV_NAMESPACE_ID") ||
+    getRuntimeEnvVar("PIZARRA_KV_NAMESPACE_ID") ||
+    getRuntimeEnvVar("CLOUDFLARE_KV_NAMESPACE_ID");
+  if (!accountId || !apiToken || !namespaceId) return null;
+  return { accountId, apiToken, namespaceId };
+}
+
+let cachedRestKvKey = "";
+let cachedRestKvClient: CloudflareKvNamespace | null = null;
+
+function getRestCloudflareKv(): CloudflareKvNamespace | null {
+  const cfg = getRestCloudflareKvConfig();
+  if (!cfg) return null;
+  const cacheKey = `${cfg.accountId}:${cfg.namespaceId}:${cfg.apiToken}`;
+  if (cachedRestKvClient && cachedRestKvKey === cacheKey) {
+    return cachedRestKvClient;
+  }
+
+  const baseUrl = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(cfg.accountId)}/storage/kv/namespaces/${encodeURIComponent(cfg.namespaceId)}/values`;
+  cachedRestKvKey = cacheKey;
+  cachedRestKvClient = {
+    async get(key: string, type?: "text" | "json") {
+      const res = await fetch(`${baseUrl}/${encodeURIComponent(key)}`, {
+        headers: { Authorization: `Bearer ${cfg.apiToken}` },
+      });
+      if (res.status === 404) return null;
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        throw new Error(
+          `Cloudflare KV REST GET HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ""}`,
+        );
+      }
+      if (type === "json") return await res.json();
+      return await res.text();
+    },
+    async put(key: string, value: string) {
+      const res = await fetch(`${baseUrl}/${encodeURIComponent(key)}`, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${cfg.apiToken}`,
+          "Content-Type": "text/plain; charset=utf-8",
+        },
+        body: value,
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        throw new Error(
+          `Cloudflare KV REST PUT HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ""}`,
+        );
+      }
+    },
+    async delete(key: string) {
+      const res = await fetch(`${baseUrl}/${encodeURIComponent(key)}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${cfg.apiToken}` },
+      });
+      if (res.status !== 404 && !res.ok) {
+        const body = await res.text().catch(() => "");
+        throw new Error(
+          `Cloudflare KV REST DELETE HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ""}`,
+        );
+      }
+    },
+  };
+  return cachedRestKvClient;
+}
+
+function getNativeBoundCloudflareKv(): CloudflareKvNamespace | null {
   const fromAls = runtimeEnvAls?.getStore();
   if (fromAls) {
     return findKvInEnv(fromAls);
@@ -237,6 +312,16 @@ export function getBoundCloudflareKv(): CloudflareKvNamespace | null {
     findKvInEnv(asNonEmptyRecord((globalThis as { __env__?: unknown }).__env__)) ||
     findKvInEnv(cachedWorkersModuleEnv)
   );
+}
+
+export function getCloudflareKvStorageKind(): "binding" | "rest-api" | null {
+  if (getNativeBoundCloudflareKv()) return "binding";
+  if (getRestCloudflareKvConfig()) return "rest-api";
+  return null;
+}
+
+export function getBoundCloudflareKv(): CloudflareKvNamespace | null {
+  return getNativeBoundCloudflareKv() || getRestCloudflareKv();
 }
 
 export function getCloudflareEnvKeysSummary(): string {
