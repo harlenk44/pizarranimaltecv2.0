@@ -397,3 +397,69 @@ export function deduplicateGamesList<T extends Game>(
   );
   return { games: deduped, idRemap };
 }
+
+/**
+ * Empareja los resultados de un juego tanto por su `game_id` exacto (UUID oficial)
+ * como por su slug canónico (`game_slug` o UUID legado -> slug canónico), garantizando
+ * que juegos como LA GRANJITA, GUACHARO ACTIVO o EL GUACHARITO MILLONARIO muestren
+ * siempre sus sorteos incluso si el navegador inició con IDs semilla o alias históricos.
+ */
+export function matchResultsForGame<
+  T extends {
+    id: string;
+    game_id: string;
+    game_slug?: string | null;
+    draw_date: string;
+    draw_time: string;
+    source?: string | null;
+  },
+>(
+  game: { id: string; slug?: string | null; name?: string | null },
+  allResults: T[],
+  drawDate?: string,
+): T[] {
+  const targetId = (game.id || "").trim();
+  const targetCanonicalSlug = normalizeGameSlug(game.slug || targetId, game.name);
+  const bySlot = new Map<string, T>();
+
+  for (const r of allResults) {
+    if (!r || !r.draw_date || !r.draw_time) continue;
+    if (drawDate && r.draw_date !== drawDate) continue;
+
+    const exactIdMatch = Boolean(targetId && r.game_id === targetId);
+    let slugMatch = false;
+    if (!exactIdMatch && targetCanonicalSlug) {
+      const rSlug = r.game_slug ? normalizeGameSlug(r.game_slug) : "";
+      if (rSlug && rSlug === targetCanonicalSlug) {
+        slugMatch = true;
+      } else if (r.game_id) {
+        const legacySlug = LEGACY_GAME_UUID_TO_CANONICAL_SLUG[r.game_id.trim().toLowerCase()];
+        if (legacySlug && legacySlug === targetCanonicalSlug) {
+          slugMatch = true;
+        }
+      }
+    }
+
+    if (!exactIdMatch && !slugMatch) continue;
+
+    const normSlot = r.draw_time.substring(0, 5).replace(/^0/, "");
+    const slotKey = `${r.draw_date}|${normSlot}`;
+    const existing = bySlot.get(slotKey);
+    const normalizedRow: T = exactIdMatch || !targetId ? r : { ...r, game_id: targetId };
+
+    if (!existing) {
+      bySlot.set(slotKey, normalizedRow);
+      continue;
+    }
+
+    const incomingManual = r.source === "manual";
+    const existingManual = existing.source === "manual";
+    if (incomingManual && !existingManual) {
+      bySlot.set(slotKey, normalizedRow);
+    } else if (incomingManual === existingManual && exactIdMatch && existing.game_id !== targetId) {
+      bySlot.set(slotKey, normalizedRow);
+    }
+  }
+
+  return Array.from(bySlot.values()).sort((a, b) => a.draw_time.localeCompare(b.draw_time));
+}

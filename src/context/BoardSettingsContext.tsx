@@ -1,11 +1,6 @@
 import { createContext, useContext, useEffect, useState, useCallback, type ReactNode } from "react";
 import { supabase } from "@/lib/supabase";
-import {
-  DEFAULT_APP_SETTINGS,
-  type AppSettings,
-  sanitizeAppSettingsForSupabase,
-  parseAppSettingsFromSupabase,
-} from "@/lib/types";
+import { DEFAULT_APP_SETTINGS, type AppSettings, parseAppSettingsFromSupabase } from "@/lib/types";
 
 interface BoardSettingsContextType {
   settings: AppSettings;
@@ -90,43 +85,27 @@ export function BoardSettingsProvider({ children }: { children: ReactNode }) {
       }
     }
 
-    // Determine the most authoritative and newest timestamp across sources
-    const cloudTime = cloudData?.updated_at ? new Date(cloudData.updated_at).getTime() : 0;
-    const serverTime = serverData?.updated_at ? new Date(serverData.updated_at).getTime() : 0;
-    const localTime = localData?.updated_at ? new Date(localData.updated_at).getTime() : 0;
-
-    // Merge baseline defaults, server persisted data, cloud Supabase, and local storage
+    // Merge baseline defaults, server persisted data, and cloud Supabase (strictly read-only:
+    // opening a board on one TV/browser must NEVER push localStorage back to global cloud app_settings)
+    const hasAuthoritativeRemote = Boolean(cloudData || serverData);
     const merged: AppSettings = {
       ...DEFAULT_APP_SETTINGS,
+      ...(localData && !hasAuthoritativeRemote ? localData : {}),
       ...(serverData || {}),
       ...(cloudData || {}),
       id: "global",
     };
 
-    if (localData && localTime > Math.max(cloudTime, serverTime)) {
-      // Local settings are strictly newer: prioritize local changes
-      Object.assign(merged, localData, { id: "global" });
-      console.log(
-        "[BoardDesign:Context] Configuración local es más reciente. Sincronizando hacia nube/servidor...",
-      );
-      // Persist to server and Supabase in background
-      fetch("/api/public/results/sync", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ appSettings: merged }),
-      }).catch(() => {});
-      const sanitized = sanitizeAppSettingsForSupabase(merged);
-      supabase
-        .from("app_settings")
-        .upsert(sanitized, { onConflict: "id" })
-        .catch(() => {});
-    } else if (localData) {
-      // Merge local extended settings (like custom game_colors) if not explicitly overwritten
-      merged.game_colors = {
-        ...(localData.game_colors || {}),
-        ...(serverData?.game_colors || {}),
-        ...(cloudData?.game_colors || {}),
-      };
+    if (hasAuthoritativeRemote && localData) {
+      // Preserve local extended settings only when neither cloud nor server defines them
+      if (!cloudData?.game_colors && !serverData?.game_colors && localData.game_colors) {
+        merged.game_colors = { ...localData.game_colors };
+      } else {
+        merged.game_colors = {
+          ...(serverData?.game_colors || {}),
+          ...(cloudData?.game_colors || {}),
+        };
+      }
       if (!cloudData?.card_style && !serverData?.card_style && localData.card_style) {
         merged.card_style = localData.card_style;
       }

@@ -273,16 +273,11 @@ export async function synchronizeAutomaticResults(
     remapInMemoryStoreIds(idRemap, gamesById);
   }
 
-  // Cuando hay juegos en Supabase, solo sincronizamos los que existen en Supabase (o todos los canónicos si no hay Supabase)
-  const targetGames: Game[] =
-    cloudGames.length > 0
-      ? deduplicateGamesList(cloudGames, {
-          preferredCloudIds,
-          isCustomLogo: isCustomUploadedGameLogo,
-        }).games
-      : authoritativeGames;
-
-  const automaticGames = targetGames.filter((g) => {
+  // Sincronizamos TODOS los juegos activos canónicos (authoritativeGames):
+  // - Los que existen en Supabase usan su UUID oficial de Supabase y se persisten también en Supabase.
+  // - Los juegos oficiales (ej. La Granjita, Monje Millonario, etc.) que aún no tengan fila en Supabase `games`
+  //   se siguen sincronizando en memoria para que ninguna licencia nueva quede con tarjetas sin resultados.
+  const automaticGames = authoritativeGames.filter((g) => {
     const effectiveMode = (g.mode ?? g.loading_mode ?? "automatic").toLowerCase();
     return effectiveMode === "automatic" && g.is_active !== false;
   });
@@ -296,6 +291,9 @@ export async function synchronizeAutomaticResults(
     automaticGames.map(async (game): Promise<SyncReport> => {
       const canonicalSlug = normalizeGameSlug(game.slug, game.name) as CanonicalGameSlug;
       const provider = providerMap[canonicalSlug] ?? providerMap[game.slug];
+      const canPersistToCloud = Boolean(
+        realClient && (cloudGames.length === 0 || preferredCloudIds.has(game.id)),
+      );
 
       try {
         const syncGame: SyncGame = {
@@ -316,6 +314,10 @@ export async function synchronizeAutomaticResults(
             p_animal_name: draw.animal_name,
           };
           const { data: localData } = await mockSupabase.rpc("sync_automatic_result", localPayload);
+
+          if (!canPersistToCloud) {
+            return localData === true;
+          }
 
           const drawKey = makeDrawPersistKey(
             game.id,

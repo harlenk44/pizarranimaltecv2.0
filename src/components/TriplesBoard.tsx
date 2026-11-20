@@ -1,7 +1,7 @@
 import { useMemo, memo } from "react";
 import { Hash } from "lucide-react";
 import { useBoardSettings } from "@/context/BoardSettingsContext";
-import { useLicenseContext } from "@/components/LicenseGate";
+import { useLicenseContext } from "@/context/LicenseContext";
 import { getResponsiveBoardGridStyle } from "@/lib/license-lotteries";
 import {
   TRIPLE_GAMES,

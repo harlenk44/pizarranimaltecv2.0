@@ -6,10 +6,11 @@ import { Calendar, ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
 import AdBanner from "@/components/AdBanner";
 import AnimalMedia from "@/components/AnimalMedia";
 import { useBoardSettings } from "@/context/BoardSettingsContext";
-import { useLicenseContext } from "@/components/LicenseGate";
+import { useLicenseContext } from "@/context/LicenseContext";
 import { lotteryDate } from "@/lib/lottery-date";
 import { getGameNeonColor, getNeonLogoRingStyle, getNeonTitleStyle } from "@/lib/neon-flex";
-import { getGameLogo } from "@/lib/game-logos";
+import { getGameLogo, isCustomUploadedGameLogo } from "@/lib/game-logos";
+import { deduplicateGamesList, matchResultsForGame } from "@/lib/game-slugs";
 
 type AnimalImageMap = Record<string, string>;
 type AnimalNameMap = Record<string, string>;
@@ -60,7 +61,7 @@ export default function WeeklyBoard({ onClose }: WeeklyBoardProps) {
   const [loading, setLoading] = useState(true);
   const [weekStart, setWeekStart] = useState<Date>(currentLotteryWeek);
   const { settings } = useBoardSettings();
-  const { designConfig } = useLicenseContext();
+  const { designConfig, isGameAllowed } = useLicenseContext();
   const styleMode = designConfig?.card_style ?? settings.card_style ?? "neon";
   const mergedGameColors = useMemo(
     () => ({
@@ -83,7 +84,10 @@ export default function WeeklyBoard({ onClose }: WeeklyBoardProps) {
       supabase.from("animal_entries").select("*"),
     ]);
 
-    setGames((gamesRes.data ?? []) as Game[]);
+    const dedupedGames = deduplicateGamesList((gamesRes.data ?? []) as Game[], {
+      isCustomLogo: isCustomUploadedGameLogo,
+    }).games;
+    setGames(dedupedGames);
 
     const imgMap: AnimalImageMap = {};
     for (const img of (imagesRes.data ?? []) as AnimalImage[]) {
@@ -119,15 +123,23 @@ export default function WeeklyBoard({ onClose }: WeeklyBoardProps) {
     return () => clearInterval(refreshInterval);
   }, [fetchData]);
 
+  const visibleGames = useMemo(
+    () => games.filter((g) => isGameAllowed(g.slug || g.id, g.name)),
+    [games, isGameAllowed],
+  );
+
   const resultsByGameDay = useMemo(() => {
     const map: Record<string, Result[]> = {};
-    for (const r of results) {
-      const key = `${r.game_id}|${r.draw_date}`;
-      if (!map[key]) map[key] = [];
-      map[key].push(r);
+    for (const g of visibleGames) {
+      const matched = matchResultsForGame(g, results);
+      for (const r of matched) {
+        const key = `${g.id}|${r.draw_date}`;
+        if (!map[key]) map[key] = [];
+        map[key].push(r);
+      }
     }
     return map;
-  }, [results]);
+  }, [visibleGames, results]);
 
   const weekLabel = `${(weekDays[0] ?? weekStart).toLocaleDateString("es-VE", { day: "2-digit", month: "short" })} – ${(weekDays[6] ?? weekStart).toLocaleDateString("es-VE", { day: "2-digit", month: "short", year: "numeric" })}`;
   const isCurrentWeek = dateToISO(weekStart) === dateToISO(currentLotteryWeek());
@@ -199,7 +211,7 @@ export default function WeeklyBoard({ onClose }: WeeklyBoardProps) {
           <div className="flex items-center justify-center h-full">
             <div className="animate-pulse text-slate-400">Cargando resultados...</div>
           </div>
-        ) : games.length === 0 ? (
+        ) : visibleGames.length === 0 ? (
           <div className="flex items-center justify-center h-full text-slate-400">
             No hay juegos activos configurados.
           </div>
@@ -238,7 +250,7 @@ export default function WeeklyBoard({ onClose }: WeeklyBoardProps) {
                   })}
                 </div>
 
-                {games.map((game, gameIdx) => {
+                {visibleGames.map((game, gameIdx) => {
                   const neonColor = getGameNeonColor(
                     game.slug || game.id || game.name,
                     game.color,
@@ -247,7 +259,7 @@ export default function WeeklyBoard({ onClose }: WeeklyBoardProps) {
                   return (
                     <div
                       key={game.id}
-                      className={`display-week-grid ${gameIdx < games.length - 1 ? "border-b border-slate-800" : ""}`}
+                      className={`display-week-grid ${gameIdx < visibleGames.length - 1 ? "border-b border-slate-800" : ""}`}
                     >
                       <div
                         className="px-3 py-2 border-r border-slate-700 flex items-center gap-2 min-h-[112px]"

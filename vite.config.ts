@@ -6,11 +6,16 @@
 // You can pass additional config via defineConfig({ vite: { ... }, etc... }) if needed.
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
+const isHmrDisabled =
+  process.env.DISABLE_HMR === "true" ||
+  Boolean(process.env.K_SERVICE && process.env.APP_URL?.includes(".run.app"));
+
 export default defineConfig({
   vite: {
     server: {
       host: "0.0.0.0",
       port: 3000,
+      ...(isHmrDisabled ? { hmr: false } : {}),
       warmup: {
         clientFiles: ["./src/router.tsx", "./src/routes/index.tsx"],
       },

@@ -5,6 +5,7 @@ import {
   getMasterAnimalProducts,
   getMasterTripleProducts,
 } from "@/lib/master-products";
+import { normalizeGameSlug, getGameSlugAliases } from "@/lib/game-slugs";
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -450,29 +451,91 @@ export function formatClientLicenseName(
 }
 
 const LOTTERY_SLUG_ALIASES: Record<string, string[]> = {
-  granjita: ["la-granjita", "lagranjita"],
-  "la-granjita": ["granjita"],
-  guacharo: ["el-guacharo", "guacharo-activo"],
-  "el-guacharo": ["guacharo", "guacharo-activo"],
-  "guacharo-activo": ["guacharo", "el-guacharo"],
-  guacharito: ["el-guacharito", "el-guacharito-millonario"],
-  "el-guacharito": ["guacharito", "el-guacharito-millonario"],
-  "el-guacharito-millonario": ["guacharito", "el-guacharito"],
-  "lotto-activo-internacional": ["lotto-activo-rd", "lotto-activo-rd-internacional"],
+  granjita: ["la-granjita", "lagranjita", "la_granjita"],
+  "la-granjita": ["granjita", "lagranjita", "la_granjita"],
+  guacharo: ["el-guacharo", "guacharo-activo", "guacharo_activo", "guacharoactivo"],
+  "el-guacharo": ["guacharo", "guacharo-activo", "guacharo_activo"],
+  "guacharo-activo": ["guacharo", "el-guacharo", "guacharo_activo", "guacharoactivo"],
+  guacharito: [
+    "el-guacharito",
+    "el-guacharito-millonario",
+    "guacharito-millonario",
+    "el_guacharito_millonario",
+  ],
+  "el-guacharito": ["guacharito", "el-guacharito-millonario", "guacharito-millonario"],
+  "el-guacharito-millonario": [
+    "guacharito",
+    "el-guacharito",
+    "guacharito-millonario",
+    "el_guacharito_millonario",
+  ],
+  "lotto-activo": ["lotto_activo", "lottoactivo"],
+  "lotto-activo-internacional": [
+    "lotto-activo-rd",
+    "lotto-activo-rd-internacional",
+    "lotto_activo_internacional",
+  ],
   "lotto-activo-rd": ["lotto-activo-internacional"],
   "lotto-activo-rd-internacional": ["lotto-activo-internacional"],
-  "loto-chaim-a": ["loto-chaima"],
-  "loto-chaima": ["loto-chaim-a"],
+  "loto-chaim-a": ["loto-chaima", "loto_chaima", "lotochaima"],
+  "loto-chaima": ["loto-chaim-a", "loto_chaima", "lotochaima"],
+  "selva-plus": ["selva_plus", "selvaplus"],
+  "monje-millonario": ["monje_millonario", "monjemillonario"],
+  "la-ricachona": ["la_ricachona", "laricachona", "ricachona"],
 };
 
+function buildLotteryCandidateKeys(
+  value?: string | null,
+  fallbackName?: string | null,
+): Set<string> {
+  const keys = new Set<string>();
+  const addKey = (rawVal?: string | null) => {
+    if (!rawVal) return;
+    const raw = String(rawVal).trim().toLowerCase();
+    if (!raw) return;
+    keys.add(raw);
+    const hyphenated = raw.replace(/_/g, "-");
+    keys.add(hyphenated);
+
+    const fromUuid = KNOWN_UUID_TO_SLUG[raw];
+    if (fromUuid) {
+      keys.add(fromUuid);
+      for (const a of LOTTERY_SLUG_ALIASES[fromUuid] ?? []) keys.add(a);
+    }
+    for (const a of LOTTERY_SLUG_ALIASES[raw] ?? []) keys.add(a);
+    for (const a of LOTTERY_SLUG_ALIASES[hyphenated] ?? []) keys.add(a);
+
+    // Avoid mapping triple games or arbitrary non-canonical UUIDs via animal slug normalizer
+    if (
+      !hyphenated.startsWith("triple-") &&
+      !hyphenated.startsWith("trio-") &&
+      !hyphenated.startsWith("terminal-")
+    ) {
+      const canonical = normalizeGameSlug(raw, fallbackName);
+      if (canonical && !isValidUuid(canonical)) {
+        keys.add(canonical);
+        for (const a of getGameSlugAliases(canonical)) keys.add(a);
+        for (const a of LOTTERY_SLUG_ALIASES[canonical] ?? []) keys.add(a);
+      }
+    }
+  };
+
+  addKey(value);
+  if (fallbackName) {
+    addKey(fallbackName);
+  }
+  return keys;
+}
+
 /**
- * Checks whether a given lottery (by ID, UUID, or slug) is permitted.
+ * Checks whether a given lottery (by ID, UUID, slug, or fallback name) is permitted.
  * If allowedLotteries is null/undefined, all lotteries are permitted.
  * If allowedLotteries is an empty array [], no lotteries are permitted.
  */
 export function isLotteryPermitted(
   gameIdOrSlug?: string | null,
   allowedLotteries?: string[] | null,
+  fallbackGameName?: string | null,
 ): boolean {
   if (allowedLotteries === null || allowedLotteries === undefined) {
     return true;
@@ -480,24 +543,69 @@ export function isLotteryPermitted(
   if (allowedLotteries.length === 0) {
     return false;
   }
-  if (!gameIdOrSlug) {
+  if (!gameIdOrSlug && !fallbackGameName) {
     return true;
   }
 
-  const raw = String(gameIdOrSlug).trim().toLowerCase();
-  const slugFromUuid = KNOWN_UUID_TO_SLUG[raw] || raw;
-  const candidateKeys = new Set<string>([
-    raw,
-    slugFromUuid,
-    ...(LOTTERY_SLUG_ALIASES[raw] ?? []),
-    ...(LOTTERY_SLUG_ALIASES[slugFromUuid] ?? []),
-  ]);
+  const candidateKeys = buildLotteryCandidateKeys(gameIdOrSlug, fallbackGameName);
 
   return allowedLotteries.some((al) => {
-    const targetRaw = String(al).trim().toLowerCase();
-    const targetCanonical = KNOWN_UUID_TO_SLUG[targetRaw] || targetRaw;
-    return candidateKeys.has(targetRaw) || candidateKeys.has(targetCanonical);
+    const targetKeys = buildLotteryCandidateKeys(al);
+    for (const k of targetKeys) {
+      if (candidateKeys.has(k)) return true;
+    }
+    return false;
   });
+}
+
+/**
+ * Maps a license's stored allowedLotteries list (which may contain canonical slugs like
+ * "la-granjita", "guacharo-activo", "el-guacharito-millonario" or legacy IDs like "granjita",
+ * "guacharo", "guacharito") onto the exact checkbox IDs in ALL_AVAILABLE_LOTTERIES so opening
+ * the edit modal never silently unchecks permitted games.
+ */
+export function normalizeAllowedLotteriesForSelection(allowedLotteries: string[] | null): string[] {
+  if (allowedLotteries === null || allowedLotteries === undefined) {
+    return ALL_AVAILABLE_LOTTERIES.map((l) => l.id);
+  }
+  if (allowedLotteries.length === 0) {
+    return [];
+  }
+  const matchedIds: string[] = [];
+  for (const opt of ALL_AVAILABLE_LOTTERIES) {
+    if (isLotteryPermitted(opt.id, allowedLotteries, opt.name)) {
+      matchedIds.push(opt.id);
+    }
+  }
+  return matchedIds;
+}
+
+/**
+ * Strictly resolves the active license for the current screen without ever allowing
+ * one client's saved configuration to leak onto Master PIN (291007), admin bypass,
+ * open-access boards, or another client PIN.
+ */
+export function resolveEffectiveLicense(params: {
+  licenses: ClientLicense[];
+  activatedPin?: string | null;
+  requireLicense: boolean;
+  adminBypass?: boolean;
+}): ClientLicense | undefined {
+  const cleanPin = (params.activatedPin || "").trim();
+  const matchedLicense = cleanPin
+    ? params.licenses.find((l) => l.pin_code === cleanPin)
+    : undefined;
+
+  if (cleanPin) {
+    // When a specific PIN is activated, strictly return ONLY that exact license.
+    return matchedLicense;
+  }
+
+  if (!params.requireLicense || params.adminBypass) {
+    return params.licenses.find((l) => l.pin_code === "291007");
+  }
+
+  return undefined;
 }
 
 /**
@@ -624,9 +732,8 @@ export function saveLocalLicenseOverride(lic: ClientLicense): void {
       map[`pin:${lic.pin_code}`] = entry;
     }
     localStorage.setItem(LICENSE_OVERRIDES_STORAGE_KEY, JSON.stringify(map));
-    if (lic.id) {
-      localStorage.setItem(LAST_CONFIGURED_LICENSE_ID_KEY, lic.id);
-    }
+    // Clean up legacy cross-user leak key if it was saved in an older session
+    localStorage.removeItem(LAST_CONFIGURED_LICENSE_ID_KEY);
   } catch {
     // ignore storage errors
   }
@@ -663,12 +770,8 @@ export function saveLocalLicensesSnapshot(
 }
 
 export function getLastConfiguredLicenseId(): string | null {
-  if (typeof window === "undefined") return null;
-  try {
-    return localStorage.getItem(LAST_CONFIGURED_LICENSE_ID_KEY);
-  } catch {
-    return null;
-  }
+  // Intentionally disabled: a newly edited client license must NEVER hijack another PIN or Master view.
+  return null;
 }
 
 export interface ReconcileLicenseOptions {

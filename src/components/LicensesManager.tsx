@@ -34,6 +34,7 @@ import LicenseGate from "@/components/LicenseGate";
 import {
   parseClientLicenseName,
   formatClientLicenseName,
+  normalizeAllowedLotteriesForSelection,
   ALL_AVAILABLE_LOTTERIES,
   DEFAULT_ANIMAL_LOTTERIES,
   ALL_TRIPLE_LOTTERIES,
@@ -409,7 +410,8 @@ export default function LicensesManager() {
           } else if (updatedSnapshot) {
             const snap: ClientLicense = updatedSnapshot;
             let targetSbId = toSupabaseLicenseUuid(snap.id, snap.pin_code);
-            if (snap.pin_code) {
+            // Only look up by pin_code for legacy non-UUID updates (never redirect a new license onto another user's row!)
+            if (actionPayload.type !== "create" && !isValidUuid(snap.id) && snap.pin_code) {
               const { data: existingByPin } = await supabase
                 .from("licenses")
                 .select("id")
@@ -630,9 +632,7 @@ export default function LicensesManager() {
     } = parseClientLicenseName(lic.client_name);
     setModalCloudError(null);
     setEditingLicense(lic);
-    setEditingLotteries(
-      allowedLotteries !== null ? [...allowedLotteries] : ALL_AVAILABLE_LOTTERIES.map((l) => l.id),
-    );
+    setEditingLotteries(normalizeAllowedLotteriesForSelection(allowedLotteries));
     setEditingCardsPerScreen(cardsPerScreen ?? DEFAULT_CARDS_PER_SCREEN);
     setEditingTransitionSeconds(transitionSeconds ?? DEFAULT_TRANSITION_SECONDS);
     setEditingVoiceConfig(voiceConfig ?? DEFAULT_CLIENT_VOICE_CONFIG);
@@ -822,6 +822,14 @@ export default function LicensesManager() {
       formCardsPerScreen === "TODAS" ? "Todas" : `${formCardsPerScreen} por pantalla`;
 
     const cleanPin = pinCode.replace(/[^0-9]/g, "").slice(0, 6) || generateRandomPin();
+    const existingPinOwner = licensesRef.current.find((l) => l.pin_code === cleanPin);
+    if (existingPinOwner) {
+      const ownerCleanName = parseClientLicenseName(existingPinOwner.client_name).cleanName;
+      setCloudErrorAlert(
+        `El PIN ${cleanPin} ya pertenece al cliente "${ownerCleanName}". Genera un PIN distinto para no sobrescribir otra licencia.`,
+      );
+      return;
+    }
     const newId = generateLicenseUuid();
 
     const ok = await runLicenseAction(

@@ -11,6 +11,8 @@ import {
   generateLicenseUuid,
   toSupabaseLicenseUuid,
   MASTER_LICENSE_UUID,
+  normalizeAllowedLotteriesForSelection,
+  resolveEffectiveLicense,
 } from "@/lib/license-lotteries";
 
 describe("license-lotteries utilities", () => {
@@ -342,6 +344,160 @@ describe("license-lotteries regression guards", () => {
       expect(reconciled.licenses).toHaveLength(1);
       expect(reconciled.licenses[0]!.id).toBe(MASTER_LICENSE_UUID);
       expect(parseClientLicenseName(reconciled.licenses[0]!.client_name).fullscreenAuto).toBe(true);
+    } finally {
+      Object.defineProperty(globalThis, "window", { value: origWindow, configurable: true });
+      Object.defineProperty(globalThis, "localStorage", { value: origStorage, configurable: true });
+    }
+  });
+
+  it("matches La Granjita, Guácharo Activo and El Guacharito Millonario across canonical slugs, legacy IDs, underscores, and Supabase UUID + name fallback", () => {
+    // Legacy selection IDs permit canonical slugs and underscored slugs
+    expect(isLotteryPermitted("la-granjita", ["granjita"])).toBe(true);
+    expect(isLotteryPermitted("la_granjita", ["granjita"])).toBe(true);
+    expect(isLotteryPermitted("guacharo-activo", ["guacharo"])).toBe(true);
+    expect(isLotteryPermitted("el-guacharito-millonario", ["guacharito"])).toBe(true);
+
+    // Canonical slugs in allowedLotteries also permit legacy IDs and real Supabase UUIDs via fallback name
+    expect(isLotteryPermitted("granjita", ["la-granjita"])).toBe(true);
+    expect(isLotteryPermitted("guacharo", ["guacharo-activo"])).toBe(true);
+    expect(isLotteryPermitted("guacharito", ["el-guacharito-millonario"])).toBe(true);
+    expect(
+      isLotteryPermitted("99999999-1111-4111-8111-111111111111", ["granjita"], "LA GRANJITA"),
+    ).toBe(true);
+    expect(
+      isLotteryPermitted("99999999-1111-4111-8111-111111111112", ["la-granjita"], "LA GRANJITA"),
+    ).toBe(true);
+
+    // Normalization for LicensesManager edit modal maps canonical slugs to checkbox IDs
+    expect(
+      normalizeAllowedLotteriesForSelection([
+        "la-granjita",
+        "guacharo-activo",
+        "el-guacharito-millonario",
+        "lotto-activo",
+      ]),
+    ).toEqual(["lotto-activo", "granjita", "guacharo", "guacharito"]);
+  });
+
+  it("enforces strict per-PIN isolation in resolveEffectiveLicense so editing Client A never affects Master PIN, Admin Bypass, open mode, or Client B", () => {
+    const store = new Map<string, string>();
+    const fakeStorage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        store.set(k, v);
+      },
+      removeItem: (k: string) => {
+        store.delete(k);
+      },
+    };
+    const origWindow = globalThis.window;
+    const origStorage = globalThis.localStorage;
+    Object.defineProperty(globalThis, "window", { value: globalThis, configurable: true });
+    Object.defineProperty(globalThis, "localStorage", { value: fakeStorage, configurable: true });
+
+    try {
+      const masterLicense = {
+        id: MASTER_LICENSE_UUID,
+        client_name: "Administrador Maestro",
+        pin_code: "291007",
+        status: "active" as const,
+        max_devices: 999,
+        bound_device_ids: [],
+        expires_at: null,
+        notes: "",
+        created_at: "2026-01-01T00:00:00.000Z",
+      };
+      const clientA = {
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        client_name: formatClientLicenseName("Cliente A", ["granjita"], 20, 2, 15),
+        pin_code: "111111",
+        status: "active" as const,
+        max_devices: 1,
+        bound_device_ids: [],
+        expires_at: "2027-01-01T00:00:00.000Z",
+        notes: "",
+        created_at: "2026-01-02T00:00:00.000Z",
+      };
+      const clientB = {
+        id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        client_name: formatClientLicenseName(
+          "Cliente B",
+          ["lotto-activo", "selva-plus"],
+          20,
+          6,
+          30,
+        ),
+        pin_code: "222222",
+        status: "active" as const,
+        max_devices: 1,
+        bound_device_ids: [],
+        expires_at: "2027-01-01T00:00:00.000Z",
+        notes: "",
+        created_at: "2026-01-03T00:00:00.000Z",
+      };
+
+      // Simulate admin editing and saving Client A
+      saveLocalLicenseOverride(clientA);
+
+      const allLicenses = [masterLicense, clientA, clientB];
+
+      // Master PIN 291007 must stay on masterLicense, NEVER hijacked by Client A
+      expect(
+        resolveEffectiveLicense({
+          licenses: allLicenses,
+          activatedPin: "291007",
+          requireLicense: true,
+          adminBypass: false,
+        })?.id,
+      ).toBe(MASTER_LICENSE_UUID);
+
+      // Admin bypass without a client PIN must stay on masterLicense (NEVER hijacked by Client A)
+      expect(
+        resolveEffectiveLicense({
+          licenses: allLicenses,
+          activatedPin: null,
+          requireLicense: true,
+          adminBypass: true,
+        })?.id,
+      ).toBe(MASTER_LICENSE_UUID);
+
+      // Open board mode (!requireLicense) without PIN resolves Master (or undefined if absent), NEVER Client A
+      expect(
+        resolveEffectiveLicense({
+          licenses: allLicenses,
+          activatedPin: null,
+          requireLicense: false,
+          adminBypass: false,
+        })?.id,
+      ).toBe(MASTER_LICENSE_UUID);
+      expect(
+        resolveEffectiveLicense({
+          licenses: [clientA, clientB],
+          activatedPin: null,
+          requireLicense: false,
+          adminBypass: false,
+        }),
+      ).toBeUndefined();
+
+      // Client B must resolve ONLY Client B
+      expect(
+        resolveEffectiveLicense({
+          licenses: allLicenses,
+          activatedPin: "222222",
+          requireLicense: true,
+          adminBypass: false,
+        })?.id,
+      ).toBe(clientB.id);
+
+      // Client A resolves Client A
+      expect(
+        resolveEffectiveLicense({
+          licenses: allLicenses,
+          activatedPin: "111111",
+          requireLicense: true,
+          adminBypass: false,
+        })?.id,
+      ).toBe(clientA.id);
     } finally {
       Object.defineProperty(globalThis, "window", { value: origWindow, configurable: true });
       Object.defineProperty(globalThis, "localStorage", { value: origStorage, configurable: true });

@@ -58,15 +58,17 @@ export default function DesignManager() {
 
   // Per-user / client license customization state
   const [licenses, setLicenses] = useState<ClientLicense[]>([]);
+  const [requireLicenseFlag, setRequireLicenseFlag] = useState<boolean>(false);
   const [selectedLicenseId, setSelectedLicenseId] = useState<string>("GLOBAL");
   const [userDesignDraft, setUserDesignDraft] = useState<ClientDesignConfig>({});
   const [userVoiceDraft, setUserVoiceDraft] = useState<ClientVoiceConfig>(
     DEFAULT_CLIENT_VOICE_CONFIG,
   );
+  const [hasUnsavedGlobalChanges, setHasUnsavedGlobalChanges] = useState<boolean>(false);
 
   // Selected game in the per-game dual color palette editor
   const [selectedGameSlug, setSelectedGameSlug] = useState<string>(
-    DEFAULT_ANIMAL_LOTTERIES[0]?.id ?? "lotto_activo",
+    DEFAULT_ANIMAL_LOTTERIES[0]?.id ?? "lotto-activo",
   );
   // Selected board color property for quick dual palette buttons
   const [activeBoardColorKey, setActiveBoardColorKey] = useState<
@@ -82,15 +84,17 @@ export default function DesignManager() {
   const [voicesCount, setVoicesCount] = useState<number>(0);
   const [spanishVoicesCount, setSpanishVoicesCount] = useState<number>(0);
 
-  const saveTimerRef = useRef<NodeJS.Timeout | null>(null);
   const latestDraftRef = useRef<AppSettings>(draft);
 
   // Load client licenses so admin can customize design & voice per user/PIN
   const fetchClientLicenses = useCallback(async () => {
     try {
-      const res = await fetch("/api/public/results/sync");
+      const res = await fetch("/api/public/results/sync", { cache: "no-store" });
       if (res.ok) {
         const data = await res.json();
+        if (typeof data.requireLicense === "boolean") {
+          setRequireLicenseFlag(data.requireLicense);
+        }
         if (Array.isArray(data.clientLicenses)) {
           const reconciled = reconcileClientLicensesWithLocal(
             data.clientLicenses,
@@ -107,6 +111,25 @@ export default function DesignManager() {
 
   useEffect(() => {
     fetchClientLicenses();
+    const handleLicensesUpdated = () => {
+      fetchClientLicenses();
+    };
+    let bc: BroadcastChannel | null = null;
+    try {
+      bc = new BroadcastChannel("pizarra_lottery_channel");
+      bc.onmessage = (event) => {
+        if (event.data?.type === "LICENSES_UPDATED") {
+          fetchClientLicenses();
+        }
+      };
+    } catch {
+      // ignore
+    }
+    window.addEventListener("pizarra:licenses-updated", handleLicensesUpdated);
+    return () => {
+      bc?.close();
+      window.removeEventListener("pizarra:licenses-updated", handleLicensesUpdated);
+    };
   }, [fetchClientLicenses]);
 
   // Monitor browser SpeechSynthesis voices for the audio diagnostic panel
@@ -171,22 +194,11 @@ export default function DesignManager() {
   }, []);
 
   useEffect(() => {
-    if (!saveTimerRef.current) {
+    if (!hasUnsavedGlobalChanges) {
       setDraft(settings);
       latestDraftRef.current = settings;
     }
-  }, [settings]);
-
-  // Flush any pending changes when leaving the DesignManager page
-  useEffect(() => {
-    return () => {
-      if (saveTimerRef.current) {
-        clearTimeout(saveTimerRef.current);
-        saveTimerRef.current = null;
-        persistSettings(latestDraftRef.current);
-      }
-    };
-  }, [persistSettings]);
+  }, [settings, hasUnsavedGlobalChanges]);
 
   // When switching between Global and a specific User License, load that user's saved design & voice
   const handleSelectTargetScope = (licenseId: string) => {
@@ -232,6 +244,8 @@ export default function DesignManager() {
       return;
     }
 
+    // In Global mode, stage changes in draft ONLY — never auto-overwrite global app_settings
+    // until the admin explicitly clicks "Guardar Cambios de Diseño Global".
     const updated: AppSettings = {
       ...draft,
       [key]: value,
@@ -240,15 +254,7 @@ export default function DesignManager() {
     };
     latestDraftRef.current = updated;
     setDraft(updated);
-    updateSettings(updated);
-
-    if (saveTimerRef.current) {
-      clearTimeout(saveTimerRef.current);
-    }
-    saveTimerRef.current = setTimeout(() => {
-      saveTimerRef.current = null;
-      persistSettings(updated);
-    }, 300);
+    setHasUnsavedGlobalChanges(true);
   }
 
   function handleSetGameColor(gameSlug: string, hexColor: string) {
@@ -291,10 +297,6 @@ export default function DesignManager() {
   }
 
   async function save() {
-    if (saveTimerRef.current) {
-      clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = null;
-    }
     setSaving(true);
     setMessage("");
 
@@ -315,16 +317,8 @@ export default function DesignManager() {
         parsed.fullscreenAuto,
       );
 
-      console.log(
-        "[BoardDesign:DesignManager] Guardando diseño para cliente PIN",
-        selectedLicense.pin_code,
-        {
-          cliente: parsed.cleanName,
-          diseno: designPayload,
-          client_name_empaquetado: packedName,
-        },
-      );
-
+      let directCloudOk = false;
+      let accessToken: string | null = null;
       const sbUrl = import.meta.env["VITE_SUPABASE_URL"];
       const isActiveSupabaseUrl =
         typeof sbUrl === "string" &&
@@ -334,10 +328,16 @@ export default function DesignManager() {
         !sbUrl.includes(".lovable.cloud");
       if (isActiveSupabaseUrl) {
         try {
-          await supabase
-            .from("licenses")
-            .update({ client_name: packedName })
-            .eq("id", selectedLicense.id);
+          const { data: sessionData } = await supabase.auth.getSession();
+          const rawTok = sessionData.session?.access_token ?? null;
+          if (rawTok && !rawTok.startsWith("mock-token-") && rawTok.split(".").length === 3) {
+            accessToken = rawTok;
+            const { error: updErr } = await supabase
+              .from("licenses")
+              .update({ client_name: packedName })
+              .eq("id", selectedLicense.id);
+            if (!updErr) directCloudOk = true;
+          }
         } catch (err) {
           console.warn("[BoardDesign:DesignManager] Error actualizando licenses en Supabase:", err);
         }
@@ -347,17 +347,14 @@ export default function DesignManager() {
         ...selectedLicense,
         client_name: packedName,
       };
-      saveLocalLicenseOverride(updatedLicense);
-      setLicenses((prev) => {
-        const next = prev.map((l) => (l.id === selectedLicense.id ? updatedLicense : l));
-        saveLocalLicensesSnapshot(true, next);
-        return next;
-      });
 
       try {
         const res = await fetch("/api/public/results/sync", {
           method: "PUT",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+          },
           body: JSON.stringify({
             licenseAction: {
               type: "update_lotteries",
@@ -367,24 +364,49 @@ export default function DesignManager() {
             },
           }),
         });
-        if (res.ok) {
-          const data = await res.json();
-          if (Array.isArray(data.clientLicenses)) {
-            const reconciled = reconcileClientLicensesWithLocal(
-              data.clientLicenses,
-              data.deletedIds,
-              data.deletedPins,
-              { allowOverrideServer: true },
-            );
-            setLicenses(reconciled.licenses);
-            saveLocalLicensesSnapshot(
-              typeof data.requireLicense === "boolean" ? data.requireLicense : true,
-              reconciled.licenses,
-            );
-          }
+        const data = await res.json().catch(() => null);
+        const serverCloudOk = Boolean(res.ok && data && data.cloudLicenseSyncOk === true);
+
+        if (!serverCloudOk && !directCloudOk) {
+          const errDetail =
+            (data && typeof data.cloudLicenseError === "string" && data.cloudLicenseError) ||
+            (data && typeof data.error === "string" && data.error) ||
+            `No se pudo guardar en Supabase (HTTP ${res.status}).`;
+          setMessage(`Error al guardar el diseño de "${parsed.cleanName}": ${errDetail}`);
+          setSaving(false);
+          return;
         }
-      } catch {
-        // ignore
+
+        saveLocalLicenseOverride(updatedLicense);
+        const nextRequire =
+          data && typeof data.requireLicense === "boolean"
+            ? data.requireLicense
+            : requireLicenseFlag;
+        if (data && typeof data.requireLicense === "boolean") {
+          setRequireLicenseFlag(data.requireLicense);
+        }
+
+        if (data && Array.isArray(data.clientLicenses)) {
+          const reconciled = reconcileClientLicensesWithLocal(
+            data.clientLicenses,
+            data.deletedIds,
+            data.deletedPins,
+            { allowOverrideServer: true },
+          );
+          setLicenses(reconciled.licenses);
+          saveLocalLicensesSnapshot(nextRequire, reconciled.licenses);
+        } else {
+          setLicenses((prev) => {
+            const next = prev.map((l) => (l.id === selectedLicense.id ? updatedLicense : l));
+            saveLocalLicensesSnapshot(nextRequire, next);
+            return next;
+          });
+        }
+      } catch (err) {
+        const netErr = err instanceof Error ? err.message : String(err);
+        setMessage(`Error de red al guardar el diseño de "${parsed.cleanName}": ${netErr}`);
+        setSaving(false);
+        return;
       }
 
       try {
@@ -399,7 +421,7 @@ export default function DesignManager() {
       }
 
       setMessage(
-        `¡Diseño, colores y control de voz guardados en Supabase para el cliente "${parsed.cleanName}" (PIN ${selectedLicense.pin_code})!`,
+        `¡Diseño, colores y control de voz guardados únicamente para "${parsed.cleanName}" (PIN ${selectedLicense.pin_code}) sin afectar a otros clientes!`,
       );
       setSaving(false);
       return;
@@ -414,16 +436,17 @@ export default function DesignManager() {
 
     updateSettings(fullPayload);
     await persistSettings(fullPayload);
+    setHasUnsavedGlobalChanges(false);
 
-    setMessage("¡Diseño global guardado y sincronizado exitosamente para todas las pantallas!");
+    setMessage(
+      "¡Diseño global guardado y sincronizado exitosamente para pantallas sin diseño propio!",
+    );
     await refreshSettings();
     setSaving(false);
   }
 
   async function handleResetUserDesignToGlobal() {
     if (!isUserMode || !selectedLicense) return;
-    setUserDesignDraft({});
-    setUserVoiceDraft(DEFAULT_CLIENT_VOICE_CONFIG);
     setSaving(true);
     const parsed = parseClientLicenseName(selectedLicense.client_name);
     const packedName = formatClientLicenseName(
@@ -440,30 +463,78 @@ export default function DesignManager() {
       ...selectedLicense,
       client_name: packedName,
     };
-    saveLocalLicenseOverride(resetLicense);
+
+    let accessToken: string | null = null;
+    let directCloudOk = false;
     try {
-      await fetch("/api/public/results/sync", {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      accessToken = session?.access_token ?? null;
+    } catch {
+      // ignore
+    }
+
+    if (hasExternalSupabase && isValidUuid(selectedLicense.id)) {
+      try {
+        const { error: updErr } = await supabase
+          .from("licenses")
+          .update({ client_name: packedName })
+          .eq("id", selectedLicense.id);
+        if (!updErr) directCloudOk = true;
+      } catch {
+        // fallback to server endpoint
+      }
+    }
+
+    try {
+      const res = await fetch("/api/public/results/sync", {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
         body: JSON.stringify({
           licenseAction: {
             type: "update_lotteries",
             id: selectedLicense.id,
             client_name: packedName,
+            license: resetLicense,
           },
         }),
       });
+      const data = await res.json().catch(() => null);
+      const serverCloudOk = Boolean(res.ok && data && data.cloudLicenseSyncOk === true);
+
+      if (!serverCloudOk && !directCloudOk) {
+        const errDetail =
+          (data && typeof data.cloudLicenseError === "string" && data.cloudLicenseError) ||
+          (data && typeof data.error === "string" && data.error) ||
+          `No se pudo restablecer en Supabase (HTTP ${res.status}).`;
+        setMessage(`Error al restablecer diseño de "${parsed.cleanName}": ${errDetail}`);
+        setSaving(false);
+        return;
+      }
+
+      setUserDesignDraft({});
+      setUserVoiceDraft(DEFAULT_CLIENT_VOICE_CONFIG);
+      saveLocalLicenseOverride(resetLicense);
       await fetchClientLicenses();
-      const bc = new BroadcastChannel("pizarra_lottery_channel");
-      bc.postMessage({ type: "LICENSES_UPDATED" });
-      setTimeout(() => bc.close(), 1000);
+      try {
+        const bc = new BroadcastChannel("pizarra_lottery_channel");
+        bc.postMessage({ type: "LICENSES_UPDATED" });
+        setTimeout(() => bc.close(), 1000);
+      } catch {
+        // ignore
+      }
       if (typeof window !== "undefined") {
         window.dispatchEvent(new CustomEvent("pizarra:licenses-updated"));
       }
-    } catch {
-      // ignore
+      setMessage(`El cliente "${parsed.cleanName}" ahora usa el Diseño Global por defecto.`);
+    } catch (err) {
+      const netErr = err instanceof Error ? err.message : String(err);
+      setMessage(`Error de red al restablecer diseño de "${parsed.cleanName}": ${netErr}`);
     }
-    setMessage(`El cliente "${parsed.cleanName}" ahora usa el Diseño Global por defecto.`);
     setSaving(false);
   }
 

@@ -1,5 +1,10 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { areSameCanonicalGame, deduplicateGamesList, normalizeGameSlug } from "@/lib/game-slugs";
+import {
+  areSameCanonicalGame,
+  deduplicateGamesList,
+  matchResultsForGame,
+  normalizeGameSlug,
+} from "@/lib/game-slugs";
 import {
   consolidateGamesAndOrphanResultsInSupabase,
   consolidateInMemoryGamesAndResults,
@@ -494,5 +499,84 @@ describe("Consolidación en memoria (consolidateInMemoryGamesAndResults)", () =>
     const res = mockStore.results.find((r) => r.id === "r1");
     expect(res?.game_id).toBe(officialGuacharoId);
     expect(res?.game_slug).toBe("guacharo-activo");
+  });
+
+  it("matchResultsForGame vincula resultados de LA GRANJITA por UUID oficial, UUID legado y game_slug priorizando manuales", () => {
+    const officialGranjita: Game = {
+      id: "88888888-1111-4111-8111-111111111105",
+      name: "LA GRANJITA",
+      slug: "la-granjita",
+      color: "#16a34a",
+      logo_url: null,
+      display_order: 2,
+      is_active: true,
+      loading_mode: "automatic",
+    };
+
+    const matched = matchResultsForGame(
+      officialGranjita,
+      [
+        // Exact UUID match at 09:00 (automatic)
+        {
+          id: "g-09-auto",
+          game_id: officialGranjita.id,
+          game_slug: "la-granjita",
+          draw_date: "2026-11-20",
+          draw_time: "09:00",
+          animal_number: 5,
+          animal_name: "León",
+          source: "automatic",
+        },
+        // Legacy UUID match at 10:00 (no game_slug)
+        {
+          id: "g-10-legacy",
+          game_id: "ca8a0400-0000-4000-8000-000000000006",
+          draw_date: "2026-11-20",
+          draw_time: "10:00",
+          animal_number: 12,
+          animal_name: "Caballo",
+          source: "automatic",
+        },
+        // Slug alias match at 11:00 (manual override beats automatic)
+        {
+          id: "g-11-auto",
+          game_id: officialGranjita.id,
+          game_slug: "la-granjita",
+          draw_date: "2026-11-20",
+          draw_time: "11:00",
+          animal_number: 20,
+          animal_name: "Cochino",
+          source: "automatic",
+        },
+        {
+          id: "g-11-manual",
+          game_id: "ca8a0400-0000-4000-8000-000000000006",
+          game_slug: "granjita",
+          draw_date: "2026-11-20",
+          draw_time: "11:00",
+          animal_number: 7,
+          animal_name: "Perico",
+          source: "manual",
+        },
+        // Unrelated game must NOT match
+        {
+          id: "lotto-09",
+          game_id: "7d21a00b-0dfa-4bdc-9edf-8115802df1d6",
+          game_slug: "lotto-activo",
+          draw_date: "2026-11-20",
+          draw_time: "09:00",
+          animal_number: 1,
+          animal_name: "Carnero",
+          source: "automatic",
+        },
+      ],
+      "2026-11-20",
+    );
+
+    expect(matched).toHaveLength(3);
+    expect(matched.find((r) => r.draw_time === "09:00")?.animal_number).toBe(5);
+    expect(matched.find((r) => r.draw_time === "10:00")?.animal_number).toBe(12);
+    expect(matched.find((r) => r.draw_time === "11:00")?.animal_number).toBe(7);
+    expect(matched.find((r) => r.draw_time === "11:00")?.source).toBe("manual");
   });
 });

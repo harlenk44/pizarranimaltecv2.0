@@ -606,4 +606,71 @@ describe("Supabase licenses table & animal-images Storage bucket integration", (
       globalThis.fetch = originalFetch;
     }
   });
+
+  it("rejects creating a new license with a duplicate PIN instead of overwriting an existing client", async () => {
+    const handlers = getSyncHandlers();
+    await runWithCloudflareEnv({}, async () => {
+      const idA = generateLicenseUuid();
+      const idB = generateLicenseUuid();
+
+      // Create Client A with PIN 778899
+      const createA = await handlers.PUT({
+        request: new Request("http://localhost/api/public/results/sync", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            licenseAction: {
+              type: "create",
+              id: idA,
+              client_name: 'Cliente Original||{"loterias":["granjita"],"tarjetasPorPantalla":4}',
+              pin_code: "778899",
+              days: 30,
+              max_devices: 1,
+            },
+          }),
+        }),
+      });
+      const jsonA = await createA.json();
+      expect(jsonA.cloudLicenseSyncOk).toBe(true);
+
+      // Attempt to create Client B with the SAME PIN 778899
+      const createB = await handlers.PUT({
+        request: new Request("http://localhost/api/public/results/sync", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            licenseAction: {
+              type: "create",
+              id: idB,
+              client_name: "Cliente Duplicado",
+              pin_code: "778899",
+              days: 30,
+              max_devices: 1,
+            },
+          }),
+        }),
+      });
+      const jsonB = await createB.json();
+      expect(jsonB.cloudLicenseSyncOk).toBe(false);
+      expect(jsonB.cloudLicenseError).toMatch(/778899/);
+
+      // Original Client A must remain untouched
+      const originalStillIntact = (
+        jsonB.clientLicenses as Array<{ id: string; client_name: string; pin_code: string }>
+      ).find((l) => l.pin_code === "778899");
+      expect(originalStillIntact?.id).toBe(idA);
+      expect(originalStillIntact?.client_name).toContain("Cliente Original");
+
+      // Clean up
+      await handlers.PUT({
+        request: new Request("http://localhost/api/public/results/sync", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            licenseAction: { type: "delete", id: idA },
+          }),
+        }),
+      });
+    });
+  });
 });

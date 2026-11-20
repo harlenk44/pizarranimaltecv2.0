@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { useBoardSettings } from "@/context/BoardSettingsContext";
-import { useLicenseContext } from "@/components/LicenseGate";
+import { useLicenseContext } from "@/context/LicenseContext";
 import TriplesBoard from "@/components/TriplesBoard";
 import {
   TRIPLE_GAMES,
@@ -52,7 +52,13 @@ import {
   mergeGamesPreserveCustomLogos,
   type AppSettings,
 } from "@/lib/mock-db";
-import { getGameLogo, getCustomGameLogosMap, mergeCustomGameLogosMap } from "@/lib/game-logos";
+import {
+  getGameLogo,
+  getCustomGameLogosMap,
+  mergeCustomGameLogosMap,
+  isCustomUploadedGameLogo,
+} from "@/lib/game-logos";
+import { deduplicateGamesList, matchResultsForGame } from "@/lib/game-slugs";
 import {
   getGameNeonColor,
   getNeonFlexCardStyle,
@@ -258,8 +264,15 @@ function getInitialResultsMap(): Record<string, Result[]> {
       }
     }
     const map: Record<string, Result[]> = {};
+    const activeGames = (mockStore.games as Game[]).filter((g) => g.is_active !== false);
+    for (const g of activeGames) {
+      const matched = matchResultsForGame(g, initialList, today);
+      if (matched.length > 0) {
+        map[g.id] = matched;
+      }
+    }
     for (const r of initialList) {
-      if (r.draw_date === today) {
+      if (r.draw_date === today && !map[r.game_id]) {
         const list = (map[r.game_id] ??= []);
         list.push(r);
       }
@@ -833,24 +846,14 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     return true;
   });
 
+  // Apply per-license voiceConfig in memory ONLY (never overwrite device-global localStorage
+  // so switching to another PIN/license does not inherit the previous user's muted voice).
   useEffect(() => {
     if (voiceConfig) {
       setVoiceEnabled(voiceConfig.enabled);
-      try {
-        localStorage.setItem("lottery_voice_enabled", String(voiceConfig.enabled));
-        localStorage.setItem(
-          "lottery_voice_settings",
-          JSON.stringify({
-            engine: voiceConfig.engine,
-            voiceUri: "",
-            rate: voiceConfig.rate,
-            pitch: 1.02,
-            playChime: voiceConfig.playChime,
-          }),
-        );
-      } catch {
-        // ignore
-      }
+    } else if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("lottery_voice_enabled");
+      setVoiceEnabled(saved !== null ? saved === "true" : true);
     }
   }, [voiceConfig]);
   const isInitialLoadRef = useRef(true);
@@ -1120,53 +1123,56 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         if (!gamesLoadedRef.current || hasServerGamesUpdate) {
           let resolvedGames: Game[] = [];
           let fetchedFromSource = false;
-          const hasExternalSupabase =
-            typeof import.meta.env["VITE_SUPABASE_URL"] === "string" &&
-            import.meta.env["VITE_SUPABASE_URL"].includes(".supabase.co");
 
-          if (hasExternalSupabase) {
-            try {
-              const { data: gamesData, error: gamesErr } = await supabase
-                .from("games")
-                .select("*")
-                .eq("is_active", true)
-                .order("display_order");
-              if (!gamesErr && Array.isArray(gamesData)) {
-                resolvedGames = gamesData as Game[];
-                fetchedFromSource = true;
-              }
-            } catch {
-              // Fallback when external Supabase is unreachable
-            }
+          // 1. Prefer canonical, already-deduplicated games returned by /api/public/results/sync
+          //    (uses authoritative Supabase UUIDs when connected and prevents raw duplicate rows / ID mismatches).
+          if (hasServerGamesUpdate) {
+            const activeServerGames = (mockStore.games as Game[])
+              .filter((g) => g.is_active !== false)
+              .sort((a, b) => a.display_order - b.display_order);
+            resolvedGames = deduplicateGamesList(activeServerGames, {
+              isCustomLogo: isCustomUploadedGameLogo,
+            }).games;
+            fetchedFromSource = true;
           }
 
+          // 2. Fallback to browser Supabase ONLY if /api/public/results/sync did not supply games
           if (!fetchedFromSource) {
-            if (hasServerGamesUpdate) {
-              resolvedGames = (mockStore.games as Game[])
-                .filter((g) => g.is_active !== false)
-                .sort((a, b) => a.display_order - b.display_order);
-              fetchedFromSource = true;
-            } else {
+            const sbUrl = import.meta.env["VITE_SUPABASE_URL"];
+            const hasExternalSupabase =
+              typeof sbUrl === "string" &&
+              sbUrl.includes(".supabase.co") &&
+              !sbUrl.includes("ebpunrzbagmcdtammjqn.supabase.co") &&
+              !sbUrl.includes("dqpomustswauzejggfui.supabase.co") &&
+              !sbUrl.includes(".lovable.cloud");
+
+            if (hasExternalSupabase) {
               try {
                 const { data: gamesData, error: gamesErr } = await supabase
                   .from("games")
                   .select("*")
                   .eq("is_active", true)
                   .order("display_order");
-                if (!gamesErr && Array.isArray(gamesData)) {
-                  resolvedGames = gamesData as Game[];
+                if (!gamesErr && Array.isArray(gamesData) && gamesData.length > 0) {
+                  resolvedGames = deduplicateGamesList(gamesData as Game[], {
+                    isCustomLogo: isCustomUploadedGameLogo,
+                  }).games;
                   fetchedFromSource = true;
                 }
               } catch {
-                // Fallback
-              }
-              if (!fetchedFromSource) {
-                resolvedGames = (mockStore.games as Game[])
-                  .filter((g) => g.is_active !== false)
-                  .sort((a, b) => a.display_order - b.display_order);
-                fetchedFromSource = true;
+                // Fallback when external Supabase is unreachable
               }
             }
+          }
+
+          if (!fetchedFromSource) {
+            const activeLocal = (mockStore.games as Game[])
+              .filter((g) => g.is_active !== false)
+              .sort((a, b) => a.display_order - b.display_order);
+            resolvedGames = deduplicateGamesList(activeLocal, {
+              isCustomLogo: isCustomUploadedGameLogo,
+            }).games;
+            fetchedFromSource = true;
           }
 
           if (fetchedFromSource) {
@@ -1308,11 +1314,8 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         const serverRespondedOk = syncData !== null;
         const resultsPromises = await Promise.all(
           loadedGames.map(async (g) => {
-            const matching = serverSyncedResults.filter(
-              (r) => r.game_id === g.id && r.draw_date === today,
-            );
+            const matching = matchResultsForGame(g, serverSyncedResults, today);
             if (matching.length > 0) {
-              matching.sort((a, b) => a.draw_time.localeCompare(b.draw_time));
               return { gameId: g.id, results: matching };
             }
 
@@ -1333,9 +1336,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
               }
             }
 
-            const fallbackResults = (mockStore.results as Result[])
-              .filter((r) => r.game_id === g.id && r.draw_date === today)
-              .sort((a, b) => a.draw_time.localeCompare(b.draw_time));
+            const fallbackResults = matchResultsForGame(g, mockStore.results as Result[], today);
             return { gameId: g.id, results: fallbackResults };
           }),
         );
@@ -1750,7 +1751,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         : Math.max(2, Number(cardsPerScreen) || DEFAULT_CARDS_PER_SCREEN);
 
     // 1. Animalitos (loterías visibles divididas según el límite configurado)
-    const visibleAnimals = games.filter((g) => isGameAllowed(g.slug || g.id));
+    const visibleAnimals = games.filter((g) => isGameAllowed(g.slug || g.id, g.name));
     const allAnimalCards: GameWithResults[] = visibleAnimals.map((g) => ({
       ...g,
       latest_results: resultsMap[g.id] ?? [],

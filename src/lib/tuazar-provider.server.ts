@@ -227,7 +227,10 @@ export function createTuazarProvider(tuazarGameName: string, gameSlug?: string):
         const draws: unknown[] = [];
 
         for (const result of page.results) {
-          if (normalizeName(result.game) !== wantedTuazar) continue;
+          const matchesGame =
+            normalizeName(result.game) === wantedTuazar ||
+            Boolean(effectiveSlug && normalizeGameSlug(result.game) === effectiveSlug);
+          if (!matchesGame) continue;
           const drawTime = hourTo24h(result.hour);
           if (!drawTime) continue;
 

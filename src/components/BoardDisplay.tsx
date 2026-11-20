@@ -15,7 +15,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { DisplayProvider, useDisplay } from "@/context/DisplayContext";
 import { useBoardSettings } from "@/context/BoardSettingsContext";
-import { useLicenseContext } from "@/components/LicenseGate";
+import { useLicenseContext } from "@/context/LicenseContext";
 
 function DisplayShell({ children }: { children: ReactNode }) {
   const { preferences, update, storageError } = useDisplay();

@@ -521,6 +521,7 @@ async function upsertLicenseRowToSupabase(
   lic: ClientLicense,
   notesOverride?: string,
   authBearerToken?: string | null,
+  options?: { isCreate?: boolean },
 ): Promise<{
   ok: boolean;
   error?: string;
@@ -577,7 +578,7 @@ async function upsertLicenseRowToSupabase(
       if (lic.pin_code) {
         const { data: existingByPin, error: selectErr } = await client
           .from(SUPABASE_LICENSES_TABLE)
-          .select("id")
+          .select("id, client_name")
           .eq("pin_code", lic.pin_code)
           .maybeSingle();
         if (selectErr) {
@@ -594,7 +595,25 @@ async function upsertLicenseRowToSupabase(
           typeof existingByPin.id === "string" &&
           existingByPin.id.trim().length > 0
         ) {
-          targetId = existingByPin.id;
+          // On create, NEVER silently overwrite another existing client's row!
+          if (options?.isCreate && existingByPin.id !== sbId) {
+            const detailed: DetailedSupabaseError = {
+              code: "23505",
+              message: `El PIN ${lic.pin_code} ya está asignado a otro cliente en Supabase.`,
+              details: `existing_id=${existingByPin.id}`,
+              hint: "Genera un PIN único para esta licencia nueva para evitar sobrescribir a otro cliente.",
+              table: SUPABASE_LICENSES_TABLE,
+            };
+            return {
+              ok: false,
+              error: formatSupabaseLicenseError(detailed, diag),
+              supabaseError: detailed,
+            };
+          }
+          // On update, only adopt existingByPin.id if the current ID is not already a distinct UUID row
+          if (!isValidUuid(lic.id) || existingByPin.id === sbId) {
+            targetId = existingByPin.id;
+          }
         }
       }
 
@@ -2608,56 +2627,77 @@ export const Route = createFileRoute("/api/public/results/sync")({
               const cleanPin =
                 (act.pin_code || "").replace(/[^0-9]/g, "").slice(0, 6) ||
                 String(Math.floor(100000 + Math.random() * 900000));
-              const daysNum =
-                act.days === null ? null : Math.max(1, Math.min(365, Number(act.days) || 30));
-              const expiresAt =
-                typeof daysNum === "number" && daysNum > 0
-                  ? new Date(Date.now() + daysNum * 86400000).toISOString()
-                  : null;
-              const newId =
-                act.id && isValidUuid(act.id) ? act.id.trim().toLowerCase() : generateLicenseUuid();
-              const newLic: ClientLicense = {
-                id: newId,
-                client_name: (act.client_name || "Cliente").trim(),
-                pin_code: cleanPin,
-                status: "active",
-                expires_at: expiresAt,
-                max_devices: Math.max(1, Number(act.max_devices) || 1),
-                bound_device_ids: [],
-                notes: act.notes?.trim() || "",
-                created_at: new Date().toISOString(),
-              };
-              if (serverLicenseState.deletedIds) {
-                serverLicenseState.deletedIds = serverLicenseState.deletedIds.filter(
-                  (id) => id !== newLic.id,
-                );
-              }
-              if (serverLicenseState.deletedPins) {
-                serverLicenseState.deletedPins = serverLicenseState.deletedPins.filter(
-                  (pin) => pin !== cleanPin,
-                );
-              }
-              serverLicenseState.licenses = [
-                newLic,
-                ...serverLicenseState.licenses.filter(
-                  (l) => l.id !== newLic.id && l.pin_code !== cleanPin,
-                ),
-              ];
-              markLocalLicenseMutation(newLic.id);
-              saveServerLicenses();
-
-              const cloudRes = await upsertLicenseRowToSupabase(newLic, undefined, bearerToken);
-              trackCloudResult(cloudRes);
-              if (cloudRes.ok && cloudRes.resolvedId && cloudRes.resolvedId !== newLic.id) {
-                newLic.id = cloudRes.resolvedId;
+              const existingPinOwner = serverLicenseState.licenses.find(
+                (l) => l.pin_code === cleanPin,
+              );
+              if (existingPinOwner) {
+                const ownerName = existingPinOwner.client_name.split("||")[0]?.trim() || "Cliente";
+                trackCloudResult({
+                  ok: false,
+                  error: `El PIN ${cleanPin} ya está asignado a "${ownerName}". Genera un PIN distinto para no sobrescribir esa licencia.`,
+                  supabaseError: {
+                    code: "23505",
+                    message: `El PIN ${cleanPin} ya está asignado a "${ownerName}".`,
+                    details: `existing_id=${existingPinOwner.id}`,
+                    hint: "Usa un código PIN único para cada cliente.",
+                    table: SUPABASE_LICENSES_TABLE,
+                  },
+                });
+              } else {
+                const daysNum =
+                  act.days === null ? null : Math.max(1, Math.min(365, Number(act.days) || 30));
+                const expiresAt =
+                  typeof daysNum === "number" && daysNum > 0
+                    ? new Date(Date.now() + daysNum * 86400000).toISOString()
+                    : null;
+                const newId =
+                  act.id && isValidUuid(act.id)
+                    ? act.id.trim().toLowerCase()
+                    : generateLicenseUuid();
+                const newLic: ClientLicense = {
+                  id: newId,
+                  client_name: (act.client_name || "Cliente").trim(),
+                  pin_code: cleanPin,
+                  status: "active",
+                  expires_at: expiresAt,
+                  max_devices: Math.max(1, Number(act.max_devices) || 1),
+                  bound_device_ids: [],
+                  notes: act.notes?.trim() || "",
+                  created_at: new Date().toISOString(),
+                };
+                if (serverLicenseState.deletedIds) {
+                  serverLicenseState.deletedIds = serverLicenseState.deletedIds.filter(
+                    (id) => id !== newLic.id,
+                  );
+                }
+                if (serverLicenseState.deletedPins) {
+                  serverLicenseState.deletedPins = serverLicenseState.deletedPins.filter(
+                    (pin) => pin !== cleanPin,
+                  );
+                }
+                serverLicenseState.licenses = [
+                  newLic,
+                  ...serverLicenseState.licenses.filter((l) => l.id !== newLic.id),
+                ];
                 markLocalLicenseMutation(newLic.id);
                 saveServerLicenses();
+
+                const cloudRes = await upsertLicenseRowToSupabase(newLic, undefined, bearerToken, {
+                  isCreate: true,
+                });
+                trackCloudResult(cloudRes);
+                if (cloudRes.ok && cloudRes.resolvedId && cloudRes.resolvedId !== newLic.id) {
+                  newLic.id = cloudRes.resolvedId;
+                  markLocalLicenseMutation(newLic.id);
+                  saveServerLicenses();
+                }
               }
             } else if (act.type === "renew" && act.id) {
-              let target = serverLicenseState.licenses.find(
-                (l) =>
-                  l.id === act.id || (act.license?.pin_code && l.pin_code === act.license.pin_code),
-              );
+              let target =
+                serverLicenseState.licenses.find((l) => l.id === act.id) ||
+                (act.license?.pin_code
+                  ? serverLicenseState.licenses.find((l) => l.pin_code === act.license?.pin_code)
+                  : undefined);
               if (!target && act.license) {
                 target = { ...act.license };
                 serverLicenseState.licenses.unshift(target);
@@ -2687,10 +2727,11 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 }
               }
             } else if (act.type === "toggle_status" && act.id) {
-              let target = serverLicenseState.licenses.find(
-                (l) =>
-                  l.id === act.id || (act.license?.pin_code && l.pin_code === act.license.pin_code),
-              );
+              let target =
+                serverLicenseState.licenses.find((l) => l.id === act.id) ||
+                (act.license?.pin_code
+                  ? serverLicenseState.licenses.find((l) => l.pin_code === act.license?.pin_code)
+                  : undefined);
               if (!target && act.license) {
                 target = { ...act.license };
                 serverLicenseState.licenses.unshift(target);
@@ -2714,10 +2755,11 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 }
               }
             } else if (act.type === "reset_devices" && act.id) {
-              let target = serverLicenseState.licenses.find(
-                (l) =>
-                  l.id === act.id || (act.license?.pin_code && l.pin_code === act.license.pin_code),
-              );
+              let target =
+                serverLicenseState.licenses.find((l) => l.id === act.id) ||
+                (act.license?.pin_code
+                  ? serverLicenseState.licenses.find((l) => l.pin_code === act.license?.pin_code)
+                  : undefined);
               if (!target && act.license) {
                 target = { ...act.license };
                 serverLicenseState.licenses.unshift(target);
@@ -2740,10 +2782,11 @@ export const Route = createFileRoute("/api/public/results/sync")({
               act.id &&
               typeof act.client_name === "string"
             ) {
-              let target = serverLicenseState.licenses.find(
-                (l) =>
-                  l.id === act.id || (act.license?.pin_code && l.pin_code === act.license.pin_code),
-              );
+              let target =
+                serverLicenseState.licenses.find((l) => l.id === act.id) ||
+                (act.license?.pin_code
+                  ? serverLicenseState.licenses.find((l) => l.pin_code === act.license?.pin_code)
+                  : undefined);
               if (!target && act.license) {
                 target = { ...act.license };
                 serverLicenseState.licenses.unshift(target);

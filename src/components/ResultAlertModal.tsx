@@ -5,7 +5,7 @@ import { getEmojiForNumber } from "@/lib/animals";
 import VoiceSettingsModal from "@/components/VoiceSettingsModal";
 import AnimalMedia from "@/components/AnimalMedia";
 import { getSorteoAlertKey, sorteoAlertTracker } from "@/lib/sorteo-alert-tracker";
-import { useLicenseContext } from "@/components/LicenseGate";
+import { useLicenseContext } from "@/context/LicenseContext";
 import { useBoardSettings } from "@/context/BoardSettingsContext";
 import { getGameLogo } from "@/lib/game-logos";
 import {

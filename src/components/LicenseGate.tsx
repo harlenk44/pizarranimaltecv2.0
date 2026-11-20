@@ -1,13 +1,4 @@
-import {
-  useState,
-  useEffect,
-  useCallback,
-  useMemo,
-  useRef,
-  createContext,
-  useContext,
-  type ReactNode,
-} from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from "react";
 import {
   KeyRound,
   ShieldAlert,
@@ -18,22 +9,30 @@ import {
   RefreshCw,
   ShieldCheck,
 } from "lucide-react";
-import type { ClientLicense, Result } from "@/lib/types";
-import { ensureCustomCatalogLoaded, mockStore, mergeResultsPreserveToday } from "@/lib/mock-db";
+import type { ClientLicense, Game, Result } from "@/lib/types";
+import {
+  ensureCustomCatalogLoaded,
+  mockStore,
+  mergeGamesPreserveCustomLogos,
+  mergeResultsPreserveToday,
+} from "@/lib/mock-db";
 import { supabase } from "@/integrations/supabase/client";
 import {
   parseClientLicenseName,
   isLotteryPermitted,
+  resolveEffectiveLicense,
   DEFAULT_CARDS_PER_SCREEN,
   DEFAULT_TRANSITION_SECONDS,
   LICENSE_CACHE_STORAGE_KEY,
   reconcileClientLicensesWithLocal,
   saveLocalLicensesSnapshot,
-  getLastConfiguredLicenseId,
-  type CardsPerScreenOption,
-  type ClientVoiceConfig,
-  type ClientDesignConfig,
 } from "@/lib/license-lotteries";
+import {
+  LicenseContext,
+  ACTIVATED_PIN_STORAGE_KEY,
+  getOrCreateDeviceId,
+  type LicenseContextValue,
+} from "@/context/LicenseContext";
 
 function hasExternalSupabaseConfigured(): boolean {
   const sbUrl = import.meta.env["VITE_SUPABASE_URL"];
@@ -62,52 +61,6 @@ function mapSupabaseRowToClientLicense(d: Record<string, unknown>): ClientLicens
       ? new Date(d["created_at"] as string).toISOString()
       : new Date().toISOString(),
   };
-}
-
-export interface LicenseContextValue {
-  matchedLicense?: ClientLicense;
-  isAuthorized: boolean;
-  allowedLotteries: string[] | null;
-  cardsPerScreen: CardsPerScreenOption;
-  transitionSeconds: number;
-  voiceConfig: ClientVoiceConfig | null;
-  designConfig: ClientDesignConfig | null;
-  fullscreenAuto: boolean;
-  isGameAllowed: (gameIdOrSlug?: string | null) => boolean;
-}
-
-export const LicenseContext = createContext<LicenseContextValue>({
-  matchedLicense: undefined,
-  isAuthorized: false,
-  allowedLotteries: null,
-  cardsPerScreen: DEFAULT_CARDS_PER_SCREEN,
-  transitionSeconds: DEFAULT_TRANSITION_SECONDS,
-  voiceConfig: null,
-  designConfig: null,
-  fullscreenAuto: false,
-  isGameAllowed: () => true,
-});
-
-export function useLicenseContext() {
-  return useContext(LicenseContext);
-}
-
-export const DEVICE_ID_STORAGE_KEY = "pizarra_tv_device_id";
-export const ACTIVATED_PIN_STORAGE_KEY = "pizarra_activated_pin";
-
-export function getOrCreateDeviceId(): string {
-  if (typeof window === "undefined") return "TV-SERVER";
-  try {
-    const existing = localStorage.getItem(DEVICE_ID_STORAGE_KEY);
-    if (existing) return existing;
-    const rand = Math.random().toString(36).substring(2, 6).toUpperCase();
-    const num = Math.floor(1000 + Math.random() * 9000);
-    const id = `TV-${rand}-${num}`;
-    localStorage.setItem(DEVICE_ID_STORAGE_KEY, id);
-    return id;
-  } catch {
-    return "TV-LOCAL";
-  }
 }
 
 /**
@@ -253,6 +206,12 @@ export default function LicenseGate({
       ]);
 
       const data = res && res.ok ? await res.json() : null;
+      if (data && Array.isArray(data.games) && data.games.length > 0) {
+        const serverGames = data.games as Game[];
+        const serverIds = new Set(serverGames.map((g) => g.id));
+        const prunedLocal = mockStore.games.filter((g) => serverIds.has(g.id));
+        mockStore.games = mergeGamesPreserveCustomLogos(prunedLocal, serverGames);
+      }
       if (data && Array.isArray(data.results) && data.results.length > 0) {
         mockStore.results = mergeResultsPreserveToday(mockStore.results, data.results as Result[]);
       }
@@ -405,25 +364,14 @@ export default function LicenseGate({
     isMasterPin || (matchedLicense && !isExpired && !isPaused && isDeviceAllowed),
   );
 
-  const masterLicense = licenses.find((l) => l.pin_code === "291007");
-  const lastConfiguredId = getLastConfiguredLicenseId();
-  const lastConfiguredLicense = lastConfiguredId
-    ? licenses.find((l) => l.id === lastConfiguredId)
-    : undefined;
-
-  let effectiveLicense =
-    matchedLicense ?? (!requireLicense || adminBypass ? masterLicense : undefined);
-
-  // If the admin is viewing the board with master PIN 291007 or Admin Bypass, and the master license
-  // itself hasn't been customized away from default, apply the last license configured on this device
-  if (
-    (isMasterPin || adminBypass || !requireLicense) &&
-    effectiveLicense?.pin_code === "291007" &&
-    !effectiveLicense.client_name.includes("||") &&
-    lastConfiguredLicense
-  ) {
-    effectiveLicense = lastConfiguredLicense;
-  }
+  // Strict per-PIN license resolution: saving or editing one client license MUST NEVER
+  // hijack Master PIN (291007), admin bypass, unlocked boards, or another client's PIN.
+  const effectiveLicense = resolveEffectiveLicense({
+    licenses,
+    activatedPin,
+    requireLicense,
+    adminBypass,
+  });
 
   const effectiveClientName = effectiveLicense?.client_name ?? "";
   const parsedLicenseInfo = useMemo(
@@ -440,8 +388,8 @@ export default function LicenseGate({
   const fullscreenAuto = parsedLicenseInfo?.fullscreenAuto ?? false;
 
   const isGameAllowed = useCallback(
-    (gameIdOrSlug?: string | null) => {
-      return isLotteryPermitted(gameIdOrSlug, allowedLotteries);
+    (gameIdOrSlug?: string | null, fallbackName?: string | null) => {
+      return isLotteryPermitted(gameIdOrSlug, allowedLotteries, fallbackName);
     },
     [allowedLotteries],
   );
