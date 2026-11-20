@@ -28,6 +28,19 @@ import { toSupabaseLicenseUuid, generateLicenseUuid, isValidUuid } from "@/lib/l
 import { resolveCanonicalAnimal, parseCanonicalAnimalNumber } from "@/lib/official-animals";
 import { getGameLogo, isBrokenExternalLogo, isCustomUploadedGameLogo } from "@/lib/game-logos";
 import { TRIPLE_GAMES, buildTripleAlertItem, type TripleResult } from "@/lib/triples";
+import {
+  areSameCanonicalGame,
+  deduplicateGamesList,
+  getGameSlugAliases,
+  normalizeGameSlug,
+} from "@/lib/game-slugs";
+import { lotteryDate } from "@/lib/lottery-date";
+import {
+  consolidateGamesAndOrphanResultsInSupabase,
+  consolidateInMemoryGamesAndResults,
+  remapInMemoryStoreIds,
+  type ConsolidationReport,
+} from "@/lib/consolidate-games-results.server";
 import persistedGameLogosJson from "../../../../../game_logos.persisted.json";
 import persistedAnimalImagesJson from "../../../../../animal_images.persisted.json";
 import persistedAppSettingsJson from "../../../../../app_settings.persisted.json";
@@ -1143,26 +1156,33 @@ function loadServerGames() {
     let logosUpdated = false;
     if (Array.isArray(rawData) && rawData.length > 0) {
       for (const savedGame of rawData) {
-        if (savedGame && isCustomUploadedGameLogo(savedGame.logo_url)) {
+        if (!savedGame || typeof savedGame !== "object") continue;
+        const canonicalSlug = normalizeGameSlug(savedGame.slug || savedGame.id, savedGame.name);
+        const normalizedSavedGame = {
+          ...savedGame,
+          slug: canonicalSlug || savedGame.slug,
+        };
+
+        if (isCustomUploadedGameLogo(savedGame.logo_url)) {
           const idKey = savedGame.id ? String(savedGame.id).trim().toLowerCase() : "";
-          const slugKey = savedGame.slug ? String(savedGame.slug).trim().toLowerCase() : "";
+          const aliasKeys = getGameSlugAliases(canonicalSlug || savedGame.slug);
           if (idKey && serverCustomGameLogos[idKey] !== savedGame.logo_url) {
             serverCustomGameLogos[idKey] = savedGame.logo_url;
             logosUpdated = true;
           }
-          if (slugKey && serverCustomGameLogos[slugKey] !== savedGame.logo_url) {
-            serverCustomGameLogos[slugKey] = savedGame.logo_url;
-            logosUpdated = true;
+          for (const aliasKey of aliasKeys) {
+            if (aliasKey && serverCustomGameLogos[aliasKey] !== savedGame.logo_url) {
+              serverCustomGameLogos[aliasKey] = savedGame.logo_url;
+              logosUpdated = true;
+            }
           }
         }
 
-        const idx = mockStore.games.findIndex(
-          (g) => g.id === savedGame.id || g.slug === savedGame.slug,
-        );
+        const idx = mockStore.games.findIndex((g) => areSameCanonicalGame(g, normalizedSavedGame));
         if (idx >= 0) {
           const existing = mockStore.games[idx];
           const defaultSchedule = getDefaultGameScheduleTimes(
-            existing?.slug ?? savedGame?.slug ?? "",
+            canonicalSlug || existing?.slug || savedGame?.slug || "",
           );
           const preservedLogo = isCustomUploadedGameLogo(savedGame.logo_url)
             ? savedGame.logo_url
@@ -1172,7 +1192,8 @@ function loadServerGames() {
 
           mockStore.games[idx] = {
             ...existing,
-            ...savedGame,
+            ...normalizedSavedGame,
+            slug: canonicalSlug || existing?.slug || savedGame.slug,
             logo_url: preservedLogo,
             schedule_times:
               Array.isArray(savedGame.schedule_times) && savedGame.schedule_times.length > 0
@@ -1180,9 +1201,12 @@ function loadServerGames() {
                 : (existing?.schedule_times ?? defaultSchedule),
           };
         } else {
-          const defaultSchedule = getDefaultGameScheduleTimes(savedGame?.slug ?? "");
+          const defaultSchedule = getDefaultGameScheduleTimes(
+            canonicalSlug || savedGame?.slug || "",
+          );
           mockStore.games.push({
-            ...savedGame,
+            ...normalizedSavedGame,
+            slug: canonicalSlug || savedGame.slug,
             schedule_times:
               Array.isArray(savedGame.schedule_times) && savedGame.schedule_times.length > 0
                 ? savedGame.schedule_times
@@ -1194,18 +1218,38 @@ function loadServerGames() {
     if (logosUpdated) {
       saveServerGameLogos();
     }
-    // Ensure all catalog games from INITIAL_GAMES are present
+    // Ensure all catalog games from INITIAL_GAMES are present without duplicating canonical slugs
     for (const initGame of INITIAL_GAMES) {
-      if (!mockStore.games.some((g) => g.id === initGame.id || g.slug === initGame.slug)) {
-        mockStore.games.push({ ...initGame });
+      if (!mockStore.games.some((g) => areSameCanonicalGame(g, initGame))) {
+        mockStore.games.push({
+          ...initGame,
+          slug: normalizeGameSlug(initGame.slug, initGame.name),
+        });
       }
     }
+
+    // Strictly deduplicate mockStore.games by canonical slug and remap any in-memory references
+    consolidateInMemoryGamesAndResults();
+
     // Apply custom game logos from serverCustomGameLogos, clean broken external logos, and migrate legacy La Ricachona schedule
     let needsSave = false;
     for (const g of mockStore.games) {
+      const canonicalSlug = normalizeGameSlug(g.slug, g.name);
+      if (canonicalSlug && g.slug !== canonicalSlug) {
+        g.slug = canonicalSlug;
+        needsSave = true;
+      }
       const idKey = (g.id || "").trim().toLowerCase();
-      const slugKey = (g.slug || "").trim().toLowerCase();
-      const customLogo = serverCustomGameLogos[idKey] || serverCustomGameLogos[slugKey];
+      const aliasKeys = getGameSlugAliases(g.slug);
+      let customLogo = serverCustomGameLogos[idKey];
+      if (!customLogo) {
+        for (const ak of aliasKeys) {
+          if (serverCustomGameLogos[ak]) {
+            customLogo = serverCustomGameLogos[ak];
+            break;
+          }
+        }
+      }
       if (customLogo && isCustomUploadedGameLogo(customLogo)) {
         if (g.logo_url !== customLogo) {
           g.logo_url = customLogo;
@@ -1266,6 +1310,11 @@ function isRecentLocalGameMutation(id: string): boolean {
   return false;
 }
 
+let lastCloudConsolidationAt = 0;
+const CLOUD_CONSOLIDATION_TTL_MS = 10 * 60_000;
+let lastResultsCloudSyncAt = 0;
+let resultsCloudSyncPromise: Promise<void> | null = null;
+
 async function syncGamesWithSupabase(force = false): Promise<void> {
   const now = Date.now();
   if (!force && gamesCloudSyncPromise) {
@@ -1278,14 +1327,61 @@ async function syncGamesWithSupabase(force = false): Promise<void> {
   const run = (async () => {
     try {
       loadServerGames();
-      const { data, error } = await supabaseAdmin.from("games").select("*").order("display_order");
+      const realClient = createRealSupabaseAdminClient();
+      if (!realClient) return;
+
+      const { data, error } = await realClient
+        .from("games")
+        .select("*")
+        .order("display_order", { ascending: true });
       if (!error && Array.isArray(data) && data.length > 0) {
         lastGamesCloudSyncAt = Date.now();
         let changed = false;
-        for (const row of data as Array<Record<string, unknown>>) {
+        const preferredCloudIds = new Set<string>();
+        const idRemap = new Map<string, string>();
+        const seenCloudCanonicalSlugs = new Set<string>();
+        let detectedCloudDuplicatesOrNonCanonical = false;
+
+        // Ordenar filas de Supabase dando prioridad a las que ya tienen slug canónico y están activas
+        const rows = [...(data as Array<Record<string, unknown>>)].sort((a, b) => {
+          const slugA = String(a["slug"] || "").trim();
+          const slugB = String(b["slug"] || "").trim();
+          const canonA = normalizeGameSlug(slugA, String(a["name"] || ""));
+          const canonB = normalizeGameSlug(slugB, String(b["name"] || ""));
+          const exactA = slugA === canonA ? 0 : 1;
+          const exactB = slugB === canonB ? 0 : 1;
+          if (exactA !== exactB) return exactA - exactB;
+          const activeA = a["is_active"] !== false ? 0 : 1;
+          const activeB = b["is_active"] !== false ? 0 : 1;
+          if (activeA !== activeB) return activeA - activeB;
+          return (Number(a["display_order"]) || 99) - (Number(b["display_order"]) || 99);
+        });
+
+        for (const row of rows) {
           const id = String(row["id"] || "").trim();
-          const slug = String(row["slug"] || "").trim();
-          if (!id && !slug) continue;
+          const rawSlug = String(row["slug"] || "").trim();
+          const rawName = String(row["name"] || "").trim();
+          if (!id && !rawSlug) continue;
+
+          const canonicalSlug = normalizeGameSlug(rawSlug || id, rawName);
+          if (!canonicalSlug) continue;
+
+          if (rawSlug && rawSlug !== canonicalSlug) {
+            detectedCloudDuplicatesOrNonCanonical = true;
+          }
+          if (seenCloudCanonicalSlugs.has(canonicalSlug)) {
+            // Fila duplicada en Supabase para la misma lotería canónica: mapear su ID al ganador oficial
+            detectedCloudDuplicatesOrNonCanonical = true;
+            const officialWinner = mockStore.games.find(
+              (g) => normalizeGameSlug(g.slug, g.name) === canonicalSlug,
+            );
+            if (officialWinner && id && id !== officialWinner.id) {
+              idRemap.set(id, officialWinner.id);
+            }
+            continue;
+          }
+          seenCloudCanonicalSlugs.add(canonicalSlug);
+          if (id) preferredCloudIds.add(id);
 
           const logoUrl = typeof row["logo_url"] === "string" ? row["logo_url"] : null;
           if (logoUrl && isCustomUploadedGameLogo(logoUrl)) {
@@ -1293,14 +1389,28 @@ async function syncGamesWithSupabase(force = false): Promise<void> {
               serverCustomGameLogos[id.toLowerCase()] = logoUrl;
               changed = true;
             }
-            if (slug && serverCustomGameLogos[slug.toLowerCase()] !== logoUrl) {
-              serverCustomGameLogos[slug.toLowerCase()] = logoUrl;
-              changed = true;
+            for (const aliasKey of getGameSlugAliases(canonicalSlug)) {
+              if (aliasKey && serverCustomGameLogos[aliasKey] !== logoUrl) {
+                serverCustomGameLogos[aliasKey] = logoUrl;
+                changed = true;
+              }
             }
           }
 
-          const gameObj = mockStore.games.find((g) => g.id === id || (slug && g.slug === slug));
+          const gameObj = mockStore.games.find(
+            (g) => g.id === id || normalizeGameSlug(g.slug, g.name) === canonicalSlug,
+          );
           if (gameObj) {
+            // CRÍTICO: Adoptar el UUID real de Supabase como game.id oficial para que games[] y results[] coincidan 100%
+            if (id && gameObj.id !== id) {
+              idRemap.set(gameObj.id, id);
+              gameObj.id = id;
+              changed = true;
+            }
+            if (gameObj.slug !== canonicalSlug) {
+              gameObj.slug = canonicalSlug;
+              changed = true;
+            }
             if (isRecentLocalGameMutation(gameObj.id)) {
               continue;
             }
@@ -1323,8 +1433,8 @@ async function syncGamesWithSupabase(force = false): Promise<void> {
               gameObj.color = row["color"];
               changed = true;
             }
-            if (typeof row["name"] === "string" && row["name"] && gameObj.name !== row["name"]) {
-              gameObj.name = row["name"];
+            if (rawName && gameObj.name !== rawName) {
+              gameObj.name = rawName;
               changed = true;
             }
             if (
@@ -1357,16 +1467,16 @@ async function syncGamesWithSupabase(force = false): Promise<void> {
                 : getGameLogo(
                     {
                       id,
-                      slug: slug || id,
-                      name: String(row["name"] || slug || "JUEGO"),
+                      slug: canonicalSlug,
+                      name: rawName || canonicalSlug || "JUEGO",
                       color: typeof row["color"] === "string" ? row["color"] : "#1a56db",
                     },
                     typeof row["color"] === "string" ? row["color"] : "#1a56db",
                   );
             mockStore.games.push({
               id,
-              name: String(row["name"] || "JUEGO"),
-              slug: slug || id,
+              name: rawName || "JUEGO",
+              slug: canonicalSlug,
               color: typeof row["color"] === "string" ? row["color"] : "#1a56db",
               logo_url: resolvedLogo,
               display_order:
@@ -1378,7 +1488,7 @@ async function syncGamesWithSupabase(force = false): Promise<void> {
               mode: newMode,
               schedule_times: Array.isArray(row["schedule_times"])
                 ? (row["schedule_times"] as string[])
-                : getDefaultGameScheduleTimes(slug || id),
+                : getDefaultGameScheduleTimes(canonicalSlug),
               created_at:
                 typeof row["created_at"] === "string"
                   ? row["created_at"]
@@ -1387,9 +1497,37 @@ async function syncGamesWithSupabase(force = false): Promise<void> {
             changed = true;
           }
         }
+
+        // Deduplicación estricta final y remapeo de resultados/imágenes/entradas en memoria
+        const { games: dedupedGames, idRemap: dedupRemap } = deduplicateGamesList(mockStore.games, {
+          preferredCloudIds,
+          isCustomLogo: isCustomUploadedGameLogo,
+        });
+        for (const [k, v] of dedupRemap.entries()) {
+          idRemap.set(k, v);
+        }
+        if (dedupedGames.length !== mockStore.games.length || idRemap.size > 0) {
+          changed = true;
+        }
+        mockStore.games = dedupedGames;
+        const gamesById = new Map(mockStore.games.map((g) => [g.id, g]));
+        const remappedResultsCount = remapInMemoryStoreIds(idRemap, gamesById);
+        if (remappedResultsCount > 0) {
+          saveServerResults();
+        }
         if (changed) {
-          mockStore.games.sort((a, b) => (a.display_order ?? 99) - (b.display_order ?? 99));
           saveServerGames();
+        }
+
+        // Si Supabase tiene duplicados o slugs sin normalizar, consolidarlos en background (con throttle)
+        if (
+          detectedCloudDuplicatesOrNonCanonical &&
+          Date.now() - lastCloudConsolidationAt >= CLOUD_CONSOLIDATION_TTL_MS
+        ) {
+          lastCloudConsolidationAt = Date.now();
+          void consolidateGamesAndOrphanResultsInSupabase(realClient, {
+            onlyDate: lotteryDate(),
+          }).catch(() => {});
         }
       }
     } catch {
@@ -1400,6 +1538,101 @@ async function syncGamesWithSupabase(force = false): Promise<void> {
   })();
 
   gamesCloudSyncPromise = run;
+  return run;
+}
+
+async function syncResultsWithSupabase(force = false): Promise<void> {
+  const now = Date.now();
+  if (!force && resultsCloudSyncPromise) {
+    return resultsCloudSyncPromise;
+  }
+  if (!force && now - lastResultsCloudSyncAt < CLOUD_SYNC_TTL_MS) {
+    return;
+  }
+
+  const run = (async () => {
+    try {
+      const realClient = createRealSupabaseAdminClient();
+      if (!realClient) return;
+
+      const today = lotteryDate();
+      const { data, error } = await realClient.from("results").select("*").eq("draw_date", today);
+
+      if (!error && Array.isArray(data)) {
+        lastResultsCloudSyncAt = Date.now();
+        const gamesById = new Map(mockStore.games.map((g) => [g.id, g]));
+        const gamesBySlug = new Map(
+          mockStore.games.map((g) => [normalizeGameSlug(g.slug, g.name), g]),
+        );
+
+        let sawCloudOrphans = false;
+        const cloudMapped: typeof mockStore.results = [];
+        for (const row of data as Array<Record<string, unknown>>) {
+          const rawGameId = String(row["game_id"] || "").trim();
+          const drawDate = String(row["draw_date"] || "").trim();
+          const drawTime = String(row["draw_time"] || "").trim();
+          const animalNumber = Number(row["animal_number"]);
+          const animalName = String(row["animal_name"] || "").trim();
+          if (!rawGameId || !drawDate || !drawTime || !Number.isFinite(animalNumber)) continue;
+
+          const rawSlug =
+            typeof row["game_slug"] === "string" && row["game_slug"].trim()
+              ? normalizeGameSlug(row["game_slug"])
+              : undefined;
+
+          let resolvedGame = gamesById.get(rawGameId);
+          if (!resolvedGame) {
+            sawCloudOrphans = true;
+            if (rawSlug) {
+              resolvedGame = gamesBySlug.get(rawSlug);
+            }
+          }
+
+          const finalGameId = resolvedGame ? resolvedGame.id : rawGameId;
+          const finalGameSlug = resolvedGame
+            ? normalizeGameSlug(resolvedGame.slug, resolvedGame.name)
+            : rawSlug;
+
+          cloudMapped.push({
+            id: String(row["id"] || `res-${finalGameId}-${drawDate}-${drawTime}`),
+            game_id: finalGameId,
+            ...(finalGameSlug ? { game_slug: finalGameSlug } : {}),
+            draw_date: drawDate,
+            draw_time: drawTime,
+            animal_number: animalNumber,
+            animal_name: animalName,
+            source: row["source"] === "manual" ? "manual" : "automatic",
+            created_at:
+              typeof row["created_at"] === "string" ? row["created_at"] : new Date().toISOString(),
+          });
+        }
+
+        if (cloudMapped.length > 0) {
+          mockStore.results = sanitizeResultsList(
+            mergeResultsPreserveToday(mockStore.results, cloudMapped),
+          );
+          consolidateInMemoryGamesAndResults();
+          saveServerResults();
+        }
+
+        if (
+          sawCloudOrphans &&
+          Date.now() - lastCloudConsolidationAt >= CLOUD_CONSOLIDATION_TTL_MS
+        ) {
+          lastCloudConsolidationAt = Date.now();
+          void consolidateGamesAndOrphanResultsInSupabase(realClient, {
+            onlyDate: today,
+          }).catch(() => {});
+        }
+      }
+    } catch {
+      // ignore
+    } finally {
+      resultsCloudSyncPromise = null;
+    }
+  })();
+
+  resultsCloudSyncPromise = run;
   return run;
 }
 
@@ -1534,6 +1767,9 @@ async function triggerBackgroundSync(forceWait = false) {
     const prevCount = mockStore.results.length;
     const hadPriorTriples = serverTripleResults.length > 0;
 
+    // Sincronizar juegos primero para asegurar que mockStore.games tenga los UUIDs oficiales de Supabase
+    await syncGamesWithSupabase(false).catch(() => {});
+
     const [
       { synchronizeAutomaticResults },
       { synchronizeAutomaticTriplesResults },
@@ -1544,10 +1780,19 @@ async function triggerBackgroundSync(forceWait = false) {
       import("@/lib/multiloterias-provider.server"),
     ]);
 
+    const resolveOfficialGameIdBySlug = (canonicalSlug: string): string | undefined => {
+      const target = mockStore.games.find(
+        (g) => normalizeGameSlug(g.slug, g.name) === canonicalSlug,
+      );
+      return target?.id;
+    };
+
     const [reports, triplesSync, multiloteriasSync] = await Promise.all([
       synchronizeAutomaticResults(),
       synchronizeAutomaticTriplesResults(serverTripleResults),
-      synchronizeMultiloteriasData(mockStore.results, serverTripleResults),
+      synchronizeMultiloteriasData(mockStore.results, serverTripleResults, {
+        resolveGameId: resolveOfficialGameIdBySlug,
+      }),
       syncLicensesWithSupabase().catch(() => null),
       syncAnimalImagesWithSupabase().catch(() => null),
     ]);
@@ -1561,6 +1806,7 @@ async function triggerBackgroundSync(forceWait = false) {
       );
       mockStore.results = sanitizeResultsList(mergedAnimals);
     }
+    consolidateInMemoryGamesAndResults();
     saveServerResults();
 
     // Merge triples from both LoteriaDeHoy/TuAzar and Multiloterias
@@ -1582,40 +1828,42 @@ async function triggerBackgroundSync(forceWait = false) {
         getCachedMultiloteriasItems("lotoanimalito"),
         getCachedMultiloteriasItems("lottopantera"),
       ]);
+      const lotoOfficialId =
+        resolveOfficialGameIdBySlug("lotoanimalito") || "d953f80c-4335-4bc9-9f78-9b56193286fe";
       for (const item of lotoItems) {
         const num = parseCanonicalAnimalNumber("lotoanimalito", item.number, item.name);
         if (Number.isFinite(num) && item.imageUrl) {
-          const gameId = "d953f80c-4335-4bc9-9f78-9b56193286fe";
           if (
             !mockStore.animal_images.some(
               (img) =>
-                (img.game_id === gameId || img.game_id === "lotoanimalito") &&
+                (img.game_id === lotoOfficialId || img.game_id === "lotoanimalito") &&
                 img.animal_number === num,
             )
           ) {
             mockStore.animal_images.push({
               id: `img-lotoanimalito-${num}`,
-              game_id: gameId,
+              game_id: lotoOfficialId,
               animal_number: num,
               image_url: item.imageUrl,
             });
           }
         }
       }
+      const panteraOfficialId =
+        resolveOfficialGameIdBySlug("lottopantera") || "61580ccf-5a2d-4d10-877e-4883515135e4";
       for (const item of panteraItems) {
         const num = parseCanonicalAnimalNumber("lottopantera", item.number, item.name);
         if (Number.isFinite(num) && item.imageUrl) {
-          const gameId = "61580ccf-5a2d-4d10-877e-4883515135e4";
           if (
             !mockStore.animal_images.some(
               (img) =>
-                (img.game_id === gameId || img.game_id === "lottopantera") &&
+                (img.game_id === panteraOfficialId || img.game_id === "lottopantera") &&
                 img.animal_number === num,
             )
           ) {
             mockStore.animal_images.push({
               id: `img-lottopantera-${num}`,
-              game_id: gameId,
+              game_id: panteraOfficialId,
               animal_number: num,
               image_url: item.imageUrl,
             });
@@ -1704,11 +1952,21 @@ function serveOnDemandAnimalImage(animalImageParam: string, labelParam: string):
   const rawNumStr = colonIdx > 0 ? animalImageParam.slice(colonIdx + 1).trim() : "0";
 
   const canonical = resolveCanonicalAnimal(rawGameKey, labelParam === "00" ? "00" : rawNumStr);
-  const gameObj = mockStore.games.find((g) => g.id === rawGameKey || g.slug === rawGameKey);
+  const normalizedRawSlug = normalizeGameSlug(rawGameKey);
+  const gameObj = mockStore.games.find(
+    (g) =>
+      g.id === rawGameKey ||
+      g.slug === rawGameKey ||
+      (normalizedRawSlug && normalizeGameSlug(g.slug, g.name) === normalizedRawSlug),
+  );
   const candidateGameIds = new Set<string>([rawGameKey]);
+  if (normalizedRawSlug) candidateGameIds.add(normalizedRawSlug);
   if (gameObj) {
     candidateGameIds.add(gameObj.id);
     candidateGameIds.add(gameObj.slug);
+    for (const alias of getGameSlugAliases(gameObj.slug)) {
+      candidateGameIds.add(alias);
+    }
   }
 
   const isRealImagePayload = (url?: string | null): url is string =>
@@ -1736,30 +1994,61 @@ function serveOnDemandAnimalImage(animalImageParam: string, labelParam: string):
   // Fallback to shared reference catalogs in server RAM if this lottery delegates its animal art
   if (!matched) {
     const targetNum = isBallena ? 37 : canonical.number;
+    const granjitaId =
+      resolveOfficialGameIdBySlug("la-granjita") || "ca8a0400-0000-4000-8000-000000000006";
+    const lottoActivoId =
+      resolveOfficialGameIdBySlug("lotto-activo") || "7d21a00b-0dfa-4bdc-9edf-8115802df1d6";
+    const lottoRdId =
+      resolveOfficialGameIdBySlug("lotto-activo-rd") || "1e40af00-0000-4000-8000-000000000008";
+    const guacharoId =
+      resolveOfficialGameIdBySlug("guacharo-activo") || "01da9c54-392a-45e3-ab66-9a08befe7694";
+    const guacharitoId =
+      resolveOfficialGameIdBySlug("el-guacharito-millonario") ||
+      "0519825d-e7ea-4e59-bf7d-cef2c832edd3";
+    const lottoReyId =
+      resolveOfficialGameIdBySlug("lotto-rey") || "8f3aa087-6a0c-41a1-9ed3-5f6d5ed6918e";
+
     const fallbackGameIds =
       targetNum <= 37
-        ? [
-            "ca8a0400-0000-4000-8000-000000000006", // La Granjita (full 0..37 set)
-            "7d21a00b-0dfa-4bdc-9edf-8115802df1d6", // Lotto Activo
-            "1e40af00-0000-4000-8000-000000000008", // Lotto Activo RD
-          ]
+        ? Array.from(
+            new Set([
+              granjitaId,
+              "ca8a0400-0000-4000-8000-000000000006",
+              lottoActivoId,
+              "7d21a00b-0dfa-4bdc-9edf-8115802df1d6",
+              lottoRdId,
+              "1e40af00-0000-4000-8000-000000000008",
+            ]),
+          )
         : targetNum <= 76
-          ? [
-              "01da9c54-392a-45e3-ab66-9a08befe7694", // Guácharo Activo (0..76)
-              "0519825d-e7ea-4e59-bf7d-cef2c832edd3", // El Guacharito (0..100)
-              "8f3aa087-6a0c-41a1-9ed3-5f6d5ed6918e", // Lotto Rey (0..100)
-            ]
-          : [
-              "0519825d-e7ea-4e59-bf7d-cef2c832edd3", // El Guacharito (0..100)
-              "8f3aa087-6a0c-41a1-9ed3-5f6d5ed6918e", // Lotto Rey (0..100)
-            ];
+          ? Array.from(
+              new Set([
+                guacharoId,
+                "01da9c54-392a-45e3-ab66-9a08befe7694",
+                guacharitoId,
+                "0519825d-e7ea-4e59-bf7d-cef2c832edd3",
+                lottoReyId,
+                "8f3aa087-6a0c-41a1-9ed3-5f6d5ed6918e",
+              ]),
+            )
+          : Array.from(
+              new Set([
+                guacharitoId,
+                "0519825d-e7ea-4e59-bf7d-cef2c832edd3",
+                lottoReyId,
+                "8f3aa087-6a0c-41a1-9ed3-5f6d5ed6918e",
+              ]),
+            );
 
     for (const fbGameId of fallbackGameIds) {
       const fbNum =
-        isBallena && fbGameId === "01da9c54-392a-45e3-ab66-9a08befe7694"
+        isBallena &&
+        (fbGameId === guacharoId || fbGameId === "01da9c54-392a-45e3-ab66-9a08befe7694")
           ? 76
           : isBallena &&
-              (fbGameId === "0519825d-e7ea-4e59-bf7d-cef2c832edd3" ||
+              (fbGameId === guacharitoId ||
+                fbGameId === "0519825d-e7ea-4e59-bf7d-cef2c832edd3" ||
+                fbGameId === lottoReyId ||
                 fbGameId === "8f3aa087-6a0c-41a1-9ed3-5f6d5ed6918e")
             ? 100
             : targetNum;
@@ -1822,18 +2111,30 @@ export const Route = createFileRoute("/api/public/results/sync")({
         const clientSettingsVer = reqUrl.searchParams.get("settingsVersion");
         const isPoll = reqUrl.searchParams.get("poll") === "1" || clientGamesVer !== null;
 
-        const serverToday = new Intl.DateTimeFormat("en-CA", {
-          timeZone: "America/Caracas",
-          year: "numeric",
-          month: "2-digit",
-          day: "2-digit",
-        }).format(new Date());
+        const serverToday = lotteryDate();
+
+        // 1. Sincronizar primero games[] desde Supabase para adoptar UUIDs oficiales y normalizar slugs antes del scraper
+        await Promise.race([
+          Promise.all([
+            syncGamesWithSupabase(!isPoll),
+            syncLicensesWithSupabase(!isPoll),
+            syncAppSettingsWithSupabase(),
+            ...(!isPoll ? [syncAnimalImagesWithSupabase()] : []),
+          ]),
+          new Promise((resolve) => setTimeout(resolve, 2500)),
+        ]);
+
+        // 2. Cargar resultados de hoy desde Supabase y consolidar posibles huérfanos en memoria
+        await Promise.race([
+          syncResultsWithSupabase(!isPoll),
+          new Promise((resolve) => setTimeout(resolve, 1500)),
+        ]);
 
         const todayResultsCount = mockStore.results.filter(
           (r) => r.draw_date === serverToday,
         ).length;
 
-        // Await sync when today's results are empty (e.g. cold Cloudflare Worker) or bound wait when interval elapsed
+        // 3. Await scraper sync when today's results are empty (e.g. cold Cloudflare Worker) or interval elapsed
         const isStaleSync = Date.now() - lastAutoSyncTimestamp >= AUTO_SYNC_INTERVAL_MS;
         const isColdEmpty = todayResultsCount === 0 || serverTripleResults.length === 0;
         if (!initialAutoSyncDone || isColdEmpty || isStaleSync) {
@@ -1846,16 +2147,8 @@ export const Route = createFileRoute("/api/public/results/sync")({
           }
         }
 
-        // Ensure cloud-backed licenses, games, images, and app settings are fresh for this Worker isolate
-        await Promise.race([
-          Promise.all([
-            syncLicensesWithSupabase(!isPoll),
-            syncGamesWithSupabase(!isPoll),
-            syncAppSettingsWithSupabase(),
-            ...(!isPoll ? [syncAnimalImagesWithSupabase()] : []),
-          ]),
-          new Promise((resolve) => setTimeout(resolve, 2500)),
-        ]);
+        // Garantizar siempre respuesta libre de duplicados y con game_id + game_slug 100% consistentes
+        consolidateInMemoryGamesAndResults();
 
         const shouldSendLogos =
           !clientLogosVer || clientLogosVer !== String(serverCustomGameLogosVersion);
@@ -1930,6 +2223,15 @@ export const Route = createFileRoute("/api/public/results/sync")({
         try {
           loadServerGames();
           loadServerTripleResults();
+          const postUrl = new URL(request.url, "http://localhost");
+          let consolidationReport: ConsolidationReport | null = null;
+          if (postUrl.searchParams.get("consolidate") === "1") {
+            const realClient = createRealSupabaseAdminClient();
+            if (realClient) {
+              consolidationReport = await consolidateGamesAndOrphanResultsInSupabase(realClient);
+            }
+          }
+          await syncGamesWithSupabase(true);
           const [{ synchronizeAutomaticResults }, { synchronizeAutomaticTriplesResults }] =
             await Promise.all([
               import("@/lib/result-sync.server"),
@@ -1939,11 +2241,15 @@ export const Route = createFileRoute("/api/public/results/sync")({
             synchronizeAutomaticResults(),
             synchronizeAutomaticTriplesResults(serverTripleResults),
           ]);
+          await syncResultsWithSupabase(true);
+          consolidateInMemoryGamesAndResults();
           saveServerResults();
           serverTripleResults = triplesSync.merged;
           saveServerTripleResults();
           return noStoreJson({
             reports,
+            consolidationReport,
+            games: mockStore.games,
             results: mockStore.results,
             tripleResults: serverTripleResults,
           });
@@ -1982,7 +2288,10 @@ export const Route = createFileRoute("/api/public/results/sync")({
             customGameLogosBatch,
             licenseAction,
             appSettings,
+            consolidateOrphans,
+            consolidationOptions,
           } = body;
+          let consolidationReport: ConsolidationReport | null = null;
           let licenseActivation: {
             valid: boolean;
             reason?: string;
@@ -2473,25 +2782,103 @@ export const Route = createFileRoute("/api/public/results/sync")({
             }
           }
 
+          if (consolidateOrphans) {
+            const realClient = createRealSupabaseAdminClient();
+            if (realClient) {
+              const opts =
+                consolidationOptions && typeof consolidationOptions === "object"
+                  ? (consolidationOptions as {
+                      dryRun?: boolean;
+                      drawDate?: string;
+                      explicitOrphanMap?: Record<string, string>;
+                    })
+                  : {};
+              consolidationReport = await consolidateGamesAndOrphanResultsInSupabase(
+                realClient,
+                opts,
+              );
+            }
+            await syncGamesWithSupabase(true);
+            await syncResultsWithSupabase(true);
+            consolidateInMemoryGamesAndResults();
+            saveServerGames();
+            saveServerResults();
+          }
+
           if (result) {
+            // Resolver siempre game_id oficial y game_slug canónico antes de guardar
+            const rawResultGameId = String(result.game_id || "").trim();
+            const rawResultGameSlug =
+              typeof result.game_slug === "string" ? result.game_slug.trim() : "";
+            const targetGameForResult =
+              mockStore.games.find((g) => g.id === rawResultGameId) ??
+              mockStore.games.find(
+                (g) =>
+                  normalizeGameSlug(g.slug, g.name) ===
+                  normalizeGameSlug(rawResultGameSlug || rawResultGameId),
+              );
+            const resolvedGameId = targetGameForResult?.id ?? rawResultGameId;
+            const resolvedGameSlug = targetGameForResult
+              ? normalizeGameSlug(targetGameForResult.slug, targetGameForResult.name)
+              : normalizeGameSlug(rawResultGameSlug || rawResultGameId) || null;
+            const normalizedResult = {
+              ...result,
+              game_id: resolvedGameId,
+              game_slug: resolvedGameSlug,
+            };
+
             const conflictIndex = mockStore.results.findIndex(
               (r) =>
-                r.game_id === result.game_id &&
-                r.draw_date === result.draw_date &&
-                r.draw_time === result.draw_time,
+                r.game_id === normalizedResult.game_id &&
+                r.draw_date === normalizedResult.draw_date &&
+                r.draw_time === normalizedResult.draw_time,
             );
             if (conflictIndex >= 0) {
               mockStore.results[conflictIndex] = {
                 ...mockStore.results[conflictIndex],
-                ...result,
+                ...normalizedResult,
               };
             } else {
               mockStore.results.push({
-                id: result.id ?? `res-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-                ...result,
+                id:
+                  normalizedResult.id ??
+                  `res-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                ...normalizedResult,
               });
             }
             saveServerResults();
+
+            // Persistir también en Supabase con el game_id oficial y game_slug canónico
+            const realClient = createRealSupabaseAdminClient();
+            if (
+              realClient &&
+              resolvedGameId &&
+              normalizedResult.draw_date &&
+              normalizedResult.draw_time
+            ) {
+              try {
+                const payloadWithSlug: Record<string, unknown> = {
+                  game_id: resolvedGameId,
+                  draw_date: normalizedResult.draw_date,
+                  draw_time: normalizedResult.draw_time,
+                  animal_number: normalizedResult.animal_number,
+                  animal_name: normalizedResult.animal_name,
+                  source: normalizedResult.source ?? "manual",
+                  ...(resolvedGameSlug ? { game_slug: resolvedGameSlug } : {}),
+                };
+                const { error: upsertErr } = await realClient
+                  .from("results")
+                  .upsert(payloadWithSlug, { onConflict: "game_id,draw_date,draw_time" });
+                if (upsertErr && /column.*game_slug|schema cache/i.test(upsertErr.message || "")) {
+                  const { game_slug: _omit, ...payloadWithoutSlug } = payloadWithSlug;
+                  await realClient
+                    .from("results")
+                    .upsert(payloadWithoutSlug, { onConflict: "game_id,draw_date,draw_time" });
+                }
+              } catch (err) {
+                console.warn("[sync.ts] Supabase results upsert error:", err);
+              }
+            }
           }
 
           if (tripleResult && typeof tripleResult === "object") {
@@ -2522,20 +2909,33 @@ export const Route = createFileRoute("/api/public/results/sync")({
           }
 
           if (gameCreate && typeof gameCreate === "object") {
-            const created = gameCreate as (typeof mockStore.games)[0];
-            if (created.id && created.name) {
+            const rawCreated = gameCreate as (typeof mockStore.games)[0];
+            if (rawCreated.id && rawCreated.name) {
+              const canonicalSlug = normalizeGameSlug(rawCreated.slug, rawCreated.name);
+              const created: (typeof mockStore.games)[0] = {
+                ...rawCreated,
+                slug: canonicalSlug || rawCreated.slug,
+              };
               const existingIdx = mockStore.games.findIndex(
-                (g) => g.id === created.id || g.slug === created.slug,
+                (g) => g.id === created.id || areSameCanonicalGame(g, created),
               );
+              let persistedGame = created;
               if (existingIdx >= 0) {
-                mockStore.games[existingIdx] = { ...mockStore.games[existingIdx], ...created };
+                persistedGame = {
+                  ...mockStore.games[existingIdx],
+                  ...created,
+                  // Mantener siempre el ID oficial existente si el juego ya existía por slug canónico
+                  id: mockStore.games[existingIdx].id,
+                  slug: canonicalSlug || mockStore.games[existingIdx].slug,
+                };
+                mockStore.games[existingIdx] = persistedGame;
               } else {
-                mockStore.games.push(created);
+                mockStore.games.push(persistedGame);
               }
-              markLocalGameMutation(created.id);
+              markLocalGameMutation(persistedGame.id);
               saveServerGames();
               try {
-                await supabaseAdmin.from("games").upsert(created);
+                await supabaseAdmin.from("games").upsert(persistedGame);
               } catch {
                 // ignore
               }
@@ -2586,8 +2986,14 @@ export const Route = createFileRoute("/api/public/results/sync")({
               logo_url,
               display_order,
             } = gameUpdate;
+            const canonicalUpdateSlug = slug ? normalizeGameSlug(slug, name) : "";
             const targetGame = mockStore.games.find(
-              (g) => g.id === id || (slug && g.slug === slug),
+              (g) =>
+                g.id === id ||
+                (slug &&
+                  (g.slug === slug ||
+                    (canonicalUpdateSlug &&
+                      normalizeGameSlug(g.slug, g.name) === canonicalUpdateSlug))),
             );
             if (targetGame) {
               if (mode !== undefined || loading_mode !== undefined) {
@@ -2601,6 +3007,15 @@ export const Route = createFileRoute("/api/public/results/sync")({
               }
               if (color !== undefined) targetGame.color = color;
               if (name !== undefined) targetGame.name = name;
+              if (slug !== undefined || name !== undefined) {
+                const normalizedSlug = normalizeGameSlug(
+                  slug ?? targetGame.slug,
+                  name ?? targetGame.name,
+                );
+                if (normalizedSlug) {
+                  targetGame.slug = normalizedSlug;
+                }
+              }
               if (is_active !== undefined) targetGame.is_active = Boolean(is_active);
               if (display_order !== undefined) targetGame.display_order = Number(display_order);
               if (logo_url !== undefined) {
@@ -2632,6 +3047,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
                   .update({
                     ...(color !== undefined ? { color: targetGame.color } : {}),
                     ...(name !== undefined ? { name: targetGame.name } : {}),
+                    ...(slug !== undefined || name !== undefined ? { slug: targetGame.slug } : {}),
                     ...(is_active !== undefined ? { is_active: targetGame.is_active } : {}),
                     ...(display_order !== undefined
                       ? { display_order: targetGame.display_order }
@@ -2826,6 +3242,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
           const putCloudDiag = getSupabaseCloudDiagnostics();
           return noStoreJson({
             status: "ok",
+            consolidationReport,
             results: mockStore.results,
             tripleResults: serverTripleResults,
             animalImages: filterAdminCustomAnimalImages(mockStore.animal_images),

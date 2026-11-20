@@ -7,6 +7,7 @@
  */
 
 import persistedGameLogosJson from "../../game_logos.persisted.json";
+import { getGameSlugAliases, normalizeGameSlug } from "@/lib/game-slugs";
 
 function svgToDataUri(svg: string): string {
   return "data:image/svg+xml;utf8," + encodeURIComponent(svg.trim().replace(/\s+/g, " "));
@@ -520,6 +521,8 @@ export const OFFICIAL_GAME_LOGOS: Readonly<Record<string, string>> = {
   "01da9c54-392a-45e3-ab66-9a08befe7694": LOGO_GUACHARO_ACTIVO,
 
   // El Guacharito Millonario
+  "el-guacharito-millonario": LOGO_GUACHARITO,
+  "guacharito-millonario": LOGO_GUACHARITO,
   guacharito: LOGO_GUACHARITO,
   "el-guacharito": LOGO_GUACHARITO,
   "el guacharito": LOGO_GUACHARITO,
@@ -846,12 +849,23 @@ export function getGameLogo(
     return customLogo;
   }
 
-  // 2. Buscar en el almacén persistente de logos subidos por el usuario (por id, slug o nombre)
+  // 2. Buscar en el almacén persistente de logos subidos por el usuario (por id, slug, alias canónicos o nombre)
   const customMap = getCustomGameLogosMap();
-  const persistedCustom =
+  const canonicalSlug = normalizeGameSlug(cleanSlug || cleanId, cleanName);
+  const slugAliases = getGameSlugAliases(canonicalSlug || cleanSlug);
+  let persistedCustom =
     (cleanId ? customMap[cleanId] : undefined) ||
     (cleanSlug ? customMap[cleanSlug] : undefined) ||
+    (canonicalSlug ? customMap[canonicalSlug] : undefined) ||
     (cleanName ? customMap[cleanName] : undefined);
+  if (!persistedCustom) {
+    for (const alias of slugAliases) {
+      if (customMap[alias]) {
+        persistedCustom = customMap[alias];
+        break;
+      }
+    }
+  }
   if (persistedCustom && isCustomUploadedGameLogo(persistedCustom)) {
     return persistedCustom;
   }
@@ -861,9 +875,10 @@ export function getGameLogo(
     return customLogo;
   }
 
-  // 4. Buscar en el catálogo oficial por id, slug o nombre normalizado
+  // 4. Buscar en el catálogo oficial por id, slug, slug canónico o nombre normalizado
   const official =
     OFFICIAL_GAME_LOGOS[cleanSlug] ||
+    OFFICIAL_GAME_LOGOS[canonicalSlug] ||
     OFFICIAL_GAME_LOGOS[cleanId] ||
     OFFICIAL_GAME_LOGOS[cleanName];
 

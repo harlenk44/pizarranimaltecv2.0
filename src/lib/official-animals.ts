@@ -5,6 +5,7 @@
 // LottoPantera: 50 animals (0, 00, 01-48) — api.multiloterias.net
 
 import { getEmbeddedCatalogImageUrl } from "@/lib/custom-animal-catalog";
+import { normalizeGameSlug } from "@/lib/game-slugs";
 
 export interface OfficialAnimal {
   number: number;
@@ -36,10 +37,13 @@ export const GAME_ID_TO_SLUG: Readonly<Record<string, string>> = {
 
 export const SLUG_TO_GAME_ID: Readonly<Record<string, string>> = {
   "lotto-activo": "7d21a00b-0dfa-4bdc-9edf-8115802df1d6",
+  "guacharo-activo": "01da9c54-392a-45e3-ab66-9a08befe7694",
   guacharo: "01da9c54-392a-45e3-ab66-9a08befe7694",
+  "el-guacharito-millonario": "0519825d-e7ea-4e59-bf7d-cef2c832edd3",
   guacharito: "0519825d-e7ea-4e59-bf7d-cef2c832edd3",
   "selva-plus": "8f3aa087-6a0c-41a1-9ed3-5f6d5ed6918e",
   "loto-chaim-a": "1efc5373-a547-4f7f-9955-845b5ede5ce2",
+  "la-granjita": "ca8a0400-0000-4000-8000-000000000006",
   granjita: "ca8a0400-0000-4000-8000-000000000006",
   "monje-millonario": "0f766e00-0000-4000-8000-000000000007",
   "lotto-activo-internacional": "1e40af00-0000-4000-8000-000000000008",
@@ -55,15 +59,17 @@ export function resolveGameSlug(gameIdOrSlug?: string | null): string {
 }
 
 export function getBallenaInternalNumber(gameIdOrSlug?: string | null): number {
-  const slug = resolveGameSlug(gameIdOrSlug);
+  const slug = normalizeGameSlug(resolveGameSlug(gameIdOrSlug));
   switch (slug) {
     case "lottopantera":
       return 49;
     case "loto-chaim-a":
       return 56;
+    case "guacharo-activo":
     case "guacharo":
     case "monje-millonario":
       return 76;
+    case "el-guacharito-millonario":
     case "guacharito":
     case "selva-plus":
       return 100;
@@ -257,11 +263,14 @@ export const LOTTOPANTERA_ANIMALS: OfficialAnimal[] = [
 
 // Map game slug -> official animal list
 export const OFFICIAL_ANIMALS: Record<string, OfficialAnimal[]> = {
+  "guacharo-activo": GUACHARO_ANIMALS,
   guacharo: GUACHARO_ANIMALS,
+  "el-guacharito-millonario": GUACHARITO_ANIMALS,
   guacharito: GUACHARITO_ANIMALS,
   "selva-plus": SELVA_PLUS_ANIMALS,
   "loto-chaim-a": LOTO_CHAIMA_ANIMALS,
   "lotto-activo": LOTTO_ACTIVO_ANIMALS,
+  "la-granjita": LOTTO_ACTIVO_ANIMALS,
   granjita: LOTTO_ACTIVO_ANIMALS,
   "monje-millonario": MONJE_MILLONARIO_ANIMALS,
   "lotto-activo-internacional": LOTTO_ACTIVO_ANIMALS,
@@ -402,12 +411,18 @@ export function resolveCanonicalAnimal(
   customLabels?: Record<string, string>,
 ): CanonicalAnimalResolution {
   const slug = resolveGameSlug(gameIdOrSlug);
-  const gameUuid = SLUG_TO_GAME_ID[slug] ?? (gameIdOrSlug ?? slug).trim();
+  const canonicalSlug = normalizeGameSlug(slug);
+  const gameUuid =
+    SLUG_TO_GAME_ID[slug] ?? SLUG_TO_GAME_ID[canonicalSlug] ?? (gameIdOrSlug ?? slug).trim();
   const gameKey = (gameIdOrSlug ?? slug).trim();
-  const catalog = OFFICIAL_ANIMALS[slug] ?? LOTTO_ACTIVO_ANIMALS;
-  const ballenaNum = getBallenaInternalNumber(slug);
+  const catalog = OFFICIAL_ANIMALS[slug] ?? OFFICIAL_ANIMALS[canonicalSlug] ?? LOTTO_ACTIVO_ANIMALS;
+  const ballenaNum = getBallenaInternalNumber(canonicalSlug || slug);
 
-  const canonicalNum = parseCanonicalAnimalNumber(slug, rawNumberOrCode, rawAnimalName);
+  const canonicalNum = parseCanonicalAnimalNumber(
+    canonicalSlug || slug,
+    rawNumberOrCode,
+    rawAnimalName,
+  );
   const isBallena = canonicalNum === ballenaNum;
   const isDelfin = !isBallena && canonicalNum === 0;
 
@@ -419,6 +434,7 @@ export function resolveCanonicalAnimal(
       ? "0"
       : (customLabels?.[`${gameKey}:${canonicalNum}`] ??
         customLabels?.[`${slug}:${canonicalNum}`] ??
+        customLabels?.[`${canonicalSlug}:${canonicalNum}`] ??
         catalogEntry?.label ??
         String(canonicalNum).padStart(2, "0"));
 
@@ -428,6 +444,7 @@ export function resolveCanonicalAnimal(
       ? "Delfín"
       : (customNames?.[`${gameKey}:${canonicalNum}`] ??
         customNames?.[`${slug}:${canonicalNum}`] ??
+        customNames?.[`${canonicalSlug}:${canonicalNum}`] ??
         catalogEntry?.name ??
         (rawAnimalName ? rawAnimalName.trim() : `Animal ${label}`));
 
@@ -443,23 +460,31 @@ export function resolveCanonicalAnimal(
     customImages?.[`${gameKey}:${canonicalNum}`],
     customImages?.[`${gameUuid}:${canonicalNum}`],
     customImages?.[`${slug}:${canonicalNum}`],
+    customImages?.[`${canonicalSlug}:${canonicalNum}`],
     isBallena ? customImages?.[`${gameKey}:00`] : undefined,
     isBallena ? customImages?.[`${slug}:00`] : undefined,
-    customImages && slug !== "lotoanimalito" && slug !== "lottopantera"
+    isBallena ? customImages?.[`${canonicalSlug}:00`] : undefined,
+    customImages && canonicalSlug !== "lotoanimalito" && canonicalSlug !== "lottopantera"
       ? getEmbeddedCatalogImageUrl(gameUuid, canonicalNum)
       : undefined,
   );
 
   // 2. If this game delegates to or is missing an entry in the shared 38/77/101-animal local catalog,
   // resolve directly from the in-memory embedded base64 catalog rather than making network requests
-  if (!customImg && customImages && slug !== "lotoanimalito" && slug !== "lottopantera") {
+  if (
+    !customImg &&
+    customImages &&
+    canonicalSlug !== "lotoanimalito" &&
+    canonicalSlug !== "lottopantera"
+  ) {
     const granjitaLookupNum = isBallena ? 37 : canonicalNum;
     const guacharoLookupNum = isBallena ? 76 : canonicalNum;
     const guacharitoLookupNum = isBallena ? 100 : canonicalNum;
 
     customImg = pickReal(
       granjitaLookupNum <= 37
-        ? (customImages[`granjita:${granjitaLookupNum}`] ??
+        ? (customImages[`la-granjita:${granjitaLookupNum}`] ??
+            customImages[`granjita:${granjitaLookupNum}`] ??
             customImages[`ca8a0400-0000-4000-8000-000000000006:${granjitaLookupNum}`] ??
             getEmbeddedCatalogImageUrl("ca8a0400-0000-4000-8000-000000000006", granjitaLookupNum) ??
             customImages[`lotto-activo:${granjitaLookupNum}`] ??
@@ -467,12 +492,14 @@ export function resolveCanonicalAnimal(
             getEmbeddedCatalogImageUrl("7d21a00b-0dfa-4bdc-9edf-8115802df1d6", granjitaLookupNum))
         : undefined,
       guacharoLookupNum <= 76
-        ? (customImages[`guacharo:${guacharoLookupNum}`] ??
+        ? (customImages[`guacharo-activo:${guacharoLookupNum}`] ??
+            customImages[`guacharo:${guacharoLookupNum}`] ??
             customImages[`01da9c54-392a-45e3-ab66-9a08befe7694:${guacharoLookupNum}`] ??
             getEmbeddedCatalogImageUrl("01da9c54-392a-45e3-ab66-9a08befe7694", guacharoLookupNum))
         : undefined,
       guacharitoLookupNum <= 100
-        ? (customImages[`guacharito:${guacharitoLookupNum}`] ??
+        ? (customImages[`el-guacharito-millonario:${guacharitoLookupNum}`] ??
+            customImages[`guacharito:${guacharitoLookupNum}`] ??
             customImages[`0519825d-e7ea-4e59-bf7d-cef2c832edd3:${guacharitoLookupNum}`] ??
             getEmbeddedCatalogImageUrl("0519825d-e7ea-4e59-bf7d-cef2c832edd3", guacharitoLookupNum))
         : undefined,

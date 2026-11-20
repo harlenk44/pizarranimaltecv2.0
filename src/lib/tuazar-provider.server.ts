@@ -12,7 +12,9 @@ import {
   type LoteriaDeHoyPage,
 } from "@/lib/loteriadehoy-parser";
 import { getGameScheduleTimes, normalizeScheduleTime } from "@/lib/game-schedules";
-import { resolveCanonicalAnimal } from "@/lib/official-animals";
+import { resolveCanonicalAnimal, SLUG_TO_GAME_ID } from "@/lib/official-animals";
+import { normalizeGameSlug } from "@/lib/game-slugs";
+import { lotteryDate } from "@/lib/lottery-date";
 
 export const LOTERIADEHOY_PRIMARY_URL = "https://loteriadehoy.com/animalitos/resultados/";
 export const TUAZAR_PRIMARY_URL = "https://tuazar.com/loteria/animalitos/resultados/";
@@ -20,7 +22,6 @@ export const TUAZAR_FALLBACK_URL = "https://www.tuazar.com/loteria/animalitos/re
 
 const FETCH_TIMEOUT_MS = 10_000;
 const SNAPSHOT_TTL_MS = 20_000;
-const TIMEZONE = "America/Caracas";
 
 const BROWSER_HEADERS: Record<string, string> = {
   "User-Agent":
@@ -30,13 +31,16 @@ const BROWSER_HEADERS: Record<string, string> = {
   "Cache-Control": "no-cache",
 };
 
-// Game slug in this app -> game name as printed by tuazar.com.
+// Game slug (canonical + legacy aliases) -> game name as printed by tuazar.com.
 export const TUAZAR_GAME_NAMES: Readonly<Record<string, string>> = {
   "lotto-activo": "LOTTO ACTIVO",
+  "guacharo-activo": "GUACHARO ACTIVO",
   guacharo: "GUACHARO ACTIVO",
+  "el-guacharito-millonario": "EL GUACHARITO MILLONARIO",
   guacharito: "EL GUACHARITO MILLONARIO",
   "selva-plus": "SELVA PLUS",
   "loto-chaim-a": "LOTO CHAIMA",
+  "la-granjita": "LA GRANJITA",
   granjita: "LA GRANJITA",
   "monje-millonario": "MONJE MILLONARIO",
   "lotto-activo-internacional": "LOTTO ACTIVO RD INTERNACIONAL",
@@ -104,23 +108,23 @@ function getTuazarPage(): Promise<TuazarPage> {
 }
 
 function todayInCaracas(): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: TIMEZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date());
+  return lotteryDate();
 }
 
 export function createTuazarProvider(tuazarGameName: string, gameSlug?: string): ResultsProvider {
   const wantedTuazar = normalizeName(tuazarGameName);
-  const targetSlug =
+  const rawTargetSlug =
     gameSlug ??
     Object.entries(TUAZAR_GAME_NAMES).find(([, name]) => normalizeName(name) === wantedTuazar)?.[0];
-  const ldhMeta = targetSlug ? LOTERIADEHOY_GAME_MAPPINGS[targetSlug] : undefined;
+  const targetSlug = rawTargetSlug ? normalizeGameSlug(rawTargetSlug) : undefined;
+  const ldhMeta = targetSlug
+    ? (LOTERIADEHOY_GAME_MAPPINGS[targetSlug] ??
+      (rawTargetSlug ? LOTERIADEHOY_GAME_MAPPINGS[rawTargetSlug] : undefined))
+    : undefined;
 
   return {
     async fetchResults(game: SyncGame): Promise<unknown[]> {
+      const effectiveSlug = targetSlug ?? normalizeGameSlug(game.slug);
       // 1. Fetch game catalog for valid matching
       let catalogEntries: Array<{ number: number; name: string; label?: string }> = [];
       try {
@@ -137,9 +141,15 @@ export function createTuazarProvider(tuazarGameName: string, gameSlug?: string):
       if (catalogEntries.length === 0) {
         catalogEntries = mockStore.animal_entries.filter((e) => e.game_id === game.id);
       }
-      const scheduledTimes = getGameScheduleTimes(targetSlug ?? game.slug);
+      if (catalogEntries.length === 0 && effectiveSlug) {
+        const defaultUuid = SLUG_TO_GAME_ID[effectiveSlug];
+        if (defaultUuid) {
+          catalogEntries = mockStore.animal_entries.filter((e) => e.game_id === defaultUuid);
+        }
+      }
+      const scheduledTimes = getGameScheduleTimes(effectiveSlug || game.slug);
       const validScheduleSet = new Set(scheduledTimes.map((t) => normalizeScheduleTime(t) ?? t));
-      if (targetSlug === "la-ricachona" || game.slug === "la-ricachona") {
+      if (effectiveSlug === "la-ricachona") {
         for (const t of getGameScheduleTimes("la-ricachona")) {
           validScheduleSet.add(normalizeScheduleTime(t) ?? t);
         }

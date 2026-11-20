@@ -1,4 +1,5 @@
 import type { Game } from "@/lib/types";
+import { normalizeGameSlug } from "@/lib/game-slugs";
 
 export const DEFAULT_GAME_SCHEDULES: Readonly<Record<string, string[]>> = {
   "monje-millonario": [
@@ -16,6 +17,20 @@ export const DEFAULT_GAME_SCHEDULES: Readonly<Record<string, string[]>> = {
     "19:05",
   ],
   "lotto-activo-internacional": [
+    "08:30",
+    "09:30",
+    "10:30",
+    "11:30",
+    "12:30",
+    "13:30",
+    "14:30",
+    "15:30",
+    "16:30",
+    "17:30",
+    "18:30",
+    "19:30",
+  ],
+  "el-guacharito-millonario": [
     "08:30",
     "09:30",
     "10:30",
@@ -71,7 +86,35 @@ export const DEFAULT_GAME_SCHEDULES: Readonly<Record<string, string[]>> = {
     "18:00",
     "19:00",
   ],
+  "guacharo-activo": [
+    "08:00",
+    "09:00",
+    "10:00",
+    "11:00",
+    "12:00",
+    "13:00",
+    "14:00",
+    "15:00",
+    "16:00",
+    "17:00",
+    "18:00",
+    "19:00",
+  ],
   guacharo: [
+    "08:00",
+    "09:00",
+    "10:00",
+    "11:00",
+    "12:00",
+    "13:00",
+    "14:00",
+    "15:00",
+    "16:00",
+    "17:00",
+    "18:00",
+    "19:00",
+  ],
+  "la-granjita": [
     "08:00",
     "09:00",
     "10:00",
@@ -177,6 +220,10 @@ export function getDefaultGameScheduleTimes(slug: string): string[] {
   if (DEFAULT_GAME_SCHEDULES[norm]) {
     return [...DEFAULT_GAME_SCHEDULES[norm]];
   }
+  const canonical = normalizeGameSlug(slug);
+  if (canonical && DEFAULT_GAME_SCHEDULES[canonical]) {
+    return [...DEFAULT_GAME_SCHEDULES[canonical]];
+  }
   if (norm.includes("ricachona")) {
     return [...DEFAULT_GAME_SCHEDULES["la-ricachona"]];
   }
@@ -190,7 +237,7 @@ export function getDefaultGameScheduleTimes(slug: string): string[] {
     return [...DEFAULT_GAME_SCHEDULES["selva-plus"]];
   }
   if (norm.includes("guacharito")) {
-    return [...DEFAULT_GAME_SCHEDULES["guacharito"]];
+    return [...DEFAULT_GAME_SCHEDULES["el-guacharito-millonario"]];
   }
   return [...STANDARD_HOURS];
 }

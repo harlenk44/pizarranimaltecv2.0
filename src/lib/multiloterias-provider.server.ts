@@ -243,6 +243,9 @@ export function formatMultiloteriasDrawTime(horaStr: string): string {
 export async function synchronizeMultiloteriasData(
   currentAnimalResults: Result[],
   currentTripleResults: TripleResult[],
+  options?: {
+    resolveGameId?: (canonicalSlug: string) => string | undefined;
+  },
 ): Promise<{
   animalResults: Result[];
   tripleResults: TripleResult[];
@@ -272,7 +275,8 @@ export async function synchronizeMultiloteriasData(
 
     // 1. LOTOANIMALITO
     if (normNombre === "LOTOANIMALITO" || uuid === MULTILOTERIAS_GAMES_INFO.lotoanimalito.uuid) {
-      const targetGameId = MULTILOTERIAS_GAMES_INFO.lotoanimalito.uuid;
+      const targetGameId =
+        options?.resolveGameId?.("lotoanimalito") || MULTILOTERIAS_GAMES_INFO.lotoanimalito.uuid;
       for (const sorteo of gameData.sorteos) {
         if (!sorteo.hora || !sorteo.numero) continue;
         const drawTime = formatMultiloteriasDrawTime(sorteo.hora);
@@ -280,7 +284,10 @@ export async function synchronizeMultiloteriasData(
 
         const existingIdx = mergedAnimals.findIndex(
           (r) =>
-            (r.game_id === targetGameId || r.game_id === "lotoanimalito") &&
+            (r.game_id === targetGameId ||
+              r.game_id === MULTILOTERIAS_GAMES_INFO.lotoanimalito.uuid ||
+              r.game_id === "lotoanimalito" ||
+              r.game_slug === "lotoanimalito") &&
             r.draw_date === drawDate &&
             (r.draw_time === drawTime || r.draw_time.startsWith(sorteo.hora)),
         );
@@ -289,6 +296,7 @@ export async function synchronizeMultiloteriasData(
           mergedAnimals.push({
             id: `ml-lotoanimalito-${drawDate}-${drawTime}`,
             game_id: targetGameId,
+            game_slug: "lotoanimalito",
             draw_date: drawDate,
             draw_time: drawTime,
             animal_number: resolved.number,
@@ -297,13 +305,17 @@ export async function synchronizeMultiloteriasData(
             created_at: new Date().toISOString(),
           });
           newAnimalCount++;
+        } else if (mergedAnimals[existingIdx]) {
+          mergedAnimals[existingIdx].game_id = targetGameId;
+          mergedAnimals[existingIdx].game_slug = "lotoanimalito";
         }
       }
     }
 
     // 2. LOTTOPANTERA
     else if (normNombre === "LOTTOPANTERA" || uuid === MULTILOTERIAS_GAMES_INFO.lottopantera.uuid) {
-      const targetGameId = MULTILOTERIAS_GAMES_INFO.lottopantera.uuid;
+      const targetGameId =
+        options?.resolveGameId?.("lottopantera") || MULTILOTERIAS_GAMES_INFO.lottopantera.uuid;
       for (const sorteo of gameData.sorteos) {
         if (!sorteo.hora || !sorteo.numero) continue;
         const drawTime = formatMultiloteriasDrawTime(sorteo.hora);
@@ -311,7 +323,10 @@ export async function synchronizeMultiloteriasData(
 
         const existingIdx = mergedAnimals.findIndex(
           (r) =>
-            (r.game_id === targetGameId || r.game_id === "lottopantera") &&
+            (r.game_id === targetGameId ||
+              r.game_id === MULTILOTERIAS_GAMES_INFO.lottopantera.uuid ||
+              r.game_id === "lottopantera" ||
+              r.game_slug === "lottopantera") &&
             r.draw_date === drawDate &&
             (r.draw_time === drawTime || r.draw_time.startsWith(sorteo.hora)),
         );
@@ -320,6 +335,7 @@ export async function synchronizeMultiloteriasData(
           mergedAnimals.push({
             id: `ml-lottopantera-${drawDate}-${drawTime}`,
             game_id: targetGameId,
+            game_slug: "lottopantera",
             draw_date: drawDate,
             draw_time: drawTime,
             animal_number: resolved.number,
@@ -328,6 +344,9 @@ export async function synchronizeMultiloteriasData(
             created_at: new Date().toISOString(),
           });
           newAnimalCount++;
+        } else if (mergedAnimals[existingIdx]) {
+          mergedAnimals[existingIdx].game_id = targetGameId;
+          mergedAnimals[existingIdx].game_slug = "lottopantera";
         }
       }
     }

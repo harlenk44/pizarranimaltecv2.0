@@ -75,25 +75,25 @@ export const INITIAL_GAMES: Game[] = [
   {
     id: "01da9c54-392a-45e3-ab66-9a08befe7694",
     name: "GUACHARO ACTIVO",
-    slug: "guacharo",
+    slug: "guacharo-activo",
     color: "#dc2626",
-    logo_url: getGameLogo("guacharo", "#dc2626"),
+    logo_url: getGameLogo("guacharo-activo", "#dc2626"),
     display_order: 2,
     is_active: true,
     loading_mode: "automatic",
-    schedule_times: [...DEFAULT_GAME_SCHEDULES["guacharo"]],
+    schedule_times: [...DEFAULT_GAME_SCHEDULES["guacharo-activo"]],
     created_at: new Date().toISOString(),
   },
   {
     id: "0519825d-e7ea-4e59-bf7d-cef2c832edd3",
     name: "EL GUACHARITO MILLONARIO",
-    slug: "guacharito",
+    slug: "el-guacharito-millonario",
     color: "#eab308",
-    logo_url: getGameLogo("guacharito", "#eab308"),
+    logo_url: getGameLogo("el-guacharito-millonario", "#eab308"),
     display_order: 3,
     is_active: true,
     loading_mode: "automatic",
-    schedule_times: [...DEFAULT_GAME_SCHEDULES["guacharito"]],
+    schedule_times: [...DEFAULT_GAME_SCHEDULES["el-guacharito-millonario"]],
     created_at: new Date().toISOString(),
   },
   {
@@ -123,13 +123,13 @@ export const INITIAL_GAMES: Game[] = [
   {
     id: "ca8a0400-0000-4000-8000-000000000006",
     name: "LA GRANJITA",
-    slug: "granjita",
+    slug: "la-granjita",
     color: "#eab308",
-    logo_url: getGameLogo("granjita", "#eab308"),
+    logo_url: getGameLogo("la-granjita", "#eab308"),
     display_order: 6,
     is_active: true,
     loading_mode: "automatic",
-    schedule_times: [...DEFAULT_GAME_SCHEDULES["granjita"]],
+    schedule_times: [...DEFAULT_GAME_SCHEDULES["la-granjita"]],
     created_at: new Date().toISOString(),
   },
   {
@@ -1879,8 +1879,13 @@ export function createMockSupabaseClient() {
         return Promise.resolve({ data: true, error: null });
       }
       if (fnName === "sync_automatic_result") {
-        const { p_game_id, p_draw_date, p_draw_time, p_animal_number, p_animal_name } = args;
+        const { p_game_id, p_game_slug, p_draw_date, p_draw_time, p_animal_number, p_animal_name } =
+          args;
         const targetGame = mockStore.games.find((g) => g.id === p_game_id);
+        const resolvedSlug =
+          typeof p_game_slug === "string" && p_game_slug.trim()
+            ? p_game_slug.trim()
+            : targetGame?.slug;
         if (targetGame) {
           const validSchedule = new Set(
             getGameScheduleTimes(targetGame).map((t) => normalizeScheduleTime(t) ?? t),
@@ -1896,11 +1901,18 @@ export function createMockSupabaseClient() {
             r.game_id === p_game_id && r.draw_date === p_draw_date && r.draw_time === p_draw_time,
         );
         if (existing) {
+          if (existing.source === "manual") {
+            return Promise.resolve({ data: false, error: null });
+          }
+          if (resolvedSlug && existing.game_slug !== resolvedSlug) {
+            existing.game_slug = resolvedSlug;
+          }
           return Promise.resolve({ data: false, error: null });
         }
         mockStore.results.push({
           id: `res-${p_game_id}-${p_draw_date}-${p_draw_time}`,
           game_id: p_game_id as string,
+          ...(resolvedSlug ? { game_slug: resolvedSlug } : {}),
           draw_date: p_draw_date as string,
           draw_time: p_draw_time as string,
           animal_number: p_animal_number as number,

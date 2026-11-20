@@ -22,10 +22,16 @@ export const LOTERIADEHOY_GAME_MAPPINGS: Readonly<
   Record<string, { className: string; title: string }>
 > = {
   "lotto-activo": { className: "lottoactivo", title: "LOTTO ACTIVO" },
+  "guacharo-activo": { className: "guacharoactivo", title: "GUACHARO ACTIVO" },
   guacharo: { className: "guacharoactivo", title: "GUACHARO ACTIVO" },
+  "el-guacharito-millonario": {
+    className: "elguacharitomillonario",
+    title: "EL GUACHARITO MILLONARIO",
+  },
   guacharito: { className: "elguacharitomillonario", title: "EL GUACHARITO MILLONARIO" },
   "selva-plus": { className: "selvaplus", title: "SELVA PLUS" },
   "loto-chaim-a": { className: "lotochaima", title: "LOTO CHAIMA" },
+  "la-granjita": { className: "lagranjita", title: "LA GRANJITA" },
   granjita: { className: "lagranjita", title: "LA GRANJITA" },
   "monje-millonario": { className: "lottoactivo2(monjemillonario)", title: "MONJE MILLONARIO" },
   "lotto-activo-internacional": {

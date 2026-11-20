@@ -15,6 +15,7 @@ export interface Game {
 export interface Result {
   id: string;
   game_id: string;
+  game_slug?: string | null;
   draw_date: string;
   draw_time: string;
   animal_number: number;
