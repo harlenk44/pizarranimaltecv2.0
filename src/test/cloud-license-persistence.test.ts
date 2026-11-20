@@ -700,4 +700,74 @@ describe("Cloud license persistence & Cloudflare runtime env", () => {
       },
     );
   });
+
+  it("authenticates Cloudflare KV REST GET, PUT, and DELETE via Global API Key (X-Auth-Key + X-Auth-Email)", async () => {
+    const restStore = new Map<string, string>();
+    const observedHeaders: Array<{ method: string; headers: Record<string, string> }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (
+        url.startsWith(
+          "https://api.cloudflare.com/client/v4/accounts/acc-global/storage/kv/namespaces/ns-global/values/",
+        )
+      ) {
+        const key = decodeURIComponent(url.split("/values/")[1] || "");
+        const method = (init?.method || "GET").toUpperCase();
+        const hdrs = (init?.headers || {}) as Record<string, string>;
+        observedHeaders.push({ method, headers: { ...hdrs } });
+        if (
+          hdrs["X-Auth-Key"] !== "global-key-123" ||
+          hdrs["X-Auth-Email"] !== "admin@example.com"
+        ) {
+          return new Response(JSON.stringify({ success: false, errors: [{ code: 10000 }] }), {
+            status: 401,
+          });
+        }
+        if (method === "GET") {
+          const val = restStore.get(key);
+          if (val === undefined) return new Response("Not found", { status: 404 });
+          return new Response(val, { status: 200 });
+        }
+        if (method === "PUT") {
+          restStore.set(key, String(init?.body || ""));
+          return new Response(JSON.stringify({ success: true }), { status: 200 });
+        }
+        if (method === "DELETE") {
+          restStore.delete(key);
+          return new Response(JSON.stringify({ success: true }), { status: 200 });
+        }
+      }
+      return originalFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      await runWithCloudflareEnv(
+        {
+          CF_ACCOUNT_ID: "acc-global",
+          CF_KV_NAMESPACE_ID: "ns-global",
+          CF_API_KEY: "  global-key-123 ",
+          CF_EMAIL: " admin@example.com  ",
+        },
+        async () => {
+          const kv = getBoundCloudflareKv();
+          expect(kv).not.toBeNull();
+          await kv!.put("k1", "val1");
+          expect(await kv!.get("k1", "text")).toBe("val1");
+          await kv!.delete!("k1");
+          expect(await kv!.get("k1", "text")).toBeNull();
+
+          expect(observedHeaders.map((o) => o.method)).toEqual(["PUT", "GET", "DELETE", "GET"]);
+          for (const entry of observedHeaders) {
+            expect(entry.headers["Content-Type"]).toBe("text/plain");
+            expect(entry.headers["X-Auth-Key"]).toBe("global-key-123");
+            expect(entry.headers["X-Auth-Email"]).toBe("admin@example.com");
+            expect(entry.headers["Authorization"]).toBeUndefined();
+          }
+        },
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

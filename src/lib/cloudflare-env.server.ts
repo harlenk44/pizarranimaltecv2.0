@@ -35,7 +35,10 @@ function asNonEmptyRecord(candidate: unknown): EnvRecord | null {
   if (
     rec["ASSETS"] !== undefined ||
     rec["SUPABASE_URL"] !== undefined ||
-    rec["VITE_SUPABASE_URL"] !== undefined
+    rec["VITE_SUPABASE_URL"] !== undefined ||
+    rec["CF_ACCOUNT_ID"] !== undefined ||
+    rec["CF_API_KEY"] !== undefined ||
+    rec["CF_API_TOKEN"] !== undefined
   ) {
     return rec;
   }
@@ -229,17 +232,33 @@ function findKvInEnv(envObj: EnvRecord | null | undefined): CloudflareKvNamespac
 
 function getRestCloudflareKvConfig(): {
   accountId: string;
-  apiToken: string;
   namespaceId: string;
+  apiKey?: string;
+  email?: string;
+  apiToken?: string;
 } | null {
   const accountId = getRuntimeEnvVar("CF_ACCOUNT_ID") || getRuntimeEnvVar("CLOUDFLARE_ACCOUNT_ID");
-  const apiToken = getRuntimeEnvVar("CF_API_TOKEN") || getRuntimeEnvVar("CLOUDFLARE_API_TOKEN");
   const namespaceId =
     getRuntimeEnvVar("CF_KV_NAMESPACE_ID") ||
     getRuntimeEnvVar("PIZARRA_KV_NAMESPACE_ID") ||
     getRuntimeEnvVar("CLOUDFLARE_KV_NAMESPACE_ID");
-  if (!accountId || !apiToken || !namespaceId) return null;
-  return { accountId, apiToken, namespaceId };
+  const apiKey = getRuntimeEnvVar("CF_API_KEY") || getRuntimeEnvVar("CLOUDFLARE_API_KEY");
+  const email = getRuntimeEnvVar("CF_EMAIL") || getRuntimeEnvVar("CLOUDFLARE_EMAIL");
+  const apiToken = getRuntimeEnvVar("CF_API_TOKEN") || getRuntimeEnvVar("CLOUDFLARE_API_TOKEN");
+
+  const hasGlobalKey = Boolean(apiKey && email);
+  const hasApiToken = Boolean(apiToken);
+  if (!accountId || !namespaceId || (!hasGlobalKey && !hasApiToken)) {
+    return null;
+  }
+
+  return {
+    accountId,
+    namespaceId,
+    ...(apiKey ? { apiKey } : {}),
+    ...(email ? { email } : {}),
+    ...(apiToken ? { apiToken } : {}),
+  };
 }
 
 let cachedRestKvKey = "";
@@ -248,9 +267,19 @@ let cachedRestKvClient: CloudflareKvNamespace | null = null;
 function getRestCloudflareKv(): CloudflareKvNamespace | null {
   const cfg = getRestCloudflareKvConfig();
   if (!cfg) return null;
-  const cacheKey = `${cfg.accountId}:${cfg.namespaceId}:${cfg.apiToken}`;
+  const cacheKey = `${cfg.accountId}:${cfg.namespaceId}:${cfg.email || ""}:${cfg.apiKey || ""}:${cfg.apiToken || ""}`;
   if (cachedRestKvClient && cachedRestKvKey === cacheKey) {
     return cachedRestKvClient;
+  }
+
+  const headers: Record<string, string> = {
+    "Content-Type": "text/plain",
+  };
+  if (cfg.apiKey && cfg.email) {
+    headers["X-Auth-Key"] = String(cfg.apiKey).trim();
+    headers["X-Auth-Email"] = String(cfg.email).trim();
+  } else if (cfg.apiToken) {
+    headers["Authorization"] = `Bearer ${String(cfg.apiToken).trim()}`;
   }
 
   const baseUrl = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(cfg.accountId)}/storage/kv/namespaces/${encodeURIComponent(cfg.namespaceId)}/values`;
@@ -258,7 +287,8 @@ function getRestCloudflareKv(): CloudflareKvNamespace | null {
   cachedRestKvClient = {
     async get(key: string, type?: "text" | "json") {
       const res = await fetch(`${baseUrl}/${encodeURIComponent(key)}`, {
-        headers: { Authorization: `Bearer ${cfg.apiToken}` },
+        method: "GET",
+        headers,
       });
       if (res.status === 404) return null;
       if (!res.ok) {
@@ -273,10 +303,7 @@ function getRestCloudflareKv(): CloudflareKvNamespace | null {
     async put(key: string, value: string) {
       const res = await fetch(`${baseUrl}/${encodeURIComponent(key)}`, {
         method: "PUT",
-        headers: {
-          Authorization: `Bearer ${cfg.apiToken}`,
-          "Content-Type": "text/plain; charset=utf-8",
-        },
+        headers,
         body: value,
       });
       if (!res.ok) {
@@ -289,7 +316,7 @@ function getRestCloudflareKv(): CloudflareKvNamespace | null {
     async delete(key: string) {
       const res = await fetch(`${baseUrl}/${encodeURIComponent(key)}`, {
         method: "DELETE",
-        headers: { Authorization: `Bearer ${cfg.apiToken}` },
+        headers,
       });
       if (res.status !== 404 && !res.ok) {
         const body = await res.text().catch(() => "");
