@@ -358,6 +358,8 @@ describe("Supabase licenses table & animal-images Storage bucket integration", (
           JSON.stringify({
             code: "42501",
             message: 'new row violates row-level security policy for table "licenses"',
+            details: "Failing row contains (...)",
+            hint: "Create an RLS policy or use service_role key",
           }),
           { status: 403, headers: { "Content-Type": "application/json" } },
         );
@@ -375,8 +377,8 @@ describe("Supabase licenses table & animal-images Storage bucket integration", (
     try {
       await runWithCloudflareEnv(
         {
-          SUPABASE_URL: "https://rls-test.supabase.co",
-          SUPABASE_KEY: "anon-key-restricted",
+          SUPABASE_URL: '"rls-test.supabase.co"',
+          SUPABASE_KEY: '"anon-key-restricted"',
         },
         async () => {
           const testId = generateLicenseUuid();
@@ -399,7 +401,16 @@ describe("Supabase licenses table & animal-images Storage bucket integration", (
           const putJson = await putRes.json();
           expect(putJson.cloudLicenseSyncOk).toBe(false);
           expect(putJson.cloudLicenseError).toMatch(/42501/);
-          expect(putJson.cloudLicenseError).toMatch(/licenses/i);
+          expect(putJson.cloudLicenseError).toMatch(/Failing row contains/);
+          expect(putJson.cloudLicenseError).toMatch(/Create an RLS policy/);
+          expect(putJson.cloudLicenseError).not.toMatch(/Error updating result/i);
+          expect(putJson.supabaseError).toMatchObject({
+            code: "42501",
+            message: 'new row violates row-level security policy for table "licenses"',
+            details: "Failing row contains (...)",
+            hint: "Create an RLS policy or use service_role key",
+            table: "licenses",
+          });
           expect(
             (putJson.clientLicenses as Array<{ pin_code: string }>).some(
               (l) => l.pin_code === "665544",

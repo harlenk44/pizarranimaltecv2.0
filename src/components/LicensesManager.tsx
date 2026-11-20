@@ -468,13 +468,50 @@ export default function LicensesManager() {
       const persistedInCloud = serverCloudOk || directCloudOk;
 
       if (!persistedInCloud) {
+        const sbErr =
+          data && data.supabaseError && typeof data.supabaseError === "object"
+            ? (data.supabaseError as {
+                code?: string | null;
+                message?: string | null;
+                details?: string | null;
+                hint?: string | null;
+              })
+            : null;
+        const formattedSbErr = sbErr
+          ? [
+              sbErr.code ? `code: ${sbErr.code}` : null,
+              sbErr.message ? `message: ${sbErr.message}` : null,
+              sbErr.details ? `details: ${sbErr.details}` : null,
+              sbErr.hint ? `hint: ${sbErr.hint}` : null,
+            ]
+              .filter(Boolean)
+              .join(" | ")
+          : null;
+        const fallbackDetail =
+          data && typeof data.error === "string"
+            ? [
+                data.code ? `code: ${String(data.code)}` : null,
+                data.error,
+                data.details ? `details: ${String(data.details)}` : null,
+                data.hint ? `hint: ${String(data.hint)}` : null,
+              ]
+                .filter(Boolean)
+                .join(" | ")
+            : null;
         const exactError =
           (data && typeof data.cloudLicenseError === "string" && data.cloudLicenseError) ||
-          (data && typeof data.error === "string" && data.error) ||
+          formattedSbErr ||
+          fallbackDetail ||
           directCloudError ||
           (!res.ok
             ? `Error HTTP ${res.status} al sincronizar la licencia con el servidor.`
             : "El servidor no confirmó el guardado en la nube (cloudLicenseSyncOk=false).");
+        console.error("[LicensesManager] Error al guardar licencia en Supabase:", {
+          status: res.status,
+          supabaseError: sbErr,
+          responseData: data,
+          directCloudError,
+        });
         setCloudErrorAlert(exactError);
         setModalCloudError(exactError);
         return false;

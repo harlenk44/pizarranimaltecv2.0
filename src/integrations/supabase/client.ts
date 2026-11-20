@@ -68,13 +68,21 @@ function isInactiveSupabaseUrl(url?: string): boolean {
 }
 
 function createSupabaseClient() {
-  const SUPABASE_URL = import.meta.env["VITE_SUPABASE_URL"] || process.env["SUPABASE_URL"];
+  const serverProcessEnv = typeof process !== "undefined" && process.env ? process.env : undefined;
+  const rawUrl = import.meta.env["VITE_SUPABASE_URL"] || serverProcessEnv?.["SUPABASE_URL"];
+  const SUPABASE_URL =
+    typeof rawUrl === "string" && rawUrl.trim()
+      ? /^https?:\/\//i.test(rawUrl.trim())
+        ? rawUrl.trim().replace(/\/+$/, "")
+        : `https://${rawUrl.trim().replace(/\/+$/, "")}`
+      : undefined;
   const SUPABASE_PUBLISHABLE_KEY =
     import.meta.env["VITE_SUPABASE_PUBLISHABLE_KEY"] ||
-    process.env["SUPABASE_PUBLISHABLE_KEY"] ||
-    process.env["SUPABASE_KEY"];
+    import.meta.env["VITE_SUPABASE_KEY"] ||
+    serverProcessEnv?.["SUPABASE_PUBLISHABLE_KEY"] ||
+    serverProcessEnv?.["SUPABASE_KEY"];
   const SUPABASE_SERVICE_ROLE_KEY =
-    process.env["SUPABASE_SERVICE_ROLE_KEY"] || process.env["SUPABASE_KEY"];
+    serverProcessEnv?.["SUPABASE_SERVICE_ROLE_KEY"] || serverProcessEnv?.["SUPABASE_KEY"];
 
   // Connect to external Supabase when an active .supabase.co URL or server key is configured;
   // otherwise use the self-contained mock database so the board always renders reliably.
@@ -89,7 +97,7 @@ function createSupabaseClient() {
     return createMockSupabaseClient() as unknown as ReturnType<typeof createClient<Database>>;
   }
 
-  const baseFetch = createSupabaseFetch(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
+  const baseFetch = createSupabaseFetch(SUPABASE_URL!, SUPABASE_PUBLISHABLE_KEY!);
   const resilientFetch: typeof fetch = async (input, init) => {
     try {
       return await baseFetch(input, init);
@@ -102,7 +110,7 @@ function createSupabaseClient() {
     }
   };
 
-  return createClient<Database>(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
+  return createClient<Database>(SUPABASE_URL!, SUPABASE_PUBLISHABLE_KEY!, {
     global: {
       fetch: resilientFetch,
     },

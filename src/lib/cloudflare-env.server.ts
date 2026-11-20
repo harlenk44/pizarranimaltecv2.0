@@ -147,26 +147,32 @@ function getCurrentEnvObject(): CloudflareRuntimeEnv | undefined {
   return latestRuntimeEnv;
 }
 
+function cleanEnvValue(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  let trimmed = raw.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    trimmed = trimmed.slice(1, -1).trim();
+  }
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 export function getRuntimeEnvVar(name: string): string | undefined {
   const cfEnv = getCurrentEnvObject();
-  const cfVal = cfEnv?.[name];
-  if (typeof cfVal === "string" && cfVal.trim().length > 0) {
-    return cfVal.trim();
-  }
+  const cfVal = cleanEnvValue(cfEnv?.[name]);
+  if (cfVal) return cfVal;
 
   if (typeof process !== "undefined" && process.env) {
-    const procVal = process.env[name];
-    if (typeof procVal === "string" && procVal.trim().length > 0) {
-      return procVal.trim();
-    }
+    const procVal = cleanEnvValue(process.env[name]);
+    if (procVal) return procVal;
   }
 
   try {
     const metaEnv = (import.meta as unknown as { env?: Record<string, unknown> }).env;
-    const val = metaEnv?.[name];
-    if (typeof val === "string" && val.trim().length > 0) {
-      return val.trim();
-    }
+    const val = cleanEnvValue(metaEnv?.[name]);
+    if (val) return val;
   } catch {
     // ignore
   }

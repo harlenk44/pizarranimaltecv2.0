@@ -266,7 +266,58 @@ function parseRequireFromMasterNotes(notes?: string | null): boolean | null {
 
 const SUPABASE_LICENSES_TABLE = "licenses" as const;
 const SUPABASE_ANIMAL_IMAGES_BUCKET = "animal-images" as const;
+
+interface DetailedSupabaseError {
+  code: string | null;
+  message: string;
+  details: string | null;
+  hint: string | null;
+  table?: string;
+}
+
 let lastCloudLicenseReadError: string | null = null;
+let lastCloudLicenseReadErrorDetails: DetailedSupabaseError | null = null;
+
+function safeIsoDate(value: unknown, fallback: string | null): string | null {
+  if (!value) return fallback;
+  const parsed = new Date(value as string | number);
+  return Number.isNaN(parsed.getTime()) ? fallback : parsed.toISOString();
+}
+
+function extractDetailedError(err: unknown, table?: string): DetailedSupabaseError {
+  if (err && typeof err === "object") {
+    const rec = err as Record<string, unknown>;
+    const message =
+      typeof rec["message"] === "string" && rec["message"].trim()
+        ? rec["message"].trim()
+        : err instanceof Error
+          ? err.message
+          : String(err);
+    const code =
+      typeof rec["code"] === "string" && rec["code"].trim()
+        ? rec["code"].trim()
+        : typeof rec["code"] === "number"
+          ? String(rec["code"])
+          : null;
+    const details =
+      typeof rec["details"] === "string" && rec["details"].trim() ? rec["details"].trim() : null;
+    const hint = typeof rec["hint"] === "string" && rec["hint"].trim() ? rec["hint"].trim() : null;
+    return {
+      code,
+      message,
+      details,
+      hint,
+      ...(table ? { table } : {}),
+    };
+  }
+  return {
+    code: null,
+    message: typeof err === "string" && err.trim() ? err.trim() : String(err),
+    details: null,
+    hint: null,
+    ...(table ? { table } : {}),
+  };
+}
 
 function parseDataUrlToBinary(dataUrl: string): {
   bytes: Uint8Array;
@@ -400,10 +451,12 @@ function formatSupabaseLicenseError(
   diag?: SupabaseCloudDiagnostics,
 ): string {
   if (typeof err === "string") return err;
-  const code = err.code ? `[${err.code}] ` : "";
-  const msg = err.message || "Error desconocido de Supabase";
-  const extra = [err.details, err.hint].filter(Boolean).join(" · ");
-  const full = `${code}${msg}${extra ? ` (${extra})` : ""}`;
+  const parts: string[] = [];
+  if (err.code) parts.push(`code: ${err.code}`);
+  parts.push(`message: ${err.message || "Error desconocido de Supabase"}`);
+  if (err.details) parts.push(`details: ${err.details}`);
+  if (err.hint) parts.push(`hint: ${err.hint}`);
+  const full = parts.join(" | ");
   const lower = full.toLowerCase();
   if (
     err.code === "42501" ||
@@ -414,7 +467,7 @@ function formatSupabaseLicenseError(
       diag && !diag.hasServiceRoleKey
         ? " Configura SUPABASE_KEY (service_role/secret) en Cloudflare Pages o habilita las políticas RLS en la tabla licenses."
         : " Verifica los permisos y políticas RLS de la tabla licenses en Supabase.";
-    return `${full}.${keyHint}`;
+    return `${full} | ${keyHint.trim()}`;
   }
   return full;
 }
@@ -423,8 +476,29 @@ async function upsertLicenseRowToSupabase(
   lic: ClientLicense,
   notesOverride?: string,
   authBearerToken?: string | null,
-): Promise<{ ok: boolean; error?: string; resolvedId?: string }> {
+): Promise<{
+  ok: boolean;
+  error?: string;
+  supabaseError?: DetailedSupabaseError;
+  resolvedId?: string;
+}> {
   const diag = getSupabaseCloudDiagnostics();
+  if (diag.initError) {
+    const initErrObj: DetailedSupabaseError = {
+      code: "SUPABASE_CONFIG_ERROR",
+      message: diag.initError,
+      details: diag.url ? `SUPABASE_URL=${diag.url}` : null,
+      hint: "Revisa SUPABASE_URL y SUPABASE_KEY en Cloudflare Pages → Settings → Environment Variables.",
+      table: SUPABASE_LICENSES_TABLE,
+    };
+    console.error("[supabase-licenses-config-error]", initErrObj);
+    return {
+      ok: false,
+      error: formatSupabaseLicenseError(initErrObj, diag),
+      supabaseError: initErrObj,
+    };
+  }
+
   const realClient = createRealSupabaseAdminClient();
 
   if (!realClient) {
@@ -447,7 +521,12 @@ async function upsertLicenseRowToSupabase(
 
   const runUpsert = async (
     client: NonNullable<typeof realClient>,
-  ): Promise<{ ok: boolean; error?: string; resolvedId?: string }> => {
+  ): Promise<{
+    ok: boolean;
+    error?: string;
+    supabaseError?: DetailedSupabaseError;
+    resolvedId?: string;
+  }> => {
     try {
       let targetId = sbId;
       if (lic.pin_code) {
@@ -457,7 +536,13 @@ async function upsertLicenseRowToSupabase(
           .eq("pin_code", lic.pin_code)
           .maybeSingle();
         if (selectErr) {
-          return { ok: false, error: formatSupabaseLicenseError(selectErr, diag) };
+          const detailed = extractDetailedError(selectErr, SUPABASE_LICENSES_TABLE);
+          console.error("[supabase-licenses-select-error]", detailed);
+          return {
+            ok: false,
+            error: formatSupabaseLicenseError(detailed, diag),
+            supabaseError: detailed,
+          };
         }
         if (
           existingByPin &&
@@ -477,15 +562,18 @@ async function upsertLicenseRowToSupabase(
       }
 
       if (!error && (!upsertedRows || upsertedRows.length === 0)) {
+        const detailed: DetailedSupabaseError = {
+          code: "42501",
+          message: `Supabase no confirmó filas guardadas en ${SUPABASE_LICENSES_TABLE}`,
+          details: "upsert().select('id') retornó 0 filas",
+          hint: "Verifica RLS o permisos de escritura para SUPABASE_KEY en la tabla licenses",
+          table: SUPABASE_LICENSES_TABLE,
+        };
+        console.error("[supabase-licenses-empty-upsert-error]", detailed);
         return {
           ok: false,
-          error: formatSupabaseLicenseError(
-            {
-              code: "42501",
-              message: `Supabase no confirmó filas guardadas en ${SUPABASE_LICENSES_TABLE}`,
-            },
-            diag,
-          ),
+          error: formatSupabaseLicenseError(detailed, diag),
+          supabaseError: detailed,
         };
       }
 
@@ -506,12 +594,30 @@ async function upsertLicenseRowToSupabase(
           return { ok: true, resolvedId: updatedRows[0]?.id || targetId };
         }
         if (updateErr) {
-          return { ok: false, error: formatSupabaseLicenseError(updateErr, diag) };
+          const detailed = extractDetailedError(updateErr, SUPABASE_LICENSES_TABLE);
+          console.error("[supabase-licenses-update-error]", detailed);
+          return {
+            ok: false,
+            error: formatSupabaseLicenseError(detailed, diag),
+            supabaseError: detailed,
+          };
         }
       }
-      return { ok: false, error: formatSupabaseLicenseError(error || "Error al guardar", diag) };
+      const detailed = extractDetailedError(error || "Error al guardar", SUPABASE_LICENSES_TABLE);
+      console.error("[supabase-licenses-upsert-error]", detailed);
+      return {
+        ok: false,
+        error: formatSupabaseLicenseError(detailed, diag),
+        supabaseError: detailed,
+      };
     } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      const detailed = extractDetailedError(err, SUPABASE_LICENSES_TABLE);
+      console.error("[supabase-licenses-upsert-exception]", detailed);
+      return {
+        ok: false,
+        error: formatSupabaseLicenseError(detailed, diag),
+        supabaseError: detailed,
+      };
     }
   };
 
@@ -527,7 +633,7 @@ async function upsertLicenseRowToSupabase(
   }
 
   if (!res.ok) {
-    console.warn("[supabase-license-upsert-warn]", res.error);
+    console.error("[supabase-license-upsert-failed]", res.supabaseError || res.error);
   }
   return res;
 }
@@ -536,8 +642,23 @@ async function deleteLicenseRowFromSupabase(
   id: string,
   pinCode?: string | null,
   authBearerToken?: string | null,
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean; error?: string; supabaseError?: DetailedSupabaseError }> {
   const diag = getSupabaseCloudDiagnostics();
+  if (diag.initError) {
+    const initErrObj: DetailedSupabaseError = {
+      code: "SUPABASE_CONFIG_ERROR",
+      message: diag.initError,
+      details: diag.url ? `SUPABASE_URL=${diag.url}` : null,
+      hint: "Revisa SUPABASE_URL y SUPABASE_KEY en Cloudflare Pages.",
+      table: SUPABASE_LICENSES_TABLE,
+    };
+    return {
+      ok: false,
+      error: formatSupabaseLicenseError(initErrObj, diag),
+      supabaseError: initErrObj,
+    };
+  }
+
   const realClient = createRealSupabaseAdminClient();
 
   if (!realClient) {
@@ -547,25 +668,47 @@ async function deleteLicenseRowFromSupabase(
   const sbId = toSupabaseLicenseUuid(id, pinCode);
   const runDelete = async (
     client: NonNullable<typeof realClient>,
-  ): Promise<{ ok: boolean; error?: string }> => {
+  ): Promise<{ ok: boolean; error?: string; supabaseError?: DetailedSupabaseError }> => {
     try {
       const targetIds = Array.from(
         new Set([isValidUuid(id) ? id : null, isValidUuid(sbId) ? sbId : null].filter(Boolean)),
       ) as string[];
       for (const tid of targetIds) {
         const { error } = await client.from(SUPABASE_LICENSES_TABLE).delete().eq("id", tid);
-        if (error) return { ok: false, error: formatSupabaseLicenseError(error, diag) };
+        if (error) {
+          const detailed = extractDetailedError(error, SUPABASE_LICENSES_TABLE);
+          console.error("[supabase-licenses-delete-error]", detailed);
+          return {
+            ok: false,
+            error: formatSupabaseLicenseError(detailed, diag),
+            supabaseError: detailed,
+          };
+        }
       }
       if (pinCode) {
         const { error } = await client
           .from(SUPABASE_LICENSES_TABLE)
           .delete()
           .eq("pin_code", pinCode);
-        if (error) return { ok: false, error: formatSupabaseLicenseError(error, diag) };
+        if (error) {
+          const detailed = extractDetailedError(error, SUPABASE_LICENSES_TABLE);
+          console.error("[supabase-licenses-delete-pin-error]", detailed);
+          return {
+            ok: false,
+            error: formatSupabaseLicenseError(detailed, diag),
+            supabaseError: detailed,
+          };
+        }
       }
       return { ok: true };
     } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      const detailed = extractDetailedError(err, SUPABASE_LICENSES_TABLE);
+      console.error("[supabase-licenses-delete-exception]", detailed);
+      return {
+        ok: false,
+        error: formatSupabaseLicenseError(detailed, diag),
+        supabaseError: detailed,
+      };
     }
   };
 
@@ -593,37 +736,53 @@ async function syncLicensesWithSupabase(force = false): Promise<void> {
   }
 
   const run = (async () => {
-    const diag = getSupabaseCloudDiagnostics();
-    const realClient = createRealSupabaseAdminClient();
-
-    if (!realClient) {
-      lastCloudLicenseReadError = null;
-      return;
-    }
-
     try {
+      const diag = getSupabaseCloudDiagnostics();
+      if (diag.initError) {
+        const detailed: DetailedSupabaseError = {
+          code: "SUPABASE_CONFIG_ERROR",
+          message: diag.initError,
+          details: diag.url ? `SUPABASE_URL=${diag.url}` : null,
+          hint: "Revisa SUPABASE_URL y SUPABASE_KEY en Cloudflare Pages.",
+          table: SUPABASE_LICENSES_TABLE,
+        };
+        lastCloudLicenseReadError = formatSupabaseLicenseError(detailed, diag);
+        lastCloudLicenseReadErrorDetails = detailed;
+        return;
+      }
+
+      const realClient = createRealSupabaseAdminClient();
+
+      if (!realClient) {
+        lastCloudLicenseReadError = null;
+        lastCloudLicenseReadErrorDetails = null;
+        return;
+      }
+
       const { data, error } = await realClient.from(SUPABASE_LICENSES_TABLE).select("*");
       if (error) {
-        lastCloudLicenseReadError = formatSupabaseLicenseError(error, diag);
+        const detailed = extractDetailedError(error, SUPABASE_LICENSES_TABLE);
+        console.error("[supabase-licenses-read-error]", detailed);
+        lastCloudLicenseReadError = formatSupabaseLicenseError(detailed, diag);
+        lastCloudLicenseReadErrorDetails = detailed;
         return;
       }
       if (Array.isArray(data)) {
         lastCloudLicenseReadError = null;
+        lastCloudLicenseReadErrorDetails = null;
         lastLicensesCloudSyncAt = Date.now();
         const mapped: ClientLicense[] = data.map((d: Record<string, unknown>) => ({
           id: String(d["id"]),
           client_name: String(d["client_name"] || "Cliente"),
           pin_code: String(d["pin_code"] || ""),
           status: d["status"] === "paused" ? "paused" : "active",
-          expires_at: d["expires_at"] ? new Date(d["expires_at"] as string).toISOString() : null,
+          expires_at: safeIsoDate(d["expires_at"], null),
           max_devices: Number(d["max_devices"]) || 1,
           bound_device_ids: Array.isArray(d["bound_device_ids"])
             ? (d["bound_device_ids"] as string[])
             : [],
           notes: typeof d["notes"] === "string" ? d["notes"] : "",
-          created_at: d["created_at"]
-            ? new Date(d["created_at"] as string).toISOString()
-            : new Date().toISOString(),
+          created_at: safeIsoDate(d["created_at"], new Date().toISOString()) as string,
         }));
 
         const deletedSet = new Set<string>(serverLicenseState.deletedIds || []);
@@ -737,7 +896,10 @@ async function syncLicensesWithSupabase(force = false): Promise<void> {
         saveServerLicenses();
       }
     } catch (err) {
-      lastCloudLicenseReadError = err instanceof Error ? err.message : String(err);
+      const detailed = extractDetailedError(err, SUPABASE_LICENSES_TABLE);
+      console.error("[supabase-licenses-sync-exception]", detailed);
+      lastCloudLicenseReadError = formatSupabaseLicenseError(detailed);
+      lastCloudLicenseReadErrorDetails = detailed;
     } finally {
       licensesCloudSyncPromise = null;
     }
@@ -1755,6 +1917,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
           cloudLicenseStorageMode: cloudDiag.configured ? "supabase" : "local-memory",
           workspaceLicenseFileActive: isWorkspaceLicensesFileActive(),
           cloudLicenseError: lastCloudLicenseReadError,
+          supabaseError: lastCloudLicenseReadErrorDetails,
         });
       },
       POST: async ({ request }) => {
@@ -1836,11 +1999,19 @@ export const Route = createFileRoute("/api/public/results/sync")({
               : null;
           let cloudLicenseSyncOk: boolean | null = null;
           let cloudLicenseError: string | null = null;
+          let cloudLicenseErrorDetails: DetailedSupabaseError | null = null;
           let uploadedAnimalImageUrl: string | null = null;
           let animalImageStorageError: string | null = null;
-          const trackCloudResult = (res: { ok: boolean; error?: string }) => {
+          const trackCloudResult = (res: {
+            ok: boolean;
+            error?: string;
+            supabaseError?: DetailedSupabaseError;
+          }) => {
             cloudLicenseSyncOk = res.ok;
-            if (!res.ok && res.error) cloudLicenseError = res.error;
+            if (!res.ok) {
+              if (res.error) cloudLicenseError = res.error;
+              if (res.supabaseError) cloudLicenseErrorDetails = res.supabaseError;
+            }
           };
 
           if (licenseAction && typeof licenseAction === "object") {
@@ -2674,13 +2845,33 @@ export const Route = createFileRoute("/api/public/results/sync")({
             licenseActivation,
             cloudLicenseSyncOk,
             cloudLicenseError,
+            supabaseError: cloudLicenseErrorDetails,
             cloudLicenseConfigured: putCloudDiag.configured,
             cloudLicenseStorageMode: putCloudDiag.configured ? "supabase" : "local-memory",
             workspaceLicenseFileActive: isWorkspaceLicensesFileActive(),
           });
         } catch (err) {
+          const detailed = extractDetailedError(err);
+          console.error("[sync-put-unhandled-error]", detailed, err);
+          const formatted = [
+            detailed.code ? `code: ${detailed.code}` : null,
+            `message: ${detailed.message}`,
+            detailed.details ? `details: ${detailed.details}` : null,
+            detailed.hint ? `hint: ${detailed.hint}` : null,
+          ]
+            .filter(Boolean)
+            .join(" | ");
           return noStoreJson(
-            { error: "Error updating result", details: String(err) },
+            {
+              error: formatted,
+              message: detailed.message,
+              code: detailed.code,
+              details: detailed.details,
+              hint: detailed.hint,
+              supabaseError: detailed,
+              cloudLicenseSyncOk: false,
+              cloudLicenseError: formatted,
+            },
             { status: 500 },
           );
         }

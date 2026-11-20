@@ -1,4 +1,4 @@
-// Server-only Supabase client configured via Cloudflare Pages / runtime environment variables.
+// Server-only Supabase client configured via Cloudflare Pages / process.env variables.
 // Uses SUPABASE_URL and SUPABASE_KEY (with fallback to SUPABASE_SERVICE_ROLE_KEY / SUPABASE_PUBLISHABLE_KEY).
 import { createClient } from "@supabase/supabase-js";
 import type { Database } from "./types";
@@ -14,6 +14,30 @@ const INACTIVE_SUPABASE_HOSTS = [
 function isInactiveSupabaseUrl(url?: string): boolean {
   if (!url) return true;
   return INACTIVE_SUPABASE_HOSTS.some((host) => url.includes(host));
+}
+
+function normalizeSupabaseUrl(rawUrl?: string): { url: string | null; error: string | null } {
+  if (!rawUrl) return { url: null, error: null };
+  let cleaned = rawUrl.trim().replace(/\/+$/, "");
+  if (!cleaned) return { url: null, error: null };
+  if (!/^https?:\/\//i.test(cleaned)) {
+    cleaned = `https://${cleaned}`;
+  }
+  try {
+    const parsed = new URL(cleaned);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return {
+        url: null,
+        error: `SUPABASE_URL inválida (${rawUrl}): debe usar protocolo http:// o https://.`,
+      };
+    }
+    return { url: parsed.origin, error: null };
+  } catch {
+    return {
+      url: null,
+      error: `SUPABASE_URL con formato inválido (${rawUrl}). Ejemplo esperado: https://tu-proyecto.supabase.co`,
+    };
+  }
 }
 
 function isNewSupabaseApiKey(value: string): boolean {
@@ -53,10 +77,11 @@ export interface SupabaseCloudDiagnostics {
   hasServiceRoleKey: boolean;
   hasPublishableKey: boolean;
   reason: string | null;
+  initError: string | null;
 }
 
 export function getSupabaseCloudDiagnostics(): SupabaseCloudDiagnostics {
-  const url = readServerEnv("SUPABASE_URL") || readServerEnv("VITE_SUPABASE_URL") || null;
+  const rawUrl = readServerEnv("SUPABASE_URL") || readServerEnv("VITE_SUPABASE_URL");
   const serviceRoleKey =
     readServerEnv("SUPABASE_SERVICE_ROLE_KEY") ||
     readServerEnv("SUPABASE_SECRET_KEY") ||
@@ -68,7 +93,7 @@ export function getSupabaseCloudDiagnostics(): SupabaseCloudDiagnostics {
     readServerEnv("VITE_SUPABASE_ANON_KEY");
   const activeKey = serviceRoleKey || publishableKey;
 
-  if (!url) {
+  if (!rawUrl) {
     return {
       configured: false,
       url: null,
@@ -76,33 +101,51 @@ export function getSupabaseCloudDiagnostics(): SupabaseCloudDiagnostics {
       hasPublishableKey: Boolean(publishableKey),
       reason:
         "No hay SUPABASE_URL configurada en Cloudflare Pages. Agrega SUPABASE_URL y SUPABASE_KEY en Settings → Environment Variables.",
+      initError: null,
     };
   }
-  if (isInactiveSupabaseUrl(url)) {
+
+  const normalized = normalizeSupabaseUrl(rawUrl);
+  if (normalized.error || !normalized.url) {
     return {
       configured: false,
-      url,
+      url: rawUrl,
       hasServiceRoleKey: Boolean(serviceRoleKey),
       hasPublishableKey: Boolean(publishableKey),
-      reason: `La SUPABASE_URL (${url}) corresponde a un proyecto inactivo. Configura un SUPABASE_URL y SUPABASE_KEY activos en Cloudflare Pages.`,
+      reason: normalized.error || `SUPABASE_URL inválida (${rawUrl}).`,
+      initError: normalized.error || `SUPABASE_URL inválida (${rawUrl}).`,
+    };
+  }
+
+  if (isInactiveSupabaseUrl(normalized.url)) {
+    return {
+      configured: false,
+      url: normalized.url,
+      hasServiceRoleKey: Boolean(serviceRoleKey),
+      hasPublishableKey: Boolean(publishableKey),
+      reason: `La SUPABASE_URL (${normalized.url}) corresponde a un proyecto inactivo. Configura un SUPABASE_URL y SUPABASE_KEY activos en Cloudflare Pages.`,
+      initError: null,
     };
   }
   if (!activeKey) {
     return {
       configured: false,
-      url,
+      url: normalized.url,
       hasServiceRoleKey: false,
       hasPublishableKey: false,
       reason:
+        "Falta SUPABASE_KEY (o SUPABASE_SERVICE_ROLE_KEY) en Cloudflare Pages para autenticar contra Supabase.",
+      initError:
         "Falta SUPABASE_KEY (o SUPABASE_SERVICE_ROLE_KEY) en Cloudflare Pages para autenticar contra Supabase.",
     };
   }
   return {
     configured: true,
-    url,
+    url: normalized.url,
     hasServiceRoleKey: Boolean(serviceRoleKey),
     hasPublishableKey: Boolean(publishableKey),
     reason: null,
+    initError: null,
   };
 }
 
@@ -121,15 +164,20 @@ export function createRealSupabaseAdminClient(): ReturnType<typeof createClient<
 
   if (!key) return null;
 
-  return createClient<Database>(diag.url, key, {
-    global: {
-      fetch: createSupabaseFetch(key),
-    },
-    auth: {
-      persistSession: false,
-      autoRefreshToken: false,
-    },
-  });
+  try {
+    return createClient<Database>(diag.url, key, {
+      global: {
+        fetch: createSupabaseFetch(key),
+      },
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+      },
+    });
+  } catch (err) {
+    console.error("[supabase-admin-init-error]", err);
+    return null;
+  }
 }
 
 export function createSupabaseClientWithToken(
@@ -148,19 +196,24 @@ export function createSupabaseClientWithToken(
     readServerEnv("SUPABASE_SECRET_KEY");
   if (!key) return null;
 
-  const baseFetch = createSupabaseFetch(key);
-  return createClient<Database>(diag.url, key, {
-    global: {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
+  try {
+    const baseFetch = createSupabaseFetch(key);
+    return createClient<Database>(diag.url, key, {
+      global: {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+        fetch: baseFetch,
       },
-      fetch: baseFetch,
-    },
-    auth: {
-      persistSession: false,
-      autoRefreshToken: false,
-    },
-  });
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+      },
+    });
+  } catch (err) {
+    console.error("[supabase-token-client-init-error]", err);
+    return null;
+  }
 }
 
 function createSupabaseAdminClient() {
