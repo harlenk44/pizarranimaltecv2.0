@@ -4,6 +4,8 @@ import {
   ZODIAC_SIGNS,
   buildTripleAlertItem,
   formatZodiacSign,
+  mergeTripleResultsPreserveToday,
+  normalizeTripleDrawTime,
   type TripleResult,
 } from "@/lib/triples";
 import { lotteryDate } from "@/lib/lottery-date";
@@ -57,14 +59,34 @@ export default function TriplesAdminManager() {
 
   const fetchTriples = useCallback(async () => {
     setLoading(true);
+    let localCached: TripleResult[] = [];
     try {
-      const res = await fetch("/api/public/results/sync");
+      const raw = localStorage.getItem(TRIPLE_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) localCached = parsed as TripleResult[];
+      }
+    } catch {
+      // ignore
+    }
+
+    try {
+      const res = await fetch("/api/public/results/sync", { cache: "no-store" });
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.tripleResults)) {
-          setResults(data.tripleResults);
+          const deletedIds = Array.isArray(data.deletedTripleIds)
+            ? (data.deletedTripleIds as string[])
+            : [];
+          const merged = mergeTripleResultsPreserveToday(
+            localCached,
+            data.tripleResults as TripleResult[],
+            undefined,
+            deletedIds,
+          );
+          setResults(merged);
           try {
-            localStorage.setItem(TRIPLE_STORAGE_KEY, JSON.stringify(data.tripleResults));
+            localStorage.setItem(TRIPLE_STORAGE_KEY, JSON.stringify(merged));
           } catch {
             // ignore
           }
@@ -76,14 +98,8 @@ export default function TriplesAdminManager() {
       // fallback to localStorage
     }
 
-    try {
-      const raw = localStorage.getItem(TRIPLE_STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) setResults(parsed);
-      }
-    } catch {
-      // ignore
+    if (localCached.length > 0) {
+      setResults(localCached);
     }
     setLoading(false);
   }, []);
@@ -95,19 +111,33 @@ export default function TriplesAdminManager() {
   const handleSyncNow = async () => {
     setSyncing(true);
     try {
-      const res = await fetch("/api/public/results/sync", { method: "POST" });
+      let res = await fetch("/api/public/results/sync", { method: "POST" });
+      if (!res.ok && (res.status === 401 || res.status === 403)) {
+        res = await fetch("/api/public/results/sync", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ syncTriplesNow: true }),
+        });
+      }
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.tripleResults)) {
-          setResults(data.tripleResults);
+          const deletedIds = Array.isArray(data.deletedTripleIds)
+            ? (data.deletedTripleIds as string[])
+            : [];
+          const merged = mergeTripleResultsPreserveToday(
+            results,
+            data.tripleResults as TripleResult[],
+            undefined,
+            deletedIds,
+          );
+          setResults(merged);
           try {
-            localStorage.setItem(TRIPLE_STORAGE_KEY, JSON.stringify(data.tripleResults));
+            localStorage.setItem(TRIPLE_STORAGE_KEY, JSON.stringify(merged));
           } catch {
             // ignore
           }
-          showToast(
-            `Sincronización completada (${data.tripleResults.length} sorteos de Triples activos hoy).`,
-          );
+          showToast(`Sincronización completada (${merged.length} sorteos de Triples activos hoy).`);
         }
       }
     } catch {
@@ -195,7 +225,7 @@ export default function TriplesAdminManager() {
   const handleEditRow = (row: TripleResult) => {
     setSelectedGameId(row.game_id);
     setSelectedDate(row.draw_date);
-    setDrawTime(row.draw_time);
+    setDrawTime(normalizeTripleDrawTime(row.draw_time));
     setTripleA(row.triple_a);
     setTripleB(row.triple_b ?? "");
     setTripleC(row.triple_c ?? "");

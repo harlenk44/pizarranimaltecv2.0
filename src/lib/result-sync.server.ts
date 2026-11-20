@@ -11,6 +11,7 @@ import { createTuazarProvider, TUAZAR_GAME_NAMES } from "@/lib/tuazar-provider.s
 import { deduplicateGamesList, normalizeGameSlug, type CanonicalGameSlug } from "@/lib/game-slugs";
 import { isCustomUploadedGameLogo } from "@/lib/game-logos";
 import { remapInMemoryStoreIds } from "@/lib/consolidate-games-results.server";
+import { lotteryDate } from "@/lib/lottery-date";
 import type { Game } from "@/lib/types";
 
 // Trusted, fixed-origin adapters indexed by canonical slug.
@@ -63,6 +64,41 @@ function isMissingRpcError(err: unknown): boolean {
 }
 
 let supabaseSupportsGameSlugColumn = true;
+let persistedCloudDrawDate = "";
+const persistedCloudDrawKeys = new Set<string>();
+
+function makeDrawPersistKey(
+  gameId: string,
+  drawDate: string,
+  drawTime: string,
+  animalNumber: number,
+  animalName: string,
+): string {
+  return `${gameId}|${drawDate}|${drawTime.slice(0, 5)}|${animalNumber}|${animalName.trim().toLowerCase()}`;
+}
+
+function resetPersistedDrawCacheIfNewDay() {
+  const today = lotteryDate();
+  if (persistedCloudDrawDate !== today) {
+    persistedCloudDrawDate = today;
+    persistedCloudDrawKeys.clear();
+  }
+}
+
+export function markCloudDrawPersisted(
+  gameId: string,
+  drawDate: string,
+  drawTime: string,
+  animalNumber: number,
+  animalName: string,
+): void {
+  resetPersistedDrawCacheIfNewDay();
+  if (drawDate === persistedCloudDrawDate) {
+    persistedCloudDrawKeys.add(
+      makeDrawPersistKey(gameId, drawDate, drawTime, animalNumber, animalName),
+    );
+  }
+}
 
 async function persistAutomaticDrawToSupabase(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -252,44 +288,62 @@ export async function synchronizeAutomaticResults(
   });
 
   const providerMap = options?.providersOverride ?? providersByCanonicalSlug;
-  const reports: SyncReport[] = [];
+  const useCloudSkipCache = options?.supabaseClient === undefined;
+  resetPersistedDrawCacheIfNewDay();
 
-  for (const game of automaticGames) {
-    const canonicalSlug = normalizeGameSlug(game.slug, game.name) as CanonicalGameSlug;
-    const provider = providerMap[canonicalSlug] ?? providerMap[game.slug];
+  // Run all games concurrently (upstream HTML pages are already deduplicated/cached in tuazar-provider.server)
+  const reports: SyncReport[] = await Promise.all(
+    automaticGames.map(async (game): Promise<SyncReport> => {
+      const canonicalSlug = normalizeGameSlug(game.slug, game.name) as CanonicalGameSlug;
+      const provider = providerMap[canonicalSlug] ?? providerMap[game.slug];
 
-    try {
-      const syncGame: SyncGame = {
-        id: game.id,
-        slug: canonicalSlug || game.slug,
-        loading_mode: "automatic",
-        mode: "automatic",
-        is_active: game.is_active !== false,
-      };
-
-      const report = await synchronizeGame(syncGame, provider, async (draw) => {
-        const localPayload = {
-          p_game_id: game.id,
-          p_game_slug: canonicalSlug || game.slug,
-          p_draw_date: draw.draw_date,
-          p_draw_time: draw.draw_time,
-          p_animal_number: draw.animal_number,
-          p_animal_name: draw.animal_name,
+      try {
+        const syncGame: SyncGame = {
+          id: game.id,
+          slug: canonicalSlug || game.slug,
+          loading_mode: "automatic",
+          mode: "automatic",
+          is_active: game.is_active !== false,
         };
-        const { data: localData } = await mockSupabase.rpc("sync_automatic_result", localPayload);
-        const cloudResult = await persistAutomaticDrawToSupabase(
-          realClient,
-          game.id,
-          canonicalSlug || game.slug,
-          draw,
-        );
-        return localData === true || cloudResult === true;
-      });
-      reports.push(report);
-    } catch {
-      reports.push({ game_id: game.id, status: "error", written: 0, preserved: 0 });
-    }
-  }
+
+        return await synchronizeGame(syncGame, provider, async (draw) => {
+          const localPayload = {
+            p_game_id: game.id,
+            p_game_slug: canonicalSlug || game.slug,
+            p_draw_date: draw.draw_date,
+            p_draw_time: draw.draw_time,
+            p_animal_number: draw.animal_number,
+            p_animal_name: draw.animal_name,
+          };
+          const { data: localData } = await mockSupabase.rpc("sync_automatic_result", localPayload);
+
+          const drawKey = makeDrawPersistKey(
+            game.id,
+            draw.draw_date,
+            draw.draw_time,
+            draw.animal_number,
+            draw.animal_name,
+          );
+          if (useCloudSkipCache && persistedCloudDrawKeys.has(drawKey)) {
+            return localData === true;
+          }
+
+          const cloudResult = await persistAutomaticDrawToSupabase(
+            realClient,
+            game.id,
+            canonicalSlug || game.slug,
+            draw,
+          );
+          if (useCloudSkipCache && cloudResult !== null) {
+            persistedCloudDrawKeys.add(drawKey);
+          }
+          return localData === true || cloudResult === true;
+        });
+      } catch {
+        return { game_id: game.id, status: "error", written: 0, preserved: 0 };
+      }
+    }),
+  );
 
   return reports;
 }

@@ -20,7 +20,7 @@ export const LOTERIADEHOY_PRIMARY_URL = "https://loteriadehoy.com/animalitos/res
 export const TUAZAR_PRIMARY_URL = "https://tuazar.com/loteria/animalitos/resultados/";
 export const TUAZAR_FALLBACK_URL = "https://www.tuazar.com/loteria/animalitos/resultados/";
 
-const FETCH_TIMEOUT_MS = 10_000;
+const FETCH_TIMEOUT_MS = 6_000;
 const SNAPSHOT_TTL_MS = 20_000;
 
 const BROWSER_HEADERS: Record<string, string> = {

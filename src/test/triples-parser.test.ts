@@ -4,7 +4,12 @@ import {
   parseLoteriaDeHoyTriplesHtml,
   mergeTriplesResults,
 } from "@/lib/triples-parser";
-import { TRIPLE_GAMES, formatTripleSummary, buildTripleAlertItem } from "@/lib/triples";
+import {
+  TRIPLE_GAMES,
+  formatTripleSummary,
+  buildTripleAlertItem,
+  mergeTripleResultsPreserveToday,
+} from "@/lib/triples";
 
 describe("triples-parser", () => {
   const drawDate = "2026-04-20";
@@ -151,5 +156,86 @@ describe("triples-parser", () => {
     const alertItem = buildTripleAlertItem(newlyAdded[0]!);
     expect(alertItem.gameName).toBe("Triple Ricachona");
     expect(alertItem.animalNumber).toBe(305);
+  });
+
+  it("preserves today's loaded triples when an empty or partial payload arrives and merges HH:MM with HH:MM:00 cleanly", () => {
+    const existing = [
+      {
+        id: "t1",
+        game_id: "triple-zulia",
+        game_slug: "triple-zulia",
+        draw_date: drawDate,
+        draw_time: "12:45",
+        triple_a: "412",
+        triple_b: null,
+        triple_c: null,
+        zodiac_sign: null,
+        source: "automatic" as const,
+        created_at: "2026-04-20T16:45:00Z",
+      },
+      {
+        id: "t2",
+        game_id: "triple-pantera",
+        game_slug: "triple-pantera",
+        draw_date: drawDate,
+        draw_time: "09:00:00",
+        triple_a: "777",
+        triple_b: null,
+        triple_c: null,
+        zodiac_sign: null,
+        source: "manual" as const,
+        created_at: "2026-04-20T13:00:00Z",
+      },
+    ];
+
+    // 1. Empty payload from a cold serverless isolate must NOT wipe out today's triples
+    const afterEmpty = mergeTripleResultsPreserveToday(existing, [], drawDate);
+    expect(afterEmpty).toHaveLength(2);
+    expect(afterEmpty.find((r) => r.game_id === "triple-zulia")?.draw_time).toBe("12:45:00");
+
+    // 2. Partial enrichment with different draw_time format ("12:45:00" vs "12:45") merges without duplicates and protects manual
+    const incoming = [
+      {
+        id: "t1-alt",
+        game_id: "triple-zulia",
+        game_slug: "triple-zulia",
+        draw_date: drawDate,
+        draw_time: "12:45:00",
+        triple_a: "412",
+        triple_b: "809",
+        triple_c: "555",
+        zodiac_sign: "LEO",
+        source: "automatic" as const,
+        created_at: "2026-04-20T16:46:00Z",
+      },
+      {
+        id: "t2-auto",
+        game_id: "triple-pantera",
+        game_slug: "triple-pantera",
+        draw_date: drawDate,
+        draw_time: "09:00",
+        triple_a: "123",
+        source: "automatic" as const,
+        created_at: "2026-04-20T13:05:00Z",
+      },
+    ];
+
+    const merged = mergeTripleResultsPreserveToday(afterEmpty, incoming, drawDate);
+    expect(merged).toHaveLength(2);
+
+    const zulia = merged.find((r) => r.game_id === "triple-zulia");
+    expect(zulia?.triple_a).toBe("412");
+    expect(zulia?.triple_b).toBe("809");
+    expect(zulia?.triple_c).toBe("555");
+    expect(zulia?.zodiac_sign).toBe("LEO");
+
+    const pantera = merged.find((r) => r.game_id === "triple-pantera");
+    expect(pantera?.triple_a).toBe("777");
+    expect(pantera?.source).toBe("manual");
+
+    // 3. Explicit admin deletion removes the item cleanly
+    const afterDelete = mergeTripleResultsPreserveToday(merged, [], drawDate, ["t1"]);
+    expect(afterDelete).toHaveLength(1);
+    expect(afterDelete[0]?.game_id).toBe("triple-pantera");
   });
 });

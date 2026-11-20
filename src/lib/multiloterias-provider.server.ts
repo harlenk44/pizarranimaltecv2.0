@@ -8,7 +8,14 @@ export const MULTILOTERIAS_RESULTS_URL = "https://api.multiloterias.net/api/publ
 export const MULTILOTERIAS_BASE_URL = "https://api.multiloterias.net/api/public";
 
 const CACHE_FILE_ITEMS = "/tmp/multiloterias_items_cache.json";
-const FETCH_TIMEOUT_MS = 15_000;
+const FETCH_TIMEOUT_MS = 5_500;
+const RETRY_TIMEOUT_MS = 3_500;
+const TODAY_CACHE_TTL_MS = 20_000;
+
+let multiloteriasTodayCache: {
+  at: number;
+  promise: Promise<MultiloteriasTodayResponse | null>;
+} | null = null;
 
 function isTransientFetchError(err: unknown): boolean {
   let current: unknown = err;
@@ -104,9 +111,10 @@ const SERVER_HEADERS: Record<string, string> = {
  */
 async function fetchMultiloteriasJsonOnce<T>(
   url: string,
+  timeoutMs = FETCH_TIMEOUT_MS,
 ): Promise<{ status: number; data: T | null }> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
       method: "GET",
@@ -123,31 +131,53 @@ async function fetchMultiloteriasJsonOnce<T>(
   }
 }
 
-export async function fetchMultiloteriasToday(): Promise<MultiloteriasTodayResponse | null> {
-  try {
-    let result: { status: number; data: MultiloteriasTodayResponse | null };
+export async function fetchMultiloteriasToday(
+  forceRefresh = false,
+): Promise<MultiloteriasTodayResponse | null> {
+  const now = Date.now();
+  if (
+    !forceRefresh &&
+    multiloteriasTodayCache &&
+    now - multiloteriasTodayCache.at < TODAY_CACHE_TTL_MS
+  ) {
+    return multiloteriasTodayCache.promise;
+  }
+
+  const run = (async (): Promise<MultiloteriasTodayResponse | null> => {
     try {
-      result =
-        await fetchMultiloteriasJsonOnce<MultiloteriasTodayResponse>(MULTILOTERIAS_RESULTS_URL);
-    } catch (err) {
-      if (isTransientFetchError(err)) {
-        result =
-          await fetchMultiloteriasJsonOnce<MultiloteriasTodayResponse>(MULTILOTERIAS_RESULTS_URL);
-      } else {
-        throw err;
+      let result: { status: number; data: MultiloteriasTodayResponse | null };
+      try {
+        result = await fetchMultiloteriasJsonOnce<MultiloteriasTodayResponse>(
+          MULTILOTERIAS_RESULTS_URL,
+          FETCH_TIMEOUT_MS,
+        );
+      } catch (err) {
+        if (isTransientFetchError(err)) {
+          result = await fetchMultiloteriasJsonOnce<MultiloteriasTodayResponse>(
+            MULTILOTERIAS_RESULTS_URL,
+            RETRY_TIMEOUT_MS,
+          );
+        } else {
+          throw err;
+        }
       }
-    }
-    if (result.status !== 200 && !result.data) {
-      console.warn(`[multiloterias] Fetch today returned status ${result.status}`);
+      if (result.status !== 200 && !result.data) {
+        if (multiloteriasTodayCache?.promise === run) multiloteriasTodayCache = null;
+        console.warn(`[multiloterias] Fetch today returned status ${result.status}`);
+        return null;
+      }
+      return result.data;
+    } catch (err) {
+      if (multiloteriasTodayCache?.promise === run) multiloteriasTodayCache = null;
+      if (!isTransientFetchError(err)) {
+        console.warn("[multiloterias] Fetch today failed:", err);
+      }
       return null;
     }
-    return result.data;
-  } catch (err) {
-    if (!isTransientFetchError(err)) {
-      console.warn("[multiloterias] Fetch today failed:", err);
-    }
-    return null;
-  }
+  })();
+
+  multiloteriasTodayCache = { at: now, promise: run };
+  return run;
 }
 
 /**
@@ -245,6 +275,7 @@ export async function synchronizeMultiloteriasData(
   currentTripleResults: TripleResult[],
   options?: {
     resolveGameId?: (canonicalSlug: string) => string | undefined;
+    forceRefresh?: boolean;
   },
 ): Promise<{
   animalResults: Result[];
@@ -252,7 +283,7 @@ export async function synchronizeMultiloteriasData(
   newAnimalCount: number;
   newTripleCount: number;
 }> {
-  const data = await fetchMultiloteriasToday();
+  const data = await fetchMultiloteriasToday(Boolean(options?.forceRefresh));
   if (!data || !data.juegos || !data.fecha) {
     return {
       animalResults: currentAnimalResults,
@@ -371,10 +402,13 @@ export async function synchronizeMultiloteriasData(
         );
 
         if (existingIdx >= 0) {
-          mergedTriples[existingIdx] = {
-            ...mergedTriples[existingIdx],
-            triple_a: tripleVal,
-          };
+          if (mergedTriples[existingIdx]?.source !== "manual") {
+            mergedTriples[existingIdx] = {
+              ...mergedTriples[existingIdx],
+              draw_time: drawTime,
+              triple_a: tripleVal,
+            };
+          }
         } else {
           mergedTriples.push({
             id: `ml-triple-pantera-${drawDate}-${drawTime}`,
@@ -411,10 +445,13 @@ export async function synchronizeMultiloteriasData(
         );
 
         if (existingIdx >= 0) {
-          mergedTriples[existingIdx] = {
-            ...mergedTriples[existingIdx],
-            triple_a: terminalVal,
-          };
+          if (mergedTriples[existingIdx]?.source !== "manual") {
+            mergedTriples[existingIdx] = {
+              ...mergedTriples[existingIdx],
+              draw_time: drawTime,
+              triple_a: terminalVal,
+            };
+          }
         } else {
           mergedTriples.push({
             id: `ml-terminal-pantera-${drawDate}-${drawTime}`,

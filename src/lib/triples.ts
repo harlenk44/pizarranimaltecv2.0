@@ -162,3 +162,128 @@ export function buildTripleAlertItem(res: TripleResult, game?: TripleGameConfig)
     animalEmoji: "🎰",
   };
 }
+
+/**
+ * Normalizes a triple draw_time string to "HH:MM" for stable slot comparison
+ * across sources (e.g. "08:00:00", "8:00", "08:00" -> "08:00").
+ */
+export function normalizeTripleDrawTimeKey(rawTime?: string | null): string {
+  if (!rawTime) return "";
+  const match = /^(\d{1,2}):(\d{2})/.exec(rawTime.trim());
+  if (!match) return rawTime.trim().slice(0, 5);
+  return `${match[1]!.padStart(2, "0")}:${match[2]!}`;
+}
+
+/**
+ * Normalizes a triple draw_time string to "HH:MM:00" for consistent storage/UI matching.
+ */
+export function normalizeTripleDrawTime(rawTime?: string | null): string {
+  const hhmm = normalizeTripleDrawTimeKey(rawTime);
+  if (!hhmm) return "";
+  return hhmm.length === 5 ? `${hhmm}:00` : hhmm;
+}
+
+function isNonEmptyTripleValue(val?: string | null): val is string {
+  if (!val) return false;
+  const clean = val.trim();
+  return Boolean(clean && clean !== "-" && clean !== "—");
+}
+
+/**
+ * Merges incoming triple results with existing ones while strictly preserving:
+ * - Today's already-loaded results if an incoming payload is empty or partial
+ *   (prevents triples from flickering/disappearing across cold serverless isolates)
+ * - Manual admin overrides against automatic scraper updates
+ * - Field enrichment (triple_b, triple_c, zodiac_sign) across multiple sources
+ * - Explicit admin deletions via deletedIds
+ */
+export function mergeTripleResultsPreserveToday(
+  existing: TripleResult[],
+  incoming: TripleResult[],
+  todayDate?: string,
+  deletedIds?: string[],
+): TripleResult[] {
+  const deletedSet = new Set<string>(deletedIds ?? []);
+  const byKey = new Map<string, TripleResult>();
+
+  const makeKey = (item: TripleResult): string => {
+    const gameKey = (item.game_slug || item.game_id || "").trim().toLowerCase();
+    const timeKey = normalizeTripleDrawTimeKey(item.draw_time);
+    return `${gameKey}|${item.draw_date}|${timeKey}`;
+  };
+
+  for (const item of existing) {
+    if (!item || !item.game_id || !item.draw_date || !item.draw_time) continue;
+    if (deletedSet.has(item.id)) continue;
+    if (todayDate && item.draw_date !== todayDate) continue;
+    if (!isNonEmptyTripleValue(item.triple_a)) continue;
+
+    const normalizedTime = normalizeTripleDrawTime(item.draw_time);
+    const cleanItem: TripleResult = {
+      ...item,
+      game_slug: item.game_slug || item.game_id,
+      draw_time: normalizedTime,
+      triple_a: item.triple_a.trim(),
+      triple_b: isNonEmptyTripleValue(item.triple_b) ? item.triple_b.trim() : null,
+      triple_c: isNonEmptyTripleValue(item.triple_c) ? item.triple_c.trim() : null,
+      zodiac_sign: isNonEmptyTripleValue(item.zodiac_sign) ? item.zodiac_sign.trim() : null,
+    };
+    byKey.set(makeKey(cleanItem), cleanItem);
+  }
+
+  for (const inc of incoming) {
+    if (!inc || !inc.game_id || !inc.draw_date || !inc.draw_time) continue;
+    if (deletedSet.has(inc.id)) continue;
+    if (todayDate && inc.draw_date !== todayDate) continue;
+    if (!isNonEmptyTripleValue(inc.triple_a)) continue;
+
+    const normalizedTime = normalizeTripleDrawTime(inc.draw_time);
+    const cleanInc: TripleResult = {
+      ...inc,
+      game_slug: inc.game_slug || inc.game_id,
+      draw_time: normalizedTime,
+      triple_a: inc.triple_a.trim(),
+      triple_b: isNonEmptyTripleValue(inc.triple_b) ? inc.triple_b.trim() : null,
+      triple_c: isNonEmptyTripleValue(inc.triple_c) ? inc.triple_c.trim() : null,
+      zodiac_sign: isNonEmptyTripleValue(inc.zodiac_sign) ? inc.zodiac_sign.trim() : null,
+    };
+
+    const key = makeKey(cleanInc);
+    const curr = byKey.get(key);
+
+    if (!curr) {
+      byKey.set(key, cleanInc);
+      continue;
+    }
+
+    // Never allow automatic sync to overwrite a manual admin correction
+    if (curr.source === "manual" && cleanInc.source !== "manual") {
+      continue;
+    }
+
+    // If incoming is manual, apply it directly
+    if (cleanInc.source === "manual") {
+      byKey.set(key, {
+        ...curr,
+        ...cleanInc,
+        draw_time: normalizedTime,
+      });
+      continue;
+    }
+
+    // Both automatic: enrich missing fields without dropping already-known fields
+    byKey.set(key, {
+      ...curr,
+      triple_a: cleanInc.triple_a || curr.triple_a,
+      triple_b: cleanInc.triple_b ?? curr.triple_b ?? null,
+      triple_c: cleanInc.triple_c ?? curr.triple_c ?? null,
+      zodiac_sign: cleanInc.zodiac_sign ?? curr.zodiac_sign ?? null,
+    });
+  }
+
+  return [...byKey.values()].sort((a, b) => {
+    if (a.draw_date !== b.draw_date) return a.draw_date.localeCompare(b.draw_date);
+    if (a.draw_time !== b.draw_time) return a.draw_time.localeCompare(b.draw_time);
+    return a.game_id.localeCompare(b.game_id);
+  });
+}

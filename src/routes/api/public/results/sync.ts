@@ -27,7 +27,14 @@ import { ensureCloudflareEnvFromRequest } from "@/lib/cloudflare-env.server";
 import { toSupabaseLicenseUuid, generateLicenseUuid, isValidUuid } from "@/lib/license-lotteries";
 import { resolveCanonicalAnimal, parseCanonicalAnimalNumber } from "@/lib/official-animals";
 import { getGameLogo, isBrokenExternalLogo, isCustomUploadedGameLogo } from "@/lib/game-logos";
-import { TRIPLE_GAMES, buildTripleAlertItem, type TripleResult } from "@/lib/triples";
+import {
+  TRIPLE_GAMES,
+  buildTripleAlertItem,
+  mergeTripleResultsPreserveToday,
+  normalizeTripleDrawTime,
+  normalizeTripleDrawTimeKey,
+  type TripleResult,
+} from "@/lib/triples";
 import {
   areSameCanonicalGame,
   deduplicateGamesList,
@@ -61,6 +68,8 @@ const TMP_CLIENT_LICENSES_FILE = "/tmp/lottery_client_licenses_v2.json";
 const WORKSPACE_CLIENT_LICENSES_FILE = path.join(process.cwd(), "client_licenses.persisted.json");
 
 let serverTripleResults: TripleResult[] = [];
+let serverDeletedTripleIds: string[] = [];
+let serverDeletedTripleDate = "";
 const serverCustomGameLogos: Record<string, string> = {};
 let serverCustomGameLogosVersion = 1;
 let serverGamesVersion = 1;
@@ -73,6 +82,29 @@ let initialAutoSyncDone = false;
 let initialAnimalImagesSeeded = false;
 let initialAppSettingsSeeded = false;
 let initialClientLicensesSeeded = false;
+
+function resetDeletedTriplesIfNewDay() {
+  const today = lotteryDate();
+  if (serverDeletedTripleDate !== today) {
+    serverDeletedTripleDate = today;
+    serverDeletedTripleIds = [];
+  }
+}
+
+function applyIncomingTriplesToServer(incoming: TripleResult[], today = lotteryDate()): number {
+  if (!Array.isArray(incoming) || incoming.length === 0) return 0;
+  resetDeletedTriplesIfNewDay();
+  const prevCount = serverTripleResults.filter((r) => r.draw_date === today).length;
+  serverTripleResults = mergeTripleResultsPreserveToday(
+    serverTripleResults,
+    incoming,
+    today,
+    serverDeletedTripleIds,
+  );
+  saveServerTripleResults();
+  const nextCount = serverTripleResults.filter((r) => r.draw_date === today).length;
+  return Math.max(0, nextCount - prevCount);
+}
 
 function loadServerTripleResults() {
   try {
@@ -1613,6 +1645,20 @@ async function syncResultsWithSupabase(force = false): Promise<void> {
           );
           consolidateInMemoryGamesAndResults();
           saveServerResults();
+          // Seed cloud-persisted draw cache so synchronizeAutomaticResults skips redundant RPCs
+          import("@/lib/result-sync.server")
+            .then(({ markCloudDrawPersisted }) => {
+              for (const row of cloudMapped) {
+                markCloudDrawPersisted(
+                  row.game_id,
+                  row.draw_date,
+                  row.draw_time,
+                  row.animal_number,
+                  row.animal_name,
+                );
+              }
+            })
+            .catch(() => {});
         }
 
         if (
@@ -1718,37 +1764,171 @@ function ensureServerDataInitialized() {
   }
 }
 
-async function syncAppSettingsWithSupabase() {
-  try {
-    const { data, error } = await supabaseAdmin
-      .from("app_settings")
-      .select("*")
-      .eq("id", "global")
-      .maybeSingle();
+let lastAppSettingsCloudSyncAt = 0;
+let appSettingsCloudSyncPromise: Promise<void> | null = null;
+const APP_SETTINGS_CLOUD_TTL_MS = 30_000;
 
-    if (!error && data) {
-      const merged = {
-        ...mockStore.app_settings[0],
-        ...(data as Record<string, unknown>),
-        id: "global",
-      };
-      mockStore.app_settings = [merged as (typeof mockStore.app_settings)[0]];
-      saveServerAppSettings();
-    } else if (!error && !data && mockStore.app_settings[0]) {
-      const sanitizedDb = sanitizeAppSettingsForSupabase({
-        ...mockStore.app_settings[0],
-        id: "global",
-      });
-      await supabaseAdmin.from("app_settings").upsert(sanitizedDb, { onConflict: "id" });
+async function syncAppSettingsWithSupabase(force = false): Promise<void> {
+  const now = Date.now();
+  if (!force && appSettingsCloudSyncPromise) return appSettingsCloudSyncPromise;
+  if (!force && now - lastAppSettingsCloudSyncAt < APP_SETTINGS_CLOUD_TTL_MS) return;
+
+  const run = (async () => {
+    try {
+      const { data, error } = await supabaseAdmin
+        .from("app_settings")
+        .select("*")
+        .eq("id", "global")
+        .maybeSingle();
+
+      if (!error && data) {
+        lastAppSettingsCloudSyncAt = Date.now();
+        const merged = {
+          ...mockStore.app_settings[0],
+          ...(data as Record<string, unknown>),
+          id: "global",
+        };
+        mockStore.app_settings = [merged as (typeof mockStore.app_settings)[0]];
+        saveServerAppSettings();
+      } else if (!error && !data && mockStore.app_settings[0]) {
+        lastAppSettingsCloudSyncAt = Date.now();
+        const sanitizedDb = sanitizeAppSettingsForSupabase({
+          ...mockStore.app_settings[0],
+          id: "global",
+        });
+        await supabaseAdmin.from("app_settings").upsert(sanitizedDb, { onConflict: "id" });
+      }
+    } catch {
+      // ignore
+    } finally {
+      appSettingsCloudSyncPromise = null;
     }
-  } catch {
-    // ignore
-  }
+  })();
+
+  appSettingsCloudSyncPromise = run;
+  return run;
 }
 
 let lastAutoSyncTimestamp = 0;
 let isAutoSyncing = false;
 const AUTO_SYNC_INTERVAL_MS = 15_000;
+
+let lastTriplesSyncTimestamp = 0;
+let triplesFastSyncPromise: Promise<{ newlyAdded: TripleResult[]; newTripleCount: number }> | null =
+  null;
+const TRIPLES_SYNC_INTERVAL_MS = 15_000;
+
+/**
+ * Fast, isolated triples synchronization (LoteriaDeHoy + TuAzar + Multiloterias).
+ * Never waits on animalitos Supabase RPCs, licenses, or animal images.
+ * Applies partial results immediately as each upstream provider responds.
+ */
+async function syncTriplesFast(
+  forceRefresh = false,
+): Promise<{ newlyAdded: TripleResult[]; newTripleCount: number }> {
+  const now = Date.now();
+  const today = lotteryDate();
+  const todayTriplesCount = serverTripleResults.filter((r) => r.draw_date === today).length;
+
+  if (triplesFastSyncPromise) {
+    return triplesFastSyncPromise;
+  }
+  if (
+    !forceRefresh &&
+    todayTriplesCount > 0 &&
+    now - lastTriplesSyncTimestamp < TRIPLES_SYNC_INTERVAL_MS
+  ) {
+    return { newlyAdded: [], newTripleCount: 0 };
+  }
+
+  const run = (async () => {
+    try {
+      loadServerTripleResults();
+      const hadPriorTriples = serverTripleResults.some((r) => r.draw_date === today);
+
+      const [{ synchronizeAutomaticTriplesResults }, { synchronizeMultiloteriasData }] =
+        await Promise.all([
+          import("@/lib/triples-sync.server"),
+          import("@/lib/multiloterias-provider.server"),
+        ]);
+
+      const resolveOfficialGameIdBySlug = (canonicalSlug: string): string | undefined => {
+        const target = mockStore.games.find(
+          (g) => normalizeGameSlug(g.slug, g.name) === canonicalSlug,
+        );
+        return target?.id;
+      };
+
+      const ldhTuazarTask = synchronizeAutomaticTriplesResults(serverTripleResults, {
+        forceRefresh,
+        onPartialResults: (partial) => {
+          applyIncomingTriplesToServer(partial, today);
+        },
+      }).then((res) => {
+        if (res.merged.length > 0) {
+          applyIncomingTriplesToServer(res.merged, today);
+        }
+        return res;
+      });
+
+      const multiloteriasTask = synchronizeMultiloteriasData(
+        mockStore.results,
+        serverTripleResults,
+        {
+          resolveGameId: resolveOfficialGameIdBySlug,
+          forceRefresh,
+        },
+      ).then((mlRes) => {
+        if (mlRes.tripleResults.length > 0) {
+          applyIncomingTriplesToServer(mlRes.tripleResults, today);
+        }
+        if (mlRes.newAnimalCount > 0 || mlRes.animalResults.length > 0) {
+          const mergedAnimals = mergeResultsPreserveToday(mockStore.results, mlRes.animalResults);
+          mockStore.results = sanitizeResultsList(mergedAnimals);
+          consolidateInMemoryGamesAndResults();
+          saveServerResults();
+        }
+        return mlRes;
+      });
+
+      const [triplesSync, mlSync] = await Promise.all([ldhTuazarTask, multiloteriasTask]);
+      lastTriplesSyncTimestamp = Date.now();
+
+      if ((hadPriorTriples && triplesSync.newlyAdded.length > 0) || mlSync.newTripleCount > 0) {
+        const latestTriple =
+          triplesSync.newlyAdded[triplesSync.newlyAdded.length - 1] ||
+          serverTripleResults[serverTripleResults.length - 1];
+        if (latestTriple) {
+          const tripleGame = TRIPLE_GAMES.find(
+            (g) => g.id === latestTriple.game_id || g.slug === latestTriple.game_slug,
+          );
+          if (tripleGame) {
+            const alertPayload = buildTripleAlertItem(latestTriple, tripleGame);
+            serverLatestAlert = alertPayload as unknown as Record<string, unknown>;
+            try {
+              fs.writeFileSync(LATEST_ALERT_FILE, JSON.stringify(alertPayload));
+            } catch {
+              // ignore
+            }
+          }
+        }
+      }
+
+      return {
+        newlyAdded: triplesSync.newlyAdded,
+        newTripleCount: triplesSync.newlyAdded.length + mlSync.newTripleCount,
+      };
+    } catch (err) {
+      console.warn("[triples-fast-sync-warn]", err);
+      return { newlyAdded: [], newTripleCount: 0 };
+    } finally {
+      triplesFastSyncPromise = null;
+    }
+  })();
+
+  triplesFastSyncPromise = run;
+  return run;
+}
 
 async function triggerBackgroundSync(forceWait = false) {
   const now = Date.now();
@@ -1765,18 +1945,18 @@ async function triggerBackgroundSync(forceWait = false) {
     loadServerAnimalImages();
     loadServerLicenses();
     const prevCount = mockStore.results.length;
-    const hadPriorTriples = serverTripleResults.length > 0;
+
+    // Launch fast triples sync IMMEDIATELY in parallel so it never waits for games/animalitos/images
+    const triplesPromise = syncTriplesFast(forceWait).catch(() => ({
+      newlyAdded: [] as TripleResult[],
+      newTripleCount: 0,
+    }));
 
     // Sincronizar juegos primero para asegurar que mockStore.games tenga los UUIDs oficiales de Supabase
     await syncGamesWithSupabase(false).catch(() => {});
 
-    const [
-      { synchronizeAutomaticResults },
-      { synchronizeAutomaticTriplesResults },
-      { synchronizeMultiloteriasData, getCachedMultiloteriasItems },
-    ] = await Promise.all([
+    const [{ synchronizeAutomaticResults }, { getCachedMultiloteriasItems }] = await Promise.all([
       import("@/lib/result-sync.server"),
-      import("@/lib/triples-sync.server"),
       import("@/lib/multiloterias-provider.server"),
     ]);
 
@@ -1787,40 +1967,15 @@ async function triggerBackgroundSync(forceWait = false) {
       return target?.id;
     };
 
-    const [reports, triplesSync, multiloteriasSync] = await Promise.all([
+    const [reports] = await Promise.all([
       synchronizeAutomaticResults(),
-      synchronizeAutomaticTriplesResults(serverTripleResults),
-      synchronizeMultiloteriasData(mockStore.results, serverTripleResults, {
-        resolveGameId: resolveOfficialGameIdBySlug,
-      }),
+      triplesPromise,
       syncLicensesWithSupabase().catch(() => null),
       syncAnimalImagesWithSupabase().catch(() => null),
     ]);
 
-    // Merge Multiloterias animal results with mockStore.results (which synchronizeAutomaticResults mutated in place)
-    // NEVER overwrite mockStore.results with multiloteriasSync.animalResults, or the 9 TuAzar/LoteriaDeHoy games get wiped!
-    if (multiloteriasSync.newAnimalCount > 0 || multiloteriasSync.animalResults.length > 0) {
-      const mergedAnimals = mergeResultsPreserveToday(
-        mockStore.results,
-        multiloteriasSync.animalResults,
-      );
-      mockStore.results = sanitizeResultsList(mergedAnimals);
-    }
     consolidateInMemoryGamesAndResults();
     saveServerResults();
-
-    // Merge triples from both LoteriaDeHoy/TuAzar and Multiloterias
-    serverTripleResults = multiloteriasSync.tripleResults;
-    for (const t of triplesSync.merged) {
-      const exists = serverTripleResults.some(
-        (st) =>
-          st.game_id === t.game_id && st.draw_date === t.draw_date && st.draw_time === t.draw_time,
-      );
-      if (!exists) {
-        serverTripleResults.push(t);
-      }
-    }
-    saveServerTripleResults();
 
     // Ensure Multiloterias official images (including 37-48 for Lottopantera) are stored in memory
     try {
@@ -1874,10 +2029,7 @@ async function triggerBackgroundSync(forceWait = false) {
       // ignore
     }
 
-    const anyWritten =
-      reports.some((r) => r.written > 0) ||
-      multiloteriasSync.newAnimalCount > 0 ||
-      mockStore.results.length > prevCount;
+    const anyWritten = reports.some((r) => r.written > 0) || mockStore.results.length > prevCount;
     if (anyWritten) {
       const latest = mockStore.results[mockStore.results.length - 1];
       if (latest) {
@@ -1914,27 +2066,6 @@ async function triggerBackgroundSync(forceWait = false) {
           fs.writeFileSync(LATEST_ALERT_FILE, JSON.stringify(alertPayload));
         } catch {
           // ignore
-        }
-      }
-    } else if (
-      (hadPriorTriples && triplesSync.newlyAdded.length > 0) ||
-      multiloteriasSync.newTripleCount > 0
-    ) {
-      const latestTriple =
-        triplesSync.newlyAdded[triplesSync.newlyAdded.length - 1] ||
-        serverTripleResults[serverTripleResults.length - 1];
-      if (latestTriple) {
-        const tripleGame = TRIPLE_GAMES.find(
-          (g) => g.id === latestTriple.game_id || g.slug === latestTriple.game_slug,
-        );
-        if (tripleGame) {
-          const alertPayload = buildTripleAlertItem(latestTriple, tripleGame);
-          serverLatestAlert = alertPayload as unknown as Record<string, unknown>;
-          try {
-            fs.writeFileSync(LATEST_ALERT_FILE, JSON.stringify(alertPayload));
-          } catch {
-            // ignore
-          }
         }
       }
     }
@@ -2112,38 +2243,64 @@ export const Route = createFileRoute("/api/public/results/sync")({
         const isPoll = reqUrl.searchParams.get("poll") === "1" || clientGamesVer !== null;
 
         const serverToday = lotteryDate();
+        resetDeletedTriplesIfNewDay();
 
-        // 1. Sincronizar primero games[] desde Supabase para adoptar UUIDs oficiales y normalizar slugs antes del scraper
-        await Promise.race([
-          Promise.all([
-            syncGamesWithSupabase(!isPoll),
-            syncLicensesWithSupabase(!isPoll),
-            syncAppSettingsWithSupabase(),
-            ...(!isPoll ? [syncAnimalImagesWithSupabase()] : []),
-          ]),
-          new Promise((resolve) => setTimeout(resolve, 2500)),
-        ]);
+        const todayTriplesBefore = serverTripleResults.filter(
+          (r) => r.draw_date === serverToday,
+        ).length;
+        const forceTriplesSync = reqUrl.searchParams.get("forceSync") === "1";
 
-        // 2. Cargar resultados de hoy desde Supabase y consolidar posibles huérfanos en memoria
+        // Start fast triples sync IN PARALLEL with Supabase reads when today's triples are empty or stale
+        const triplesNeedSync =
+          forceTriplesSync ||
+          todayTriplesBefore === 0 ||
+          Date.now() - lastTriplesSyncTimestamp >= TRIPLES_SYNC_INTERVAL_MS;
+        const triplesSyncInFlight = triplesNeedSync
+          ? syncTriplesFast(forceTriplesSync).catch(() => ({
+              newlyAdded: [] as TripleResult[],
+              newTripleCount: 0,
+            }))
+          : null;
+
+        // 1. Sincronizar games[], licenses[], appSettings y results[] desde Supabase con timeouts acotados
         await Promise.race([
-          syncResultsWithSupabase(!isPoll),
-          new Promise((resolve) => setTimeout(resolve, 1500)),
+          (async () => {
+            await Promise.all([
+              syncGamesWithSupabase(!isPoll),
+              syncLicensesWithSupabase(!isPoll),
+              syncAppSettingsWithSupabase(!isPoll),
+              ...(!isPoll ? [syncAnimalImagesWithSupabase()] : []),
+            ]);
+            await syncResultsWithSupabase(!isPoll);
+          })(),
+          new Promise((resolve) => setTimeout(resolve, isPoll ? 1200 : 2500)),
         ]);
 
         const todayResultsCount = mockStore.results.filter(
           (r) => r.draw_date === serverToday,
         ).length;
+        const todayTriplesCount = serverTripleResults.filter(
+          (r) => r.draw_date === serverToday,
+        ).length;
 
-        // 3. Await scraper sync when today's results are empty (e.g. cold Cloudflare Worker) or interval elapsed
+        // 2. If today's triples are still empty (cold isolate), wait ONLY on the fast triples promise (max 4.5s)
+        if (triplesSyncInFlight && (todayTriplesCount === 0 || forceTriplesSync)) {
+          await Promise.race([
+            triplesSyncInFlight,
+            new Promise((resolve) => setTimeout(resolve, 4500)),
+          ]);
+        }
+
+        // 3. Trigger full animalitos scraper sync when cold-empty or interval elapsed (non-blocking on warm polls!)
         const isStaleSync = Date.now() - lastAutoSyncTimestamp >= AUTO_SYNC_INTERVAL_MS;
-        const isColdEmpty = todayResultsCount === 0 || serverTripleResults.length === 0;
-        if (!initialAutoSyncDone || isColdEmpty || isStaleSync) {
+        const isColdAnimalitosEmpty = todayResultsCount === 0;
+        if (!initialAutoSyncDone || isColdAnimalitosEmpty || isStaleSync) {
           initialAutoSyncDone = true;
-          const syncPromise = triggerBackgroundSync(isColdEmpty).catch(() => {});
-          if (isColdEmpty) {
-            await Promise.race([syncPromise, new Promise((resolve) => setTimeout(resolve, 6500))]);
-          } else {
-            await Promise.race([syncPromise, new Promise((resolve) => setTimeout(resolve, 1500))]);
+          const syncPromise = triggerBackgroundSync(isColdAnimalitosEmpty).catch(() => {});
+          if (isColdAnimalitosEmpty) {
+            await Promise.race([syncPromise, new Promise((resolve) => setTimeout(resolve, 4500))]);
+          } else if (!isPoll) {
+            await Promise.race([syncPromise, new Promise((resolve) => setTimeout(resolve, 900))]);
           }
         }
 
@@ -2191,6 +2348,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
           serverLotteryDate: serverToday,
           results: mockStore.results,
           tripleResults: serverTripleResults,
+          deletedTripleIds: serverDeletedTripleIds,
           latestAlert,
           logosVersion: serverCustomGameLogosVersion,
           gamesVersion: serverGamesVersion,
@@ -2232,19 +2390,14 @@ export const Route = createFileRoute("/api/public/results/sync")({
             }
           }
           await syncGamesWithSupabase(true);
-          const [{ synchronizeAutomaticResults }, { synchronizeAutomaticTriplesResults }] =
-            await Promise.all([
-              import("@/lib/result-sync.server"),
-              import("@/lib/triples-sync.server"),
-            ]);
-          const [reports, triplesSync] = await Promise.all([
+          const { synchronizeAutomaticResults } = await import("@/lib/result-sync.server");
+          const [reports] = await Promise.all([
             synchronizeAutomaticResults(),
-            synchronizeAutomaticTriplesResults(serverTripleResults),
+            syncTriplesFast(true),
           ]);
           await syncResultsWithSupabase(true);
           consolidateInMemoryGamesAndResults();
           saveServerResults();
-          serverTripleResults = triplesSync.merged;
           saveServerTripleResults();
           return noStoreJson({
             reports,
@@ -2252,6 +2405,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
             games: mockStore.games,
             results: mockStore.results,
             tripleResults: serverTripleResults,
+            deletedTripleIds: serverDeletedTripleIds,
           });
         } catch (err) {
           console.error("[sync-error]", err);
@@ -2290,6 +2444,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
             appSettings,
             consolidateOrphans,
             consolidationOptions,
+            syncTriplesNow,
           } = body;
           let consolidationReport: ConsolidationReport | null = null;
           let licenseActivation: {
@@ -2881,13 +3036,27 @@ export const Route = createFileRoute("/api/public/results/sync")({
             }
           }
 
+          if (syncTriplesNow) {
+            await syncTriplesFast(true);
+          }
+
           if (tripleResult && typeof tripleResult === "object") {
-            const tr = tripleResult as TripleResult;
+            resetDeletedTriplesIfNewDay();
+            const rawTr = tripleResult as TripleResult;
+            const normTime = normalizeTripleDrawTime(rawTr.draw_time);
+            const normTimeKey = normalizeTripleDrawTimeKey(rawTr.draw_time);
+            const tr: TripleResult = {
+              ...rawTr,
+              game_slug: rawTr.game_slug || rawTr.game_id,
+              draw_time: normTime,
+              id: rawTr.id || `triple-${rawTr.game_id}-${rawTr.draw_date}-${normTime}`,
+            };
+            serverDeletedTripleIds = serverDeletedTripleIds.filter((id) => id !== tr.id);
             const conflictIdx = serverTripleResults.findIndex(
               (r) =>
-                r.game_id === tr.game_id &&
+                (r.game_id === tr.game_id || r.game_slug === tr.game_slug) &&
                 r.draw_date === tr.draw_date &&
-                r.draw_time === tr.draw_time,
+                normalizeTripleDrawTimeKey(r.draw_time) === normTimeKey,
             );
             if (conflictIdx >= 0) {
               serverTripleResults[conflictIdx] = {
@@ -2895,15 +3064,16 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 ...tr,
               };
             } else {
-              serverTripleResults.push({
-                ...tr,
-                id: tr.id || `triple-${tr.game_id}-${tr.draw_date}-${tr.draw_time}`,
-              });
+              serverTripleResults.push(tr);
             }
             saveServerTripleResults();
           }
 
           if (deleteTripleId && typeof deleteTripleId === "string") {
+            resetDeletedTriplesIfNewDay();
+            if (!serverDeletedTripleIds.includes(deleteTripleId)) {
+              serverDeletedTripleIds.push(deleteTripleId);
+            }
             serverTripleResults = serverTripleResults.filter((r) => r.id !== deleteTripleId);
             saveServerTripleResults();
           }
@@ -3245,6 +3415,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
             consolidationReport,
             results: mockStore.results,
             tripleResults: serverTripleResults,
+            deletedTripleIds: serverDeletedTripleIds,
             animalImages: filterAdminCustomAnimalImages(mockStore.animal_images),
             uploadedAnimalImageUrl,
             animalImageStorageError,

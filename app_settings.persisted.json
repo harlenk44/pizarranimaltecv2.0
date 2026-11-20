@@ -6,7 +6,7 @@
   "text_color": "#f8fafc",
   "card_color": "#0f172a",
   "result_row_color": "#1e293b",
-  "font_family": "Inter",
+  "font_family": "Georgia",
   "base_font_size": 16,
   "rotation_enabled": false,
   "rotation_interval_seconds": 60,
@@ -17,5 +17,5 @@
   "animal_scale": 100,
   "card_style": "neon",
   "game_colors": {},
-  "updated_at": "2026-11-10T14:40:14.904Z"
+  "updated_at": "2026-11-20T20:03:34.973Z"
 }

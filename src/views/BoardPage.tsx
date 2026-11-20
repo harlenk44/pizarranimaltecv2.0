@@ -24,6 +24,7 @@ import TriplesBoard from "@/components/TriplesBoard";
 import {
   TRIPLE_GAMES,
   buildTripleAlertItem,
+  mergeTripleResultsPreserveToday,
   type TripleGameConfig,
   type TripleResult,
 } from "@/lib/triples";
@@ -801,7 +802,9 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         const raw = localStorage.getItem("pizarra_triple_results");
         if (raw) {
           const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed)) return parsed;
+          if (Array.isArray(parsed)) {
+            return mergeTripleResultsPreserveToday([], parsed as TripleResult[], lotteryDate());
+          }
         }
       } catch {
         // ignore
@@ -809,6 +812,10 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     }
     return [];
   });
+  const tripleResultsRef = useRef<TripleResult[]>(tripleResults);
+  tripleResultsRef.current = tripleResults;
+  const fetchInFlightRef = useRef<boolean>(false);
+  const fetchSeqRef = useRef<number>(0);
   const [autoRotate, setAutoRotate] = useState<boolean>(() => {
     if (typeof window !== "undefined") {
       const saved = localStorage.getItem("pizarra_auto_rotate_views");
@@ -946,532 +953,570 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     setTimerResetKey((prev) => prev + 1);
   };
 
-  const fetchAll = useCallback(async () => {
-    // Ensure local embedded base64 catalog (451 animal images) is loaded in browser RAM
-    await ensureCustomCatalogLoaded().catch(() => {});
+  const fetchAll = useCallback(
+    async (force = false) => {
+      if (fetchInFlightRef.current && !force) return;
+      fetchInFlightRef.current = true;
+      const reqSeq = ++fetchSeqRef.current;
 
-    // 1. Sync from server backend to get latest results, alerts, and custom animal videos/images
-    let serverSyncedResults: Result[] = [];
-    let serverSyncedTriples: TripleResult[] = [];
-    let syncData: Record<string, unknown> | null = null;
-    try {
-      const q = new URLSearchParams();
-      q.set("poll", "1");
-      if (lastLogosVersionRef.current) q.set("logosVersion", String(lastLogosVersionRef.current));
-      if (lastGamesVersionRef.current) q.set("gamesVersion", String(lastGamesVersionRef.current));
-      if (lastImagesVersionRef.current)
-        q.set("imagesVersion", String(lastImagesVersionRef.current));
-      if (lastSettingsVersionRef.current)
-        q.set("settingsVersion", String(lastSettingsVersionRef.current));
+      try {
+        // Ensure local embedded base64 catalog (451 animal images) is loaded in browser RAM
+        await ensureCustomCatalogLoaded().catch(() => {});
 
-      const syncRes = await fetch(`/api/public/results/sync?${q.toString()}`, {
-        cache: "no-store",
-      });
-      if (syncRes.ok) {
-        syncData = await syncRes.json();
+        // 1. Sync from server backend to get latest results, alerts, and custom animal videos/images
+        let serverSyncedResults: Result[] = [];
+        let serverSyncedTriples: TripleResult[] = tripleResultsRef.current;
+        let syncData: Record<string, unknown> | null = null;
+        const todayDate = lotteryDate();
+        try {
+          const q = new URLSearchParams();
+          q.set("poll", "1");
+          if (lastLogosVersionRef.current)
+            q.set("logosVersion", String(lastLogosVersionRef.current));
+          if (lastGamesVersionRef.current)
+            q.set("gamesVersion", String(lastGamesVersionRef.current));
+          if (lastImagesVersionRef.current)
+            q.set("imagesVersion", String(lastImagesVersionRef.current));
+          if (lastSettingsVersionRef.current)
+            q.set("settingsVersion", String(lastSettingsVersionRef.current));
 
-        if (syncData?.logosVersion) lastLogosVersionRef.current = Number(syncData.logosVersion);
-        if (syncData?.gamesVersion) lastGamesVersionRef.current = Number(syncData.gamesVersion);
-        if (syncData?.imagesVersion) lastImagesVersionRef.current = Number(syncData.imagesVersion);
-        if (syncData?.settingsVersion)
-          lastSettingsVersionRef.current = Number(syncData.settingsVersion);
+          const syncRes = await fetch(`/api/public/results/sync?${q.toString()}`, {
+            cache: "no-store",
+          });
+          // Discard stale out-of-order response if a newer fetch already started
+          if (reqSeq !== fetchSeqRef.current) return;
 
-        // Sync all latest results from server into client mockStore & storage without erasing today's existing slots
-        if (Array.isArray(syncData?.results) && syncData.results.length > 0) {
-          const todayDate = lotteryDate();
-          const mergedResults = mergeResultsPreserveToday(
-            mockStore.results as Result[],
-            syncData.results as Result[],
-            todayDate,
-          );
-          serverSyncedResults = mergedResults;
-          mockStore.results = mergedResults;
-          try {
-            localStorage.setItem("pizarra_mock_results", JSON.stringify(mergedResults));
-          } catch {
-            // ignore
-          }
-        }
+          if (syncRes.ok) {
+            syncData = await syncRes.json();
+            if (reqSeq !== fetchSeqRef.current) return;
 
-        // Sync triples results from server only if changed
-        if (Array.isArray(syncData?.tripleResults)) {
-          serverSyncedTriples = syncData.tripleResults as TripleResult[];
-          const tJson = JSON.stringify(syncData.tripleResults);
-          if (lastTripleResultsJsonRef.current !== tJson) {
-            lastTripleResultsJsonRef.current = tJson;
-            setTripleResults(syncData.tripleResults as TripleResult[]);
-            try {
-              localStorage.setItem("pizarra_triple_results", tJson);
-            } catch {
-              // ignore
+            if (syncData?.logosVersion) lastLogosVersionRef.current = Number(syncData.logosVersion);
+            if (syncData?.gamesVersion) lastGamesVersionRef.current = Number(syncData.gamesVersion);
+            if (syncData?.imagesVersion)
+              lastImagesVersionRef.current = Number(syncData.imagesVersion);
+            if (syncData?.settingsVersion)
+              lastSettingsVersionRef.current = Number(syncData.settingsVersion);
+
+            // Sync all latest results from server into client mockStore & storage without erasing today's existing slots
+            if (Array.isArray(syncData?.results) && syncData.results.length > 0) {
+              const mergedResults = mergeResultsPreserveToday(
+                mockStore.results as Result[],
+                syncData.results as Result[],
+                todayDate,
+              );
+              serverSyncedResults = mergedResults;
+              mockStore.results = mergedResults;
+              try {
+                localStorage.setItem("pizarra_mock_results", JSON.stringify(mergedResults));
+              } catch {
+                // ignore
+              }
+            }
+
+            // Merge triples results preserving today's already-loaded slots (never blank out on empty cold-isolate responses!)
+            if (Array.isArray(syncData?.tripleResults)) {
+              const deletedTripleIds = Array.isArray(syncData?.deletedTripleIds)
+                ? (syncData.deletedTripleIds as string[])
+                : [];
+              const mergedTriples = mergeTripleResultsPreserveToday(
+                tripleResultsRef.current,
+                syncData.tripleResults as TripleResult[],
+                todayDate,
+                deletedTripleIds,
+              );
+              serverSyncedTriples = mergedTriples;
+              const tJson = JSON.stringify(mergedTriples);
+              if (lastTripleResultsJsonRef.current !== tJson) {
+                lastTripleResultsJsonRef.current = tJson;
+                tripleResultsRef.current = mergedTriples;
+                setTripleResults(mergedTriples);
+                try {
+                  localStorage.setItem("pizarra_triple_results", tJson);
+                } catch {
+                  // ignore
+                }
+              }
+            }
+
+            // Sync custom admin animal images into mockStore & localStorage ONLY if server sent them
+            if (Array.isArray(syncData?.animalImages)) {
+              const localCustom = recoverCustomAnimalImagesFromLocalStorage();
+              const serverImages = syncData.animalImages as AnimalImage[];
+              if (serverImages.length > 0 || localCustom.length > 0) {
+                const merged = mergeAnimalImagesPreserveCustom(
+                  mockStore.animal_images,
+                  serverImages,
+                  localCustom,
+                );
+                mockStore.animal_images = merged;
+                const customOnly = filterAdminCustomAnimalImages(merged);
+                try {
+                  const serialized = JSON.stringify(customOnly);
+                  if (localStorage.getItem("pizarra_user_custom_animal_images_v2") !== serialized) {
+                    localStorage.setItem("pizarra_user_custom_animal_images_v2", serialized);
+                    localStorage.setItem("pizarra_custom_animal_images", serialized);
+                  }
+                } catch {
+                  // ignore
+                }
+              }
+            }
+
+            // Sync custom game logos ONLY if server sent them
+            if (syncData?.customGameLogos && typeof syncData.customGameLogos === "object") {
+              const serverLogosMap = syncData.customGameLogos as Record<string, string>;
+              mergeCustomGameLogosMap(serverLogosMap);
+            }
+
+            // Sync games configuration (active state, display_order, additions/deletions) whenever sent by server
+            if (Array.isArray(syncData?.games) && syncData.games.length > 0) {
+              const serverGames = syncData.games as Game[];
+              const serverIds = new Set(serverGames.map((g) => g.id));
+              const prunedLocal = mockStore.games.filter((g) => serverIds.has(g.id));
+              mockStore.games = mergeGamesPreserveCustomLogos(prunedLocal, serverGames);
+              try {
+                localStorage.setItem("pizarra_persisted_games", JSON.stringify(mockStore.games));
+              } catch {
+                // ignore
+              }
+            }
+
+            // Sync appSettings from cloud/server into BoardSettingsContext and localStorage
+            if (syncData?.appSettings && typeof syncData.appSettings === "object") {
+              const incoming = syncData.appSettings as AppSettings;
+              const incomingTime = incoming.updated_at
+                ? new Date(incoming.updated_at).getTime()
+                : 0;
+              let localTime = 0;
+              try {
+                const raw = localStorage.getItem("pizarra_app_settings");
+                if (raw) {
+                  const parsed = JSON.parse(raw);
+                  if (parsed?.updated_at) localTime = new Date(parsed.updated_at).getTime();
+                }
+              } catch {
+                // ignore
+              }
+              if (incomingTime >= localTime || localTime === 0) {
+                updateSettings(incoming);
+              }
+            }
+
+            // If server broadcasted a latestAlert, announce it only if this draw hasn't been alerted yet
+            if (syncData?.latestAlert && (syncData.latestAlert as Record<string, unknown>).id) {
+              const alert = syncData.latestAlert as ResultAlertItem;
+              const enqueued = enqueueUniqueAlert(alert);
+              if (enqueued) {
+                scheduleHardReload(alert.id);
+              }
             }
           }
+        } catch {
+          // server route may be temporarily busy
         }
 
-        // Sync custom admin animal images into mockStore & localStorage ONLY if server sent them
-        if (Array.isArray(syncData?.animalImages)) {
-          const localCustom = recoverCustomAnimalImagesFromLocalStorage();
-          const serverImages = syncData.animalImages as AnimalImage[];
-          if (serverImages.length > 0 || localCustom.length > 0) {
-            const merged = mergeAnimalImagesPreserveCustom(
-              mockStore.animal_images,
-              serverImages,
-              localCustom,
-            );
-            mockStore.animal_images = merged;
-            const customOnly = filterAdminCustomAnimalImages(merged);
+        let loadedGames = cachedGamesDataRef.current;
+        const hasServerGamesUpdate = Array.isArray(syncData?.games) && syncData.games.length > 0;
+        if (!gamesLoadedRef.current || hasServerGamesUpdate) {
+          let resolvedGames: Game[] = [];
+          let fetchedFromSource = false;
+          const hasExternalSupabase =
+            typeof import.meta.env["VITE_SUPABASE_URL"] === "string" &&
+            import.meta.env["VITE_SUPABASE_URL"].includes(".supabase.co");
+
+          if (hasExternalSupabase) {
             try {
-              const serialized = JSON.stringify(customOnly);
-              if (localStorage.getItem("pizarra_user_custom_animal_images_v2") !== serialized) {
-                localStorage.setItem("pizarra_user_custom_animal_images_v2", serialized);
-                localStorage.setItem("pizarra_custom_animal_images", serialized);
+              const { data: gamesData, error: gamesErr } = await supabase
+                .from("games")
+                .select("*")
+                .eq("is_active", true)
+                .order("display_order");
+              if (!gamesErr && Array.isArray(gamesData)) {
+                resolvedGames = gamesData as Game[];
+                fetchedFromSource = true;
+              }
+            } catch {
+              // Fallback when external Supabase is unreachable
+            }
+          }
+
+          if (!fetchedFromSource) {
+            if (hasServerGamesUpdate) {
+              resolvedGames = (mockStore.games as Game[])
+                .filter((g) => g.is_active !== false)
+                .sort((a, b) => a.display_order - b.display_order);
+              fetchedFromSource = true;
+            } else {
+              try {
+                const { data: gamesData, error: gamesErr } = await supabase
+                  .from("games")
+                  .select("*")
+                  .eq("is_active", true)
+                  .order("display_order");
+                if (!gamesErr && Array.isArray(gamesData)) {
+                  resolvedGames = gamesData as Game[];
+                  fetchedFromSource = true;
+                }
+              } catch {
+                // Fallback
+              }
+              if (!fetchedFromSource) {
+                resolvedGames = (mockStore.games as Game[])
+                  .filter((g) => g.is_active !== false)
+                  .sort((a, b) => a.display_order - b.display_order);
+                fetchedFromSource = true;
+              }
+            }
+          }
+
+          if (fetchedFromSource) {
+            cachedGamesDataRef.current = resolvedGames;
+            loadedGames = resolvedGames;
+            getCustomGameLogosMap();
+            const gamesWithLogos = resolvedGames.map((g) => ({
+              ...g,
+              logo_url: preloadImageOnce(getGameLogo(g, g.color)),
+            }));
+            const gamesJson = JSON.stringify(gamesWithLogos);
+            if (lastGamesJsonRef.current !== gamesJson) {
+              lastGamesJsonRef.current = gamesJson;
+              setGames(gamesWithLogos);
+            }
+            gamesLoadedRef.current = true;
+          }
+        }
+
+        if (!loadedGames) return;
+
+        let imgMap = cachedImgMapRef.current;
+        let nameMap = cachedNameMapRef.current;
+        let labelMap = cachedLabelMapRef.current;
+
+        const shouldRefreshMedia = !mediaLoadedRef.current || Array.isArray(syncData?.animalImages);
+        if (shouldRefreshMedia) {
+          const localRecoveredCustom = recoverCustomAnimalImagesFromLocalStorage();
+          let localCachedImages: AnimalImage[] = [];
+          if (typeof window !== "undefined") {
+            try {
+              const localRaw =
+                localStorage.getItem("pizarra_user_custom_animal_images_v2") ||
+                localStorage.getItem("pizarra_custom_animal_images");
+              if (localRaw) {
+                const parsed = JSON.parse(localRaw);
+                if (Array.isArray(parsed)) localCachedImages = parsed;
               }
             } catch {
               // ignore
             }
           }
-        }
 
-        // Sync custom game logos ONLY if server sent them
-        if (syncData?.customGameLogos && typeof syncData.customGameLogos === "object") {
-          const serverLogosMap = syncData.customGameLogos as Record<string, string>;
-          mergeCustomGameLogosMap(serverLogosMap);
-        }
-
-        // Sync games configuration (active state, display_order, additions/deletions) whenever sent by server
-        if (Array.isArray(syncData?.games) && syncData.games.length > 0) {
-          const serverGames = syncData.games as Game[];
-          const serverIds = new Set(serverGames.map((g) => g.id));
-          const prunedLocal = mockStore.games.filter((g) => serverIds.has(g.id));
-          mockStore.games = mergeGamesPreserveCustomLogos(prunedLocal, serverGames);
+          let dbImages: AnimalImage[] = [];
+          let dbEntries: AnimalEntry[] = [];
           try {
-            localStorage.setItem("pizarra_persisted_games", JSON.stringify(mockStore.games));
-          } catch {
-            // ignore
-          }
-        }
-
-        // Sync appSettings from cloud/server into BoardSettingsContext and localStorage
-        if (syncData?.appSettings && typeof syncData.appSettings === "object") {
-          const incoming = syncData.appSettings as AppSettings;
-          const incomingTime = incoming.updated_at ? new Date(incoming.updated_at).getTime() : 0;
-          let localTime = 0;
-          try {
-            const raw = localStorage.getItem("pizarra_app_settings");
-            if (raw) {
-              const parsed = JSON.parse(raw);
-              if (parsed?.updated_at) localTime = new Date(parsed.updated_at).getTime();
+            const [imagesData, entriesData] = await Promise.all([
+              supabase.from("animal_images").select("*"),
+              supabase.from("animal_entries").select("*"),
+            ]);
+            if (Array.isArray(imagesData?.data) && imagesData.data.length > 0) {
+              dbImages = imagesData.data as AnimalImage[];
+            }
+            if (Array.isArray(entriesData?.data) && entriesData.data.length > 0) {
+              dbEntries = entriesData.data as AnimalEntry[];
             }
           } catch {
-            // ignore
+            // Fallback to mockStore below
           }
-          if (incomingTime >= localTime || localTime === 0) {
-            updateSettings(incoming);
+
+          if (dbImages.length === 0) {
+            dbImages = mockStore.animal_images as AnimalImage[];
           }
-        }
-
-        // If server broadcasted a latestAlert, announce it only if this draw hasn't been alerted yet
-        if (syncData?.latestAlert && (syncData.latestAlert as Record<string, unknown>).id) {
-          const alert = syncData.latestAlert as ResultAlertItem;
-          const enqueued = enqueueUniqueAlert(alert);
-          if (enqueued) {
-            scheduleHardReload(alert.id);
+          if (dbEntries.length === 0) {
+            dbEntries = mockStore.animal_entries as AnimalEntry[];
           }
-        }
-      }
-    } catch {
-      // server route may be temporarily busy
-    }
 
-    let loadedGames = cachedGamesDataRef.current;
-    const hasServerGamesUpdate = Array.isArray(syncData?.games) && syncData.games.length > 0;
-    if (!gamesLoadedRef.current || hasServerGamesUpdate) {
-      let resolvedGames: Game[] = [];
-      let fetchedFromSource = false;
-      const hasExternalSupabase =
-        typeof import.meta.env["VITE_SUPABASE_URL"] === "string" &&
-        import.meta.env["VITE_SUPABASE_URL"].includes(".supabase.co");
+          const nextImgMap: AnimalImageMap = { ...imgMap };
 
-      if (hasExternalSupabase) {
-        try {
-          const { data: gamesData, error: gamesErr } = await supabase
-            .from("games")
-            .select("*")
-            .eq("is_active", true)
-            .order("display_order");
-          if (!gamesErr && Array.isArray(gamesData)) {
-            resolvedGames = gamesData as Game[];
-            fetchedFromSource = true;
-          }
-        } catch {
-          // Fallback when external Supabase is unreachable
-        }
-      }
+          const combinedImages: AnimalImage[] = mergeAnimalImagesPreserveCustom(
+            dbImages,
+            localCachedImages,
+            localRecoveredCustom,
+          );
 
-      if (!fetchedFromSource) {
-        if (hasServerGamesUpdate) {
-          resolvedGames = (mockStore.games as Game[])
-            .filter((g) => g.is_active !== false)
-            .sort((a, b) => a.display_order - b.display_order);
-          fetchedFromSource = true;
-        } else {
-          try {
-            const { data: gamesData, error: gamesErr } = await supabase
-              .from("games")
-              .select("*")
-              .eq("is_active", true)
-              .order("display_order");
-            if (!gamesErr && Array.isArray(gamesData)) {
-              resolvedGames = gamesData as Game[];
-              fetchedFromSource = true;
+          for (const img of combinedImages) {
+            if (!img?.image_url || !isRealAnimalMediaUrl(img.image_url)) continue;
+            nextImgMap[`${img.game_id}:${img.animal_number}`] = img.image_url;
+            if (!nextImgMap[`any:${img.animal_number}`]) {
+              nextImgMap[`any:${img.animal_number}`] = img.image_url;
             }
-          } catch {
-            // Fallback
+            const matchedGame = loadedGames.find(
+              (g) => g.id === img.game_id || g.slug === img.game_id,
+            );
+            if (matchedGame) {
+              nextImgMap[`${matchedGame.id}:${img.animal_number}`] = img.image_url;
+              nextImgMap[`${matchedGame.slug}:${img.animal_number}`] = img.image_url;
+            }
           }
-          if (!fetchedFromSource) {
-            resolvedGames = (mockStore.games as Game[])
-              .filter((g) => g.is_active !== false)
-              .sort((a, b) => a.display_order - b.display_order);
-            fetchedFromSource = true;
+
+          const nextImgJson = JSON.stringify(nextImgMap);
+          if (lastImgMapJsonRef.current !== nextImgJson) {
+            lastImgMapJsonRef.current = nextImgJson;
+            imgMap = nextImgMap;
+            cachedImgMapRef.current = nextImgMap;
+            animalImagesRef.current = nextImgMap;
+            setAnimalImages(nextImgMap);
           }
-        }
-      }
 
-      if (fetchedFromSource) {
-        cachedGamesDataRef.current = resolvedGames;
-        loadedGames = resolvedGames;
-        getCustomGameLogosMap();
-        const gamesWithLogos = resolvedGames.map((g) => ({
-          ...g,
-          logo_url: preloadImageOnce(getGameLogo(g, g.color)),
-        }));
-        const gamesJson = JSON.stringify(gamesWithLogos);
-        if (lastGamesJsonRef.current !== gamesJson) {
-          lastGamesJsonRef.current = gamesJson;
-          setGames(gamesWithLogos);
-        }
-        gamesLoadedRef.current = true;
-      }
-    }
-
-    if (!loadedGames) return;
-
-    let imgMap = cachedImgMapRef.current;
-    let nameMap = cachedNameMapRef.current;
-    let labelMap = cachedLabelMapRef.current;
-
-    const shouldRefreshMedia = !mediaLoadedRef.current || Array.isArray(syncData?.animalImages);
-    if (shouldRefreshMedia) {
-      const localRecoveredCustom = recoverCustomAnimalImagesFromLocalStorage();
-      let localCachedImages: AnimalImage[] = [];
-      if (typeof window !== "undefined") {
-        try {
-          const localRaw =
-            localStorage.getItem("pizarra_user_custom_animal_images_v2") ||
-            localStorage.getItem("pizarra_custom_animal_images");
-          if (localRaw) {
-            const parsed = JSON.parse(localRaw);
-            if (Array.isArray(parsed)) localCachedImages = parsed;
+          const nextNameMap: AnimalNameMap = {};
+          const nextLabelMap: AnimalLabelMap = {};
+          for (const entry of dbEntries) {
+            nextNameMap[`${entry.game_id}:${entry.number}`] = entry.name;
+            if (entry.label) nextLabelMap[`${entry.game_id}:${entry.number}`] = entry.label;
+            const matchedGame = loadedGames.find(
+              (g) => g.id === entry.game_id || g.slug === entry.game_id,
+            );
+            if (matchedGame) {
+              nextNameMap[`${matchedGame.id}:${entry.number}`] = entry.name;
+              nextNameMap[`${matchedGame.slug}:${entry.number}`] = entry.name;
+              if (entry.label) {
+                nextLabelMap[`${matchedGame.id}:${entry.number}`] = entry.label;
+                nextLabelMap[`${matchedGame.slug}:${entry.number}`] = entry.label;
+              }
+            }
           }
-        } catch {
-          // ignore
-        }
-      }
 
-      let dbImages: AnimalImage[] = [];
-      let dbEntries: AnimalEntry[] = [];
-      try {
-        const [imagesData, entriesData] = await Promise.all([
-          supabase.from("animal_images").select("*"),
-          supabase.from("animal_entries").select("*"),
-        ]);
-        if (Array.isArray(imagesData?.data) && imagesData.data.length > 0) {
-          dbImages = imagesData.data as AnimalImage[];
-        }
-        if (Array.isArray(entriesData?.data) && entriesData.data.length > 0) {
-          dbEntries = entriesData.data as AnimalEntry[];
-        }
-      } catch {
-        // Fallback to mockStore below
-      }
-
-      if (dbImages.length === 0) {
-        dbImages = mockStore.animal_images as AnimalImage[];
-      }
-      if (dbEntries.length === 0) {
-        dbEntries = mockStore.animal_entries as AnimalEntry[];
-      }
-
-      const nextImgMap: AnimalImageMap = { ...imgMap };
-
-      const combinedImages: AnimalImage[] = mergeAnimalImagesPreserveCustom(
-        dbImages,
-        localCachedImages,
-        localRecoveredCustom,
-      );
-
-      for (const img of combinedImages) {
-        if (!img?.image_url || !isRealAnimalMediaUrl(img.image_url)) continue;
-        nextImgMap[`${img.game_id}:${img.animal_number}`] = img.image_url;
-        if (!nextImgMap[`any:${img.animal_number}`]) {
-          nextImgMap[`any:${img.animal_number}`] = img.image_url;
-        }
-        const matchedGame = loadedGames.find((g) => g.id === img.game_id || g.slug === img.game_id);
-        if (matchedGame) {
-          nextImgMap[`${matchedGame.id}:${img.animal_number}`] = img.image_url;
-          nextImgMap[`${matchedGame.slug}:${img.animal_number}`] = img.image_url;
-        }
-      }
-
-      const nextImgJson = JSON.stringify(nextImgMap);
-      if (lastImgMapJsonRef.current !== nextImgJson) {
-        lastImgMapJsonRef.current = nextImgJson;
-        imgMap = nextImgMap;
-        cachedImgMapRef.current = nextImgMap;
-        animalImagesRef.current = nextImgMap;
-        setAnimalImages(nextImgMap);
-      }
-
-      const nextNameMap: AnimalNameMap = {};
-      const nextLabelMap: AnimalLabelMap = {};
-      for (const entry of dbEntries) {
-        nextNameMap[`${entry.game_id}:${entry.number}`] = entry.name;
-        if (entry.label) nextLabelMap[`${entry.game_id}:${entry.number}`] = entry.label;
-        const matchedGame = loadedGames.find(
-          (g) => g.id === entry.game_id || g.slug === entry.game_id,
-        );
-        if (matchedGame) {
-          nextNameMap[`${matchedGame.id}:${entry.number}`] = entry.name;
-          nextNameMap[`${matchedGame.slug}:${entry.number}`] = entry.name;
-          if (entry.label) {
-            nextLabelMap[`${matchedGame.id}:${entry.number}`] = entry.label;
-            nextLabelMap[`${matchedGame.slug}:${entry.number}`] = entry.label;
+          const nextNameJson = JSON.stringify(nextNameMap);
+          if (lastNameMapJsonRef.current !== nextNameJson) {
+            lastNameMapJsonRef.current = nextNameJson;
+            nameMap = nextNameMap;
+            cachedNameMapRef.current = nextNameMap;
+            setAnimalNames(nextNameMap);
           }
-        }
-      }
 
-      const nextNameJson = JSON.stringify(nextNameMap);
-      if (lastNameMapJsonRef.current !== nextNameJson) {
-        lastNameMapJsonRef.current = nextNameJson;
-        nameMap = nextNameMap;
-        cachedNameMapRef.current = nextNameMap;
-        setAnimalNames(nextNameMap);
-      }
-
-      const nextLabelJson = JSON.stringify(nextLabelMap);
-      if (lastLabelMapJsonRef.current !== nextLabelJson) {
-        lastLabelMapJsonRef.current = nextLabelJson;
-        labelMap = nextLabelMap;
-        cachedLabelMapRef.current = nextLabelMap;
-        setAnimalLabels(nextLabelMap);
-      }
-
-      mediaLoadedRef.current = true;
-    }
-
-    const today = lotteryDate();
-
-    const resultsPromises = await Promise.all(
-      loadedGames.map(async (g) => {
-        const matching = serverSyncedResults.filter(
-          (r) => r.game_id === g.id && r.draw_date === today,
-        );
-        if (matching.length > 0) {
-          matching.sort((a, b) => a.draw_time.localeCompare(b.draw_time));
-          return { gameId: g.id, results: matching };
-        }
-
-        try {
-          const { data } = await supabase
-            .from("results")
-            .select("*")
-            .eq("game_id", g.id)
-            .eq("draw_date", today)
-            .order("draw_time", { ascending: true });
-          if (Array.isArray(data) && data.length > 0) {
-            return { gameId: g.id, results: data as Result[] };
+          const nextLabelJson = JSON.stringify(nextLabelMap);
+          if (lastLabelMapJsonRef.current !== nextLabelJson) {
+            lastLabelMapJsonRef.current = nextLabelJson;
+            labelMap = nextLabelMap;
+            cachedLabelMapRef.current = nextLabelMap;
+            setAnimalLabels(nextLabelMap);
           }
-        } catch {
-          // Fallback to mockStore.results
+
+          mediaLoadedRef.current = true;
         }
 
-        const fallbackResults = (mockStore.results as Result[])
-          .filter((r) => r.game_id === g.id && r.draw_date === today)
-          .sort((a, b) => a.draw_time.localeCompare(b.draw_time));
-        return { gameId: g.id, results: fallbackResults };
-      }),
-    );
+        const today = lotteryDate();
 
-    const map: Record<string, Result[]> = {};
-    const newAlerts: ResultAlertItem[] = [];
-    const prevResultsByGame = resultsMapRef.current;
+        const serverRespondedOk = syncData !== null;
+        const resultsPromises = await Promise.all(
+          loadedGames.map(async (g) => {
+            const matching = serverSyncedResults.filter(
+              (r) => r.game_id === g.id && r.draw_date === today,
+            );
+            if (matching.length > 0) {
+              matching.sort((a, b) => a.draw_time.localeCompare(b.draw_time));
+              return { gameId: g.id, results: matching };
+            }
 
-    for (const r of resultsPromises) {
-      const gameObj = loadedGames.find((g) => g.id === r.gameId);
-      if (!gameObj) {
-        map[r.gameId] = r.results;
-        continue;
-      }
+            // Only hit Supabase directly from browser when backend sync did not respond (avoids N redundant queries every poll)
+            if (!serverRespondedOk) {
+              try {
+                const { data } = await supabase
+                  .from("results")
+                  .select("*")
+                  .eq("game_id", g.id)
+                  .eq("draw_date", today)
+                  .order("draw_time", { ascending: true });
+                if (Array.isArray(data) && data.length > 0) {
+                  return { gameId: g.id, results: data as Result[] };
+                }
+              } catch {
+                // Fallback to mockStore.results
+              }
+            }
 
-      const prevGameResults = (prevResultsByGame[r.gameId] ?? []).filter(
-        (pr) => pr.draw_date === today,
-      );
-      const mergedForGame = mergeResultsPreserveToday(prevGameResults, r.results, today).sort(
-        (a, b) => a.draw_time.localeCompare(b.draw_time),
-      );
-      const frozenGameResults: Result[] = [];
-
-      for (const rawRes of mergedForGame) {
-        const slotKey = rawRes.draw_time.substring(0, 5).replace(/^0/, "");
-        const existingInSlot = prevGameResults.find(
-          (pr) =>
-            pr.draw_date === rawRes.draw_date &&
-            pr.draw_time.substring(0, 5).replace(/^0/, "") === slotKey,
+            const fallbackResults = (mockStore.results as Result[])
+              .filter((r) => r.game_id === g.id && r.draw_date === today)
+              .sort((a, b) => a.draw_time.localeCompare(b.draw_time));
+            return { gameId: g.id, results: fallbackResults };
+          }),
         );
 
-        const canonical = resolveCanonicalAnimal(
-          gameObj.slug || gameObj.id,
-          rawRes.animal_number,
-          rawRes.animal_name,
-          imgMap,
-          nameMap,
-          labelMap,
-        );
+        const map: Record<string, Result[]> = {};
+        const newAlerts: ResultAlertItem[] = [];
+        const prevResultsByGame = resultsMapRef.current;
 
-        let effectiveRes: Result;
-        if (
-          existingInSlot &&
-          (rawRes.source !== "manual" || existingInSlot.animal_number === canonical.number)
-        ) {
-          effectiveRes = existingInSlot;
-        } else {
-          effectiveRes = {
-            ...rawRes,
-            animal_number: canonical.number,
-            animal_name: canonical.name,
-          };
+        for (const r of resultsPromises) {
+          const gameObj = loadedGames.find((g) => g.id === r.gameId);
+          if (!gameObj) {
+            map[r.gameId] = r.results;
+            continue;
+          }
+
+          const prevGameResults = (prevResultsByGame[r.gameId] ?? []).filter(
+            (pr) => pr.draw_date === today,
+          );
+          const mergedForGame = mergeResultsPreserveToday(prevGameResults, r.results, today).sort(
+            (a, b) => a.draw_time.localeCompare(b.draw_time),
+          );
+          const frozenGameResults: Result[] = [];
+
+          for (const rawRes of mergedForGame) {
+            const slotKey = rawRes.draw_time.substring(0, 5).replace(/^0/, "");
+            const existingInSlot = prevGameResults.find(
+              (pr) =>
+                pr.draw_date === rawRes.draw_date &&
+                pr.draw_time.substring(0, 5).replace(/^0/, "") === slotKey,
+            );
+
+            const canonical = resolveCanonicalAnimal(
+              gameObj.slug || gameObj.id,
+              rawRes.animal_number,
+              rawRes.animal_name,
+              imgMap,
+              nameMap,
+              labelMap,
+            );
+
+            let effectiveRes: Result;
+            if (
+              existingInSlot &&
+              (rawRes.source !== "manual" || existingInSlot.animal_number === canonical.number)
+            ) {
+              effectiveRes = existingInSlot;
+            } else {
+              effectiveRes = {
+                ...rawRes,
+                animal_number: canonical.number,
+                animal_name: canonical.name,
+              };
+            }
+
+            frozenGameResults.push(effectiveRes);
+
+            const sig = `${effectiveRes.animal_number}:${effectiveRes.animal_name}:${effectiveRes.draw_time}`;
+            const prevSig = prevSignaturesRef.current.get(effectiveRes.id);
+
+            if (!isInitialLoadRef.current) {
+              if (prevSig === undefined || prevSig !== sig) {
+                const candidate = {
+                  gameId: gameObj.id,
+                  drawDate: effectiveRes.draw_date,
+                  drawTime: effectiveRes.draw_time,
+                };
+
+                if (!sorteoAlertTracker.hasBeenAlerted(candidate)) {
+                  const resolvedForAlert = resolveCanonicalAnimal(
+                    gameObj.slug || gameObj.id,
+                    effectiveRes.animal_number,
+                    effectiveRes.animal_name,
+                    imgMap,
+                    nameMap,
+                    labelMap,
+                  );
+
+                  newAlerts.push({
+                    id: `draw-${effectiveRes.id}-${effectiveRes.draw_date}-${effectiveRes.draw_time}`,
+                    gameId: gameObj.id,
+                    gameName: gameObj.name,
+                    gameColor: gameObj.color,
+                    gameLogoUrl: getGameLogo(gameObj),
+                    drawDate: effectiveRes.draw_date,
+                    drawTime: effectiveRes.draw_time,
+                    animalNumber: resolvedForAlert.number,
+                    animalName: resolvedForAlert.name,
+                    animalLabel: resolvedForAlert.label,
+                    animalImageUrl: resolvedForAlert.imageUrl,
+                    animalEmoji: getAnimalEmoji(resolvedForAlert.number, resolvedForAlert.name),
+                  });
+                }
+              }
+            }
+            prevSignaturesRef.current.set(effectiveRes.id, sig);
+          }
+
+          // Preserve array reference if this game's results have not changed
+          if (
+            prevGameResults.length === frozenGameResults.length &&
+            JSON.stringify(prevGameResults) === JSON.stringify(frozenGameResults)
+          ) {
+            map[r.gameId] = prevGameResults;
+          } else {
+            map[r.gameId] = frozenGameResults;
+          }
         }
 
-        frozenGameResults.push(effectiveRes);
+        const mapJson = JSON.stringify(map);
+        if (lastResultsMapJsonRef.current !== mapJson) {
+          lastResultsMapJsonRef.current = mapJson;
+          resultsMapRef.current = map;
+          setResultsMap(map);
+        }
 
-        const sig = `${effectiveRes.animal_number}:${effectiveRes.animal_name}:${effectiveRes.draw_time}`;
-        const prevSig = prevSignaturesRef.current.get(effectiveRes.id);
+        // Check newly synced Triples results for real-time alert and voice announcements
+        const todaysTriples = serverSyncedTriples.filter((tr) => tr.draw_date === today);
+        for (const tr of todaysTriples) {
+          const tripleKey = `triple:${tr.game_id}:${tr.draw_date}:${tr.draw_time}`;
+          const sig = `${tr.triple_a}|${tr.triple_b ?? ""}|${tr.triple_c ?? ""}|${tr.zodiac_sign ?? ""}`;
+          const prevSig = prevSignaturesRef.current.get(tripleKey);
 
-        if (!isInitialLoadRef.current) {
-          if (prevSig === undefined || prevSig !== sig) {
-            const candidate = {
-              gameId: gameObj.id,
-              drawDate: effectiveRes.draw_date,
-              drawTime: effectiveRes.draw_time,
-            };
+          if (!isInitialLoadRef.current) {
+            if (prevSig === undefined || prevSig !== sig) {
+              const tripleGame = TRIPLE_GAMES.find((g) => g.id === tr.game_id);
+              if (tripleGame) {
+                const candidate = {
+                  gameId: tripleGame.id,
+                  drawDate: tr.draw_date,
+                  drawTime: tr.draw_time,
+                };
+                if (!sorteoAlertTracker.hasBeenAlerted(candidate)) {
+                  newAlerts.push(buildTripleAlertItem(tr, tripleGame));
+                }
+              }
+            }
+          }
+          prevSignaturesRef.current.set(tripleKey, sig);
+        }
 
-            if (!sorteoAlertTracker.hasBeenAlerted(candidate)) {
-              const resolvedForAlert = resolveCanonicalAnimal(
-                gameObj.slug || gameObj.id,
-                effectiveRes.animal_number,
-                effectiveRes.animal_name,
-                imgMap,
-                nameMap,
-                labelMap,
-              );
-
-              newAlerts.push({
-                id: `draw-${effectiveRes.id}-${effectiveRes.draw_date}-${effectiveRes.draw_time}`,
-                gameId: gameObj.id,
-                gameName: gameObj.name,
-                gameColor: gameObj.color,
-                gameLogoUrl: getGameLogo(gameObj),
-                drawDate: effectiveRes.draw_date,
-                drawTime: effectiveRes.draw_time,
-                animalNumber: resolvedForAlert.number,
-                animalName: resolvedForAlert.name,
-                animalLabel: resolvedForAlert.label,
-                animalImageUrl: resolvedForAlert.imageUrl,
-                animalEmoji: getAnimalEmoji(resolvedForAlert.number, resolvedForAlert.name),
+        if (isInitialLoadRef.current) {
+          const existingItems: { gameId: string; drawDate: string; drawTime: string }[] = [];
+          for (const r of resultsPromises) {
+            for (const res of r.results) {
+              existingItems.push({
+                gameId: res.game_id,
+                drawDate: res.draw_date,
+                drawTime: res.draw_time,
               });
             }
           }
-        }
-        prevSignaturesRef.current.set(effectiveRes.id, sig);
-      }
-
-      // Preserve array reference if this game's results have not changed
-      if (
-        prevGameResults.length === frozenGameResults.length &&
-        JSON.stringify(prevGameResults) === JSON.stringify(frozenGameResults)
-      ) {
-        map[r.gameId] = prevGameResults;
-      } else {
-        map[r.gameId] = frozenGameResults;
-      }
-    }
-
-    const mapJson = JSON.stringify(map);
-    if (lastResultsMapJsonRef.current !== mapJson) {
-      lastResultsMapJsonRef.current = mapJson;
-      resultsMapRef.current = map;
-      setResultsMap(map);
-    }
-
-    // Check newly synced Triples results for real-time alert and voice announcements
-    const todaysTriples = serverSyncedTriples.filter((tr) => tr.draw_date === today);
-    for (const tr of todaysTriples) {
-      const tripleKey = `triple:${tr.game_id}:${tr.draw_date}:${tr.draw_time}`;
-      const sig = `${tr.triple_a}|${tr.triple_b ?? ""}|${tr.triple_c ?? ""}|${tr.zodiac_sign ?? ""}`;
-      const prevSig = prevSignaturesRef.current.get(tripleKey);
-
-      if (!isInitialLoadRef.current) {
-        if (prevSig === undefined || prevSig !== sig) {
-          const tripleGame = TRIPLE_GAMES.find((g) => g.id === tr.game_id);
-          if (tripleGame) {
-            const candidate = {
-              gameId: tripleGame.id,
+          for (const tr of todaysTriples) {
+            existingItems.push({
+              gameId: tr.game_id,
               drawDate: tr.draw_date,
               drawTime: tr.draw_time,
-            };
-            if (!sorteoAlertTracker.hasBeenAlerted(candidate)) {
-              newAlerts.push(buildTripleAlertItem(tr, tripleGame));
+            });
+          }
+          sorteoAlertTracker.markMultipleAsAlerted(existingItems);
+          isInitialLoadRef.current = false;
+        } else if (newAlerts.length > 0) {
+          let anyEnqueued = false;
+          for (const alert of newAlerts) {
+            if (enqueueUniqueAlert(alert)) {
+              anyEnqueued = true;
             }
           }
+          const lastNew = newAlerts[newAlerts.length - 1];
+          if (anyEnqueued && lastNew) scheduleHardReload(lastNew.id);
         }
-      }
-      prevSignaturesRef.current.set(tripleKey, sig);
-    }
 
-    if (isInitialLoadRef.current) {
-      const existingItems: { gameId: string; drawDate: string; drawTime: string }[] = [];
-      for (const r of resultsPromises) {
-        for (const res of r.results) {
-          existingItems.push({
-            gameId: res.game_id,
-            drawDate: res.draw_date,
-            drawTime: res.draw_time,
-          });
+        lastUpdateRef.current = new Date();
+        setLoading((prev) => (prev ? false : prev));
+      } finally {
+        if (reqSeq === fetchSeqRef.current) {
+          fetchInFlightRef.current = false;
         }
       }
-      for (const tr of todaysTriples) {
-        existingItems.push({
-          gameId: tr.game_id,
-          drawDate: tr.draw_date,
-          drawTime: tr.draw_time,
-        });
-      }
-      sorteoAlertTracker.markMultipleAsAlerted(existingItems);
-      isInitialLoadRef.current = false;
-    } else if (newAlerts.length > 0) {
-      let anyEnqueued = false;
-      for (const alert of newAlerts) {
-        if (enqueueUniqueAlert(alert)) {
-          anyEnqueued = true;
-        }
-      }
-      const lastNew = newAlerts[newAlerts.length - 1];
-      if (anyEnqueued && lastNew) scheduleHardReload(lastNew.id);
-    }
-
-    lastUpdateRef.current = new Date();
-    setLoading((prev) => (prev ? false : prev));
-  }, [enqueueUniqueAlert, scheduleHardReload, updateSettings]);
+    },
+    [enqueueUniqueAlert, scheduleHardReload, updateSettings],
+  );
 
   // Listen for real-time broadcasts and check pending alerts on mount
   useEffect(() => {
@@ -1569,21 +1614,39 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
 
   const handleManualRefresh = useCallback(async () => {
     try {
-      const res = await fetch("/api/public/results/sync", { method: "POST" });
+      let res = await fetch("/api/public/results/sync", { method: "POST" });
+      if (!res.ok && (res.status === 401 || res.status === 403)) {
+        res = await fetch("/api/public/results/sync", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ syncTriplesNow: true }),
+        });
+      }
       if (res.ok) {
         const data = await res.json();
+        const today = lotteryDate();
         if (Array.isArray(data?.results)) {
           mockStore.results = mergeResultsPreserveToday(
             mockStore.results as Result[],
             data.results as Result[],
-            lotteryDate(),
+            today,
           );
         }
         if (Array.isArray(data?.tripleResults)) {
-          const tJson = JSON.stringify(data.tripleResults);
+          const deletedTripleIds = Array.isArray(data?.deletedTripleIds)
+            ? (data.deletedTripleIds as string[])
+            : [];
+          const mergedTriples = mergeTripleResultsPreserveToday(
+            tripleResultsRef.current,
+            data.tripleResults as TripleResult[],
+            today,
+            deletedTripleIds,
+          );
+          const tJson = JSON.stringify(mergedTriples);
           if (lastTripleResultsJsonRef.current !== tJson) {
             lastTripleResultsJsonRef.current = tJson;
-            setTripleResults(data.tripleResults);
+            tripleResultsRef.current = mergedTriples;
+            setTripleResults(mergedTriples);
             try {
               localStorage.setItem("pizarra_triple_results", tJson);
             } catch {
@@ -1595,12 +1658,14 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     } catch {
       // ignore
     }
-    await fetchAll();
+    await fetchAll(true);
   }, [fetchAll]);
 
   useEffect(() => {
-    fetchAll();
-    const interval = setInterval(fetchAll, 5000);
+    fetchAll(true);
+    const interval = setInterval(() => {
+      void fetchAll(false);
+    }, 6000);
     return () => clearInterval(interval);
   }, [fetchAll]);
 

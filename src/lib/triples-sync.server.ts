@@ -10,7 +10,10 @@ export const LOTERIADEHOY_TRIPLES_URL = "https://loteriadehoy.com/loterias/resul
 export const TUAZAR_TRIPLES_PRIMARY_URL = "https://tuazar.com/loteria/resultados/";
 export const TUAZAR_TRIPLES_FALLBACK_URL = "https://casino.tuazar.com/loteria/resultados";
 
-const FETCH_TIMEOUT_MS = 15_000;
+// Fast bounded timeouts so a slow upstream site never blocks triples for 30-60s
+const FETCH_TIMEOUT_MS = 5_500;
+const FALLBACK_TIMEOUT_MS = 4_500;
+const SNAPSHOT_TTL_MS = 20_000;
 
 const BROWSER_HEADERS: Record<string, string> = {
   "User-Agent":
@@ -19,6 +22,15 @@ const BROWSER_HEADERS: Record<string, string> = {
   "Accept-Language": "es-VE,es;q=0.9,en;q=0.8",
   "Cache-Control": "no-cache",
 };
+
+interface CachedSourceResult {
+  at: number;
+  date: string;
+  promise: Promise<TripleResult[]>;
+}
+
+let ldhTriplesCache: CachedSourceResult | null = null;
+let tuazarTriplesCache: CachedSourceResult | null = null;
 
 function isTransientFetchError(err: unknown): boolean {
   let current: unknown = err;
@@ -52,9 +64,9 @@ function isTransientFetchError(err: unknown): boolean {
   return false;
 }
 
-async function fetchHtmlOnce(url: string): Promise<string> {
+async function fetchHtmlOnce(url: string, timeoutMs = FETCH_TIMEOUT_MS): Promise<string> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, {
       headers: BROWSER_HEADERS,
@@ -68,56 +80,105 @@ async function fetchHtmlOnce(url: string): Promise<string> {
   }
 }
 
-async function fetchHtmlWithTimeout(url: string): Promise<string> {
-  try {
-    return await fetchHtmlOnce(url);
-  } catch (err) {
-    if (isTransientFetchError(err)) {
-      return await fetchHtmlOnce(url);
-    }
-    throw err;
+export async function fetchLoteriaDeHoyTriples(
+  drawDate: string,
+  forceRefresh = false,
+): Promise<TripleResult[]> {
+  const now = Date.now();
+  if (
+    !forceRefresh &&
+    ldhTriplesCache &&
+    ldhTriplesCache.date === drawDate &&
+    now - ldhTriplesCache.at < SNAPSHOT_TTL_MS
+  ) {
+    return ldhTriplesCache.promise;
   }
-}
 
-export async function fetchLoteriaDeHoyTriples(drawDate: string): Promise<TripleResult[]> {
-  try {
-    const html = await fetchHtmlWithTimeout(LOTERIADEHOY_TRIPLES_URL);
-    return parseLoteriaDeHoyTriplesHtml(html, drawDate);
-  } catch (err) {
-    if (!isTransientFetchError(err)) {
-      console.warn("[triples-sync] LoteriaDeHoy fetch failed:", err);
-    }
-    return [];
-  }
-}
-
-export async function fetchTuAzarTriples(drawDate: string): Promise<TripleResult[]> {
-  try {
-    const html = await fetchHtmlWithTimeout(TUAZAR_TRIPLES_PRIMARY_URL);
-    return parseTuazarTriplesHtml(html, drawDate);
-  } catch (primaryErr) {
+  const run = (async () => {
     try {
-      const fallbackHtml = await fetchHtmlWithTimeout(TUAZAR_TRIPLES_FALLBACK_URL);
-      return parseTuazarTriplesHtml(fallbackHtml, drawDate);
-    } catch (fallbackErr) {
-      if (!isTransientFetchError(primaryErr) && !isTransientFetchError(fallbackErr)) {
-        console.warn("[triples-sync] TuAzar fetch failed:", primaryErr, fallbackErr);
+      const html = await fetchHtmlOnce(LOTERIADEHOY_TRIPLES_URL, FETCH_TIMEOUT_MS);
+      const parsed = parseLoteriaDeHoyTriplesHtml(html, drawDate);
+      if (parsed.length === 0 && ldhTriplesCache?.promise === run) {
+        ldhTriplesCache = null;
+      }
+      return parsed;
+    } catch (err) {
+      if (ldhTriplesCache?.promise === run) ldhTriplesCache = null;
+      if (!isTransientFetchError(err)) {
+        console.warn("[triples-sync] LoteriaDeHoy fetch failed:", err);
       }
       return [];
     }
+  })();
+
+  ldhTriplesCache = { at: now, date: drawDate, promise: run };
+  return run;
+}
+
+export async function fetchTuAzarTriples(
+  drawDate: string,
+  forceRefresh = false,
+): Promise<TripleResult[]> {
+  const now = Date.now();
+  if (
+    !forceRefresh &&
+    tuazarTriplesCache &&
+    tuazarTriplesCache.date === drawDate &&
+    now - tuazarTriplesCache.at < SNAPSHOT_TTL_MS
+  ) {
+    return tuazarTriplesCache.promise;
   }
+
+  const run = (async () => {
+    try {
+      const html = await fetchHtmlOnce(TUAZAR_TRIPLES_PRIMARY_URL, FETCH_TIMEOUT_MS);
+      const parsed = parseTuazarTriplesHtml(html, drawDate);
+      if (parsed.length > 0) return parsed;
+    } catch (primaryErr) {
+      try {
+        const fallbackHtml = await fetchHtmlOnce(TUAZAR_TRIPLES_FALLBACK_URL, FALLBACK_TIMEOUT_MS);
+        const parsed = parseTuazarTriplesHtml(fallbackHtml, drawDate);
+        if (parsed.length > 0) return parsed;
+      } catch (fallbackErr) {
+        if (!isTransientFetchError(primaryErr) && !isTransientFetchError(fallbackErr)) {
+          console.warn("[triples-sync] TuAzar fetch failed:", primaryErr, fallbackErr);
+        }
+      }
+    }
+    if (tuazarTriplesCache?.promise === run) tuazarTriplesCache = null;
+    return [];
+  })();
+
+  tuazarTriplesCache = { at: now, date: drawDate, promise: run };
+  return run;
 }
 
 export async function synchronizeAutomaticTriplesResults(
   existingResults: TripleResult[],
+  options?: {
+    forceRefresh?: boolean;
+    onPartialResults?: (partial: TripleResult[]) => void;
+  },
 ): Promise<{ merged: TripleResult[]; newlyAdded: TripleResult[] }> {
   const today = lotteryDate();
   const todaysExisting = existingResults.filter((r) => r.draw_date === today);
+  const forceRefresh = Boolean(options?.forceRefresh);
 
-  const [fromLdh, fromTuAzar] = await Promise.all([
-    fetchLoteriaDeHoyTriples(today),
-    fetchTuAzarTriples(today),
-  ]);
+  const ldhPromise = fetchLoteriaDeHoyTriples(today, forceRefresh).then((res) => {
+    if (res.length > 0 && options?.onPartialResults) {
+      options.onPartialResults(res);
+    }
+    return res;
+  });
+
+  const tuazarPromise = fetchTuAzarTriples(today, forceRefresh).then((res) => {
+    if (res.length > 0 && options?.onPartialResults) {
+      options.onPartialResults(res);
+    }
+    return res;
+  });
+
+  const [fromLdh, fromTuAzar] = await Promise.all([ldhPromise, tuazarPromise]);
 
   return mergeTriplesResults(todaysExisting, fromLdh, fromTuAzar);
 }
