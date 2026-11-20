@@ -128,9 +128,9 @@ export default function LicensesManager() {
   const [feedbackMsg, setFeedbackMsg] = useState<string | null>(null);
   const [cloudErrorAlert, setCloudErrorAlert] = useState<string | null>(null);
   const [modalCloudError, setModalCloudError] = useState<string | null>(null);
-  const [cloudStorageMode, setCloudStorageMode] = useState<
-    "supabase" | "cloudflare-kv" | "local-memory" | null
-  >(null);
+  const [cloudStorageMode, setCloudStorageMode] = useState<"supabase" | "local-memory" | null>(
+    null,
+  );
   const [workspaceFileActive, setWorkspaceFileActive] = useState<boolean>(false);
 
   const showToast = (msg: string) => {
@@ -163,12 +163,11 @@ export default function LicensesManager() {
           typeof sbUrl === "string" &&
           sbUrl.includes(".supabase.co") &&
           !sbUrl.includes("ebpunrzbagmcdtammjqn.supabase.co") &&
-          !sbUrl.includes("dqpomustswauzejggfui.supabase.co");
+          !sbUrl.includes("dqpomustswauzejggfui.supabase.co") &&
+          !sbUrl.includes(".lovable.cloud");
         if (isActiveSupabaseUrl) {
           try {
-            const { data: sbRows, error: sbErr } = await supabase
-              .from("client_licenses")
-              .select("*");
+            const { data: sbRows, error: sbErr } = await supabase.from("licenses").select("*");
             if (!sbErr && Array.isArray(sbRows) && sbRows.length > 0) {
               const mappedSb: ClientLicense[] = sbRows.map((d: Record<string, unknown>) => ({
                 id: String(d["id"]),
@@ -207,7 +206,6 @@ export default function LicensesManager() {
         }
         if (
           data.cloudLicenseStorageMode === "supabase" ||
-          data.cloudLicenseStorageMode === "cloudflare-kv" ||
           data.cloudLicenseStorageMode === "local-memory"
         ) {
           setCloudStorageMode(data.cloudLicenseStorageMode);
@@ -378,7 +376,8 @@ export default function LicensesManager() {
       typeof sbUrl === "string" &&
       sbUrl.includes(".supabase.co") &&
       !sbUrl.includes("ebpunrzbagmcdtammjqn.supabase.co") &&
-      !sbUrl.includes("dqpomustswauzejggfui.supabase.co");
+      !sbUrl.includes("dqpomustswauzejggfui.supabase.co") &&
+      !sbUrl.includes(".lovable.cloud");
     if (isActiveSupabaseUrl) {
       try {
         const { data: sessionData } = await supabase.auth.getSession();
@@ -396,16 +395,13 @@ export default function LicensesManager() {
               ),
             ) as string[];
             for (const cid of candidateIds) {
-              const { error: delErr } = await supabase
-                .from("client_licenses")
-                .delete()
-                .eq("id", cid);
+              const { error: delErr } = await supabase.from("licenses").delete().eq("id", cid);
               if (delErr) directCloudError = delErr.message;
               else directCloudOk = true;
             }
             if (targetToDelete?.pin_code) {
               const { error: delPinErr } = await supabase
-                .from("client_licenses")
+                .from("licenses")
                 .delete()
                 .eq("pin_code", targetToDelete.pin_code);
               if (!delPinErr) directCloudOk = true;
@@ -415,7 +411,7 @@ export default function LicensesManager() {
             let targetSbId = toSupabaseLicenseUuid(snap.id, snap.pin_code);
             if (snap.pin_code) {
               const { data: existingByPin } = await supabase
-                .from("client_licenses")
+                .from("licenses")
                 .select("id")
                 .eq("pin_code", snap.pin_code)
                 .maybeSingle();
@@ -424,7 +420,7 @@ export default function LicensesManager() {
               }
             }
             const { data: upsertedRows, error: upsertErr } = await supabase
-              .from("client_licenses")
+              .from("licenses")
               .upsert(
                 {
                   id: targetSbId,
@@ -489,7 +485,6 @@ export default function LicensesManager() {
       if (
         data &&
         (data.cloudLicenseStorageMode === "supabase" ||
-          data.cloudLicenseStorageMode === "cloudflare-kv" ||
           data.cloudLicenseStorageMode === "local-memory")
       ) {
         setCloudStorageMode(data.cloudLicenseStorageMode);
@@ -888,11 +883,9 @@ export default function LicensesManager() {
             >
               {requireLicense ? "CANDADO ACTIVO" : "ACCESO LIBRE"}
             </span>
-            {cloudStorageMode && cloudStorageMode !== "local-memory" && (
+            {cloudStorageMode === "supabase" && (
               <span className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded border bg-emerald-950/50 text-emerald-300 border-emerald-700/50">
-                {cloudStorageMode === "cloudflare-kv"
-                  ? "NUBE ACTIVA: CLOUDFLARE KV"
-                  : "NUBE ACTIVA: SUPABASE"}
+                NUBE ACTIVA: SUPABASE
               </span>
             )}
             {cloudStorageMode === "local-memory" && workspaceFileActive && (
@@ -1022,18 +1015,11 @@ export default function LicensesManager() {
           </div>
           <p className="text-[11px] leading-relaxed text-blue-100/90">
             Nota: los cambios hechos aquí en Preview se guardan solo en esta sesión (AI Studio no
-            incluye archivos escritos en runtime al hacer Push a GitHub). Para sincronizarlos sin
-            base de datos, pulsa{" "}
-            <span className="font-semibold text-white">Copiar JSON para GitHub</span> y pégalo en{" "}
-            <span className="font-mono font-semibold text-white">
-              client_licenses.persisted.json
-            </span>
-            , o conecta{" "}
-            <span className="font-mono font-semibold text-white">
-              CF_ACCOUNT_ID / CF_KV_NAMESPACE_ID / CF_API_TOKEN
-            </span>{" "}
-            o <span className="font-mono font-semibold text-white">SUPABASE_URL</span> en Cloudflare
-            Pages para guardar en vivo.
+            incluye archivos escritos en runtime al hacer Push a GitHub). En producción, configura{" "}
+            <span className="font-mono font-semibold text-white">SUPABASE_URL</span> y{" "}
+            <span className="font-mono font-semibold text-white">SUPABASE_KEY</span> en Cloudflare
+            Pages para guardar en vivo en la tabla{" "}
+            <span className="font-mono font-semibold text-white">licenses</span>.
           </p>
         </div>
       )}
@@ -1046,9 +1032,7 @@ export default function LicensesManager() {
           <div className="flex items-center justify-between gap-2 flex-wrap">
             <div className="flex items-center gap-2 font-bold text-amber-300">
               <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
-              <span>
-                Modo empaquetado desde GitHub (sin KV ni Supabase conectado en Cloudflare)
-              </span>
+              <span>Modo empaquetado local (sin Supabase conectado en Cloudflare Pages)</span>
             </div>
             <button
               type="button"
@@ -1077,14 +1061,12 @@ export default function LicensesManager() {
             guardadas en{" "}
             <span className="font-mono font-semibold text-white">
               client_licenses.persisted.json
-            </span>{" "}
-            en tu repositorio de GitHub. Para guardar en vivo sin hacer Push ni usar Bindings,
-            configura{" "}
-            <span className="font-mono font-semibold text-white">
-              CF_ACCOUNT_ID, CF_KV_NAMESPACE_ID, CF_API_TOKEN
-            </span>{" "}
-            o un <span className="font-mono font-semibold text-white">SUPABASE_URL</span> activo en
-            Cloudflare Pages → Settings → Variables and Secrets.
+            </span>
+            . Para guardar en vivo en la tabla{" "}
+            <span className="font-mono font-semibold text-white">licenses</span>, configura{" "}
+            <span className="font-mono font-semibold text-white">SUPABASE_URL</span> y{" "}
+            <span className="font-mono font-semibold text-white">SUPABASE_KEY</span> en Cloudflare
+            Pages → Settings → Variables and Secrets.
           </p>
         </div>
       )}

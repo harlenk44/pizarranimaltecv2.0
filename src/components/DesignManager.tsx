@@ -325,16 +325,22 @@ export default function DesignManager() {
         },
       );
 
-      try {
-        await supabase
-          .from("client_licenses")
-          .update({ client_name: packedName })
-          .eq("id", selectedLicense.id);
-      } catch (err) {
-        console.warn(
-          "[BoardDesign:DesignManager] Error actualizando client_licenses en Supabase:",
-          err,
-        );
+      const sbUrl = import.meta.env["VITE_SUPABASE_URL"];
+      const isActiveSupabaseUrl =
+        typeof sbUrl === "string" &&
+        sbUrl.includes(".supabase.co") &&
+        !sbUrl.includes("ebpunrzbagmcdtammjqn.supabase.co") &&
+        !sbUrl.includes("dqpomustswauzejggfui.supabase.co") &&
+        !sbUrl.includes(".lovable.cloud");
+      if (isActiveSupabaseUrl) {
+        try {
+          await supabase
+            .from("licenses")
+            .update({ client_name: packedName })
+            .eq("id", selectedLicense.id);
+        } catch (err) {
+          console.warn("[BoardDesign:DesignManager] Error actualizando licenses en Supabase:", err);
+        }
       }
 
       const updatedLicense: ClientLicense = {

@@ -23,7 +23,7 @@ import {
   getSupabaseCloudDiagnostics,
   type SupabaseCloudDiagnostics,
 } from "@/integrations/supabase/client.server";
-import { getBoundCloudflareKv, ensureCloudflareEnvFromRequest } from "@/lib/cloudflare-env.server";
+import { ensureCloudflareEnvFromRequest } from "@/lib/cloudflare-env.server";
 import { toSupabaseLicenseUuid, generateLicenseUuid, isValidUuid } from "@/lib/license-lotteries";
 import { resolveCanonicalAnimal, parseCanonicalAnimalNumber } from "@/lib/official-animals";
 import { getGameLogo, isBrokenExternalLogo, isCustomUploadedGameLogo } from "@/lib/game-logos";
@@ -264,8 +264,129 @@ function parseRequireFromMasterNotes(notes?: string | null): boolean | null {
   return null;
 }
 
-const KV_LICENSES_KEY = "pizarra_client_licenses_v2";
+const SUPABASE_LICENSES_TABLE = "licenses" as const;
+const SUPABASE_ANIMAL_IMAGES_BUCKET = "animal-images" as const;
 let lastCloudLicenseReadError: string | null = null;
+
+function parseDataUrlToBinary(dataUrl: string): {
+  bytes: Uint8Array;
+  contentType: string;
+  ext: string;
+} | null {
+  const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/s.exec(dataUrl.trim());
+  if (!match) return null;
+  const contentType = match[1]!.toLowerCase();
+  const base64Body = match[2]!.replace(/\s+/g, "");
+
+  const extMap: Record<string, string> = {
+    "image/webp": "webp",
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/gif": "gif",
+    "image/svg+xml": "svg",
+    "image/avif": "avif",
+  };
+  const ext = extMap[contentType] || "webp";
+
+  try {
+    const binary = atob(base64Body);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return { bytes, contentType, ext };
+  } catch {
+    return null;
+  }
+}
+
+async function uploadAnimalImageToSupabaseStorage(
+  gameId: string,
+  animalNumber: number,
+  imageUrl: string,
+): Promise<{ url: string; uploadedToStorage: boolean; error?: string }> {
+  const trimmed = imageUrl.trim();
+  if (!trimmed.startsWith("data:image/")) {
+    return { url: trimmed, uploadedToStorage: false };
+  }
+
+  const realClient = createRealSupabaseAdminClient();
+  if (!realClient) {
+    return { url: trimmed, uploadedToStorage: false };
+  }
+
+  const decoded = parseDataUrlToBinary(trimmed);
+  if (!decoded) {
+    return { url: trimmed, uploadedToStorage: false, error: "Formato DataURL de imagen inválido" };
+  }
+
+  const safeGameId = gameId.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const storagePath = `animals/${safeGameId}/animal-${animalNumber}-${Date.now()}.${decoded.ext}`;
+
+  try {
+    const { error: uploadError } = await realClient.storage
+      .from(SUPABASE_ANIMAL_IMAGES_BUCKET)
+      .upload(storagePath, decoded.bytes, {
+        contentType: decoded.contentType,
+        upsert: true,
+        cacheControl: "31536000",
+      });
+
+    if (uploadError) {
+      console.warn("[supabase-storage-animal-image-warn]", uploadError.message);
+      return {
+        url: trimmed,
+        uploadedToStorage: false,
+        error: uploadError.message,
+      };
+    }
+
+    const { data: pubData } = realClient.storage
+      .from(SUPABASE_ANIMAL_IMAGES_BUCKET)
+      .getPublicUrl(storagePath);
+
+    if (
+      pubData?.publicUrl &&
+      (pubData.publicUrl.startsWith("http://") || pubData.publicUrl.startsWith("https://"))
+    ) {
+      return { url: pubData.publicUrl, uploadedToStorage: true };
+    }
+
+    return { url: trimmed, uploadedToStorage: false };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn("[supabase-storage-animal-image-warn]", message);
+    return { url: trimmed, uploadedToStorage: false, error: message };
+  }
+}
+
+async function removeAnimalImageFromSupabaseStorage(
+  gameId: string,
+  animalNumber: number,
+  existingUrl?: string | null,
+): Promise<void> {
+  const realClient = createRealSupabaseAdminClient();
+  if (!realClient) return;
+
+  const pathsToRemove: string[] = [];
+  if (existingUrl && existingUrl.includes(`/${SUPABASE_ANIMAL_IMAGES_BUCKET}/`)) {
+    const extracted = existingUrl.split(`/${SUPABASE_ANIMAL_IMAGES_BUCKET}/`)[1]?.split("?")[0];
+    if (extracted) {
+      pathsToRemove.push(decodeURIComponent(extracted));
+    }
+  }
+  const safeGameId = gameId.replace(/[^a-zA-Z0-9_-]/g, "_");
+  pathsToRemove.push(`${safeGameId}/animal-${animalNumber}.png`);
+
+  if (pathsToRemove.length > 0) {
+    try {
+      await realClient.storage.from(SUPABASE_ANIMAL_IMAGES_BUCKET).remove(pathsToRemove);
+    } catch {
+      // ignore storage cleanup errors
+    }
+  }
+}
 
 function formatSupabaseLicenseError(
   err:
@@ -291,54 +412,11 @@ function formatSupabaseLicenseError(
   ) {
     const keyHint =
       diag && !diag.hasServiceRoleKey
-        ? " Falta configurar SUPABASE_SERVICE_ROLE_KEY en Cloudflare Pages (solo está la clave pública/anon y las políticas RLS bloquean la escritura)."
-        : " Verifica las políticas RLS de la tabla client_licenses.";
+        ? " Configura SUPABASE_KEY (service_role/secret) en Cloudflare Pages o habilita las políticas RLS en la tabla licenses."
+        : " Verifica los permisos y políticas RLS de la tabla licenses en Supabase.";
     return `${full}.${keyHint}`;
   }
   return full;
-}
-
-async function readLicensesFromCloudflareKv(): Promise<{
-  state: ServerLicenseState | null;
-  error?: string;
-}> {
-  const kv = getBoundCloudflareKv();
-  if (!kv) return { state: null };
-  try {
-    const raw = await kv.get(KV_LICENSES_KEY, "text");
-    if (typeof raw === "string" && raw.trim()) {
-      const parsed = JSON.parse(raw) as Partial<ServerLicenseState>;
-      if (parsed && Array.isArray(parsed.licenses)) {
-        return {
-          state: {
-            requireLicense: Boolean(parsed.requireLicense),
-            licenses: parsed.licenses,
-            deletedIds: Array.isArray(parsed.deletedIds) ? parsed.deletedIds : [],
-            deletedPins: Array.isArray(parsed.deletedPins) ? parsed.deletedPins : [],
-          },
-        };
-      }
-    }
-    return { state: null };
-  } catch (err) {
-    return {
-      state: null,
-      error: err instanceof Error ? err.message : String(err),
-    };
-  }
-}
-
-async function writeLicensesToCloudflareKv(
-  state: ServerLicenseState,
-): Promise<{ ok: boolean; error?: string }> {
-  const kv = getBoundCloudflareKv();
-  if (!kv) return { ok: false, error: "Sin KV vinculado" };
-  try {
-    await kv.put(KV_LICENSES_KEY, JSON.stringify(state));
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
 }
 
 async function upsertLicenseRowToSupabase(
@@ -348,17 +426,9 @@ async function upsertLicenseRowToSupabase(
 ): Promise<{ ok: boolean; error?: string; resolvedId?: string }> {
   const diag = getSupabaseCloudDiagnostics();
   const realClient = createRealSupabaseAdminClient();
-  const hasKv = Boolean(getBoundCloudflareKv());
 
   if (!realClient) {
-    if (hasKv) {
-      const kvRes = await writeLicensesToCloudflareKv(serverLicenseState);
-      if (kvRes.ok) {
-        return { ok: true, resolvedId: lic.id };
-      }
-      return { ok: false, error: kvRes.error || "Error guardando en Cloudflare KV" };
-    }
-    // Safe local/memory fallback when neither active Supabase nor Cloudflare KV is bound
+    // Safe local/memory fallback when Supabase is not configured (e.g. local Preview)
     return { ok: true, resolvedId: lic.id };
   }
 
@@ -382,7 +452,7 @@ async function upsertLicenseRowToSupabase(
       let targetId = sbId;
       if (lic.pin_code) {
         const { data: existingByPin, error: selectErr } = await client
-          .from("client_licenses")
+          .from(SUPABASE_LICENSES_TABLE)
           .select("id")
           .eq("pin_code", lic.pin_code)
           .maybeSingle();
@@ -399,7 +469,7 @@ async function upsertLicenseRowToSupabase(
       }
 
       const { data: upsertedRows, error } = await client
-        .from("client_licenses")
+        .from(SUPABASE_LICENSES_TABLE)
         .upsert({ ...payload, id: targetId }, { onConflict: "id" })
         .select("id");
       if (!error && Array.isArray(upsertedRows) && upsertedRows.length > 0) {
@@ -412,7 +482,7 @@ async function upsertLicenseRowToSupabase(
           error: formatSupabaseLicenseError(
             {
               code: "42501",
-              message: "Supabase no confirmó filas guardadas en client_licenses",
+              message: `Supabase no confirmó filas guardadas en ${SUPABASE_LICENSES_TABLE}`,
             },
             diag,
           ),
@@ -421,7 +491,7 @@ async function upsertLicenseRowToSupabase(
 
       if ((error?.code === "22P02" || error?.code === "23505") && lic.pin_code) {
         const { data: updatedRows, error: updateErr } = await client
-          .from("client_licenses")
+          .from(SUPABASE_LICENSES_TABLE)
           .update({
             client_name: payload.client_name,
             status: payload.status,
@@ -450,17 +520,12 @@ async function upsertLicenseRowToSupabase(
     const authClient = createSupabaseClientWithToken(authBearerToken);
     if (authClient) {
       const authRes = await runUpsert(authClient);
-      if (authRes.ok) {
-        res = authRes;
-      } else if (authRes.error) {
+      if (authRes.ok || authRes.error) {
         res = authRes;
       }
     }
   }
 
-  if (res.ok && hasKv) {
-    await writeLicensesToCloudflareKv(serverLicenseState);
-  }
   if (!res.ok) {
     console.warn("[supabase-license-upsert-warn]", res.error);
   }
@@ -474,15 +539,8 @@ async function deleteLicenseRowFromSupabase(
 ): Promise<{ ok: boolean; error?: string }> {
   const diag = getSupabaseCloudDiagnostics();
   const realClient = createRealSupabaseAdminClient();
-  const hasKv = Boolean(getBoundCloudflareKv());
 
   if (!realClient) {
-    if (hasKv) {
-      const kvRes = await writeLicensesToCloudflareKv(serverLicenseState);
-      if (kvRes.ok) return { ok: true };
-      return { ok: false, error: kvRes.error || "Error eliminando en Cloudflare KV" };
-    }
-    // Safe local/memory fallback when neither active Supabase nor Cloudflare KV is bound
     return { ok: true };
   }
 
@@ -495,11 +553,14 @@ async function deleteLicenseRowFromSupabase(
         new Set([isValidUuid(id) ? id : null, isValidUuid(sbId) ? sbId : null].filter(Boolean)),
       ) as string[];
       for (const tid of targetIds) {
-        const { error } = await client.from("client_licenses").delete().eq("id", tid);
+        const { error } = await client.from(SUPABASE_LICENSES_TABLE).delete().eq("id", tid);
         if (error) return { ok: false, error: formatSupabaseLicenseError(error, diag) };
       }
       if (pinCode) {
-        const { error } = await client.from("client_licenses").delete().eq("pin_code", pinCode);
+        const { error } = await client
+          .from(SUPABASE_LICENSES_TABLE)
+          .delete()
+          .eq("pin_code", pinCode);
         if (error) return { ok: false, error: formatSupabaseLicenseError(error, diag) };
       }
       return { ok: true };
@@ -519,13 +580,10 @@ async function deleteLicenseRowFromSupabase(
     }
   }
 
-  if (res.ok && hasKv) {
-    await writeLicensesToCloudflareKv(serverLicenseState);
-  }
   return res;
 }
 
-export async function syncLicensesWithSupabase(force = false): Promise<void> {
+async function syncLicensesWithSupabase(force = false): Promise<void> {
   const now = Date.now();
   if (!force && licensesCloudSyncPromise) {
     return licensesCloudSyncPromise;
@@ -539,33 +597,12 @@ export async function syncLicensesWithSupabase(force = false): Promise<void> {
     const realClient = createRealSupabaseAdminClient();
 
     if (!realClient) {
-      const kvRead = await readLicensesFromCloudflareKv();
-      if (kvRead.error) {
-        lastCloudLicenseReadError = kvRead.error;
-        return;
-      }
-      if (kvRead.state) {
-        serverLicenseState = kvRead.state;
-        lastCloudLicenseReadError = null;
-        lastLicensesCloudSyncAt = Date.now();
-        saveServerLicenses();
-      } else if (diag.hasKvBinding) {
-        const seedRes = await writeLicensesToCloudflareKv(serverLicenseState);
-        if (seedRes.ok) {
-          lastCloudLicenseReadError = null;
-          lastLicensesCloudSyncAt = Date.now();
-        } else {
-          lastCloudLicenseReadError = seedRes.error || diag.reason;
-        }
-      } else {
-        // Safe local/memory fallback when neither active Supabase nor Cloudflare KV is bound
-        lastCloudLicenseReadError = null;
-      }
+      lastCloudLicenseReadError = null;
       return;
     }
 
     try {
-      const { data, error } = await realClient.from("client_licenses").select("*");
+      const { data, error } = await realClient.from(SUPABASE_LICENSES_TABLE).select("*");
       if (error) {
         lastCloudLicenseReadError = formatSupabaseLicenseError(error, diag);
         return;
@@ -698,9 +735,6 @@ export async function syncLicensesWithSupabase(force = false): Promise<void> {
         );
         serverLicenseState.licenses = nextLicenses;
         saveServerLicenses();
-        if (diag.hasKvBinding) {
-          await writeLicensesToCloudflareKv(serverLicenseState);
-        }
       }
     } catch (err) {
       lastCloudLicenseReadError = err instanceof Error ? err.message : String(err);
@@ -822,10 +856,12 @@ function saveServerAnimalImages() {
   }
 }
 
-export async function syncAnimalImagesWithSupabase() {
+async function syncAnimalImagesWithSupabase() {
   try {
+    const realClient = createRealSupabaseAdminClient();
+    if (!realClient) return;
     await ensureCustomCatalogLoaded();
-    const { data, error } = await supabaseAdmin.from("animal_images").select("*");
+    const { data, error } = await realClient.from("animal_images").select("*");
     if (!error && Array.isArray(data)) {
       const cloudCustom: AnimalImage[] = [];
       for (const row of data as Array<Record<string, unknown>>) {
@@ -859,13 +895,22 @@ export async function syncAnimalImagesWithSupabase() {
             c.image_url === item.image_url,
         );
         if (!existsInCloud) {
-          await supabaseAdmin
+          let urlToSave = item.image_url;
+          if (urlToSave.startsWith("data:image/")) {
+            const uploaded = await uploadAnimalImageToSupabaseStorage(
+              item.game_id,
+              item.animal_number,
+              urlToSave,
+            );
+            urlToSave = uploaded.url;
+          }
+          await realClient
             .from("animal_images")
             .upsert(
               {
                 game_id: item.game_id,
                 animal_number: item.animal_number,
-                image_url: item.image_url,
+                image_url: urlToSave,
               },
               { onConflict: "game_id,animal_number" },
             )
@@ -1059,7 +1104,7 @@ function isRecentLocalGameMutation(id: string): boolean {
   return false;
 }
 
-export async function syncGamesWithSupabase(force = false): Promise<void> {
+async function syncGamesWithSupabase(force = false): Promise<void> {
   const now = Date.now();
   if (!force && gamesCloudSyncPromise) {
     return gamesCloudSyncPromise;
@@ -1239,7 +1284,7 @@ function saveServerAppSettings() {
 
 let backgroundSchedulerStarted = false;
 
-export function ensureServerDataInitialized() {
+function ensureServerDataInitialized() {
   if (serverDataInitialized) return;
   serverDataInitialized = true;
   loadServerAnimalImages();
@@ -1278,7 +1323,7 @@ export function ensureServerDataInitialized() {
   }
 }
 
-export async function syncAppSettingsWithSupabase() {
+async function syncAppSettingsWithSupabase() {
   try {
     const { data, error } = await supabaseAdmin
       .from("app_settings")
@@ -1639,12 +1684,13 @@ export const Route = createFileRoute("/api/public/results/sync")({
           }
         }
 
-        // Ensure cloud-backed licenses, games, and app settings are fresh for this Worker isolate
+        // Ensure cloud-backed licenses, games, images, and app settings are fresh for this Worker isolate
         await Promise.race([
           Promise.all([
             syncLicensesWithSupabase(!isPoll),
             syncGamesWithSupabase(!isPoll),
             syncAppSettingsWithSupabase(),
+            ...(!isPoll ? [syncAnimalImagesWithSupabase()] : []),
           ]),
           new Promise((resolve) => setTimeout(resolve, 2500)),
         ]);
@@ -1705,12 +1751,8 @@ export const Route = createFileRoute("/api/public/results/sync")({
           clientLicenses: isPoll ? null : serverLicenseState.licenses,
           deletedIds: isPoll ? null : serverLicenseState.deletedIds || [],
           deletedPins: isPoll ? null : serverLicenseState.deletedPins || [],
-          cloudLicenseConfigured: cloudDiag.configured || cloudDiag.hasKvBinding,
-          cloudLicenseStorageMode: cloudDiag.configured
-            ? "supabase"
-            : cloudDiag.hasKvBinding
-              ? "cloudflare-kv"
-              : "local-memory",
+          cloudLicenseConfigured: cloudDiag.configured,
+          cloudLicenseStorageMode: cloudDiag.configured ? "supabase" : "local-memory",
           workspaceLicenseFileActive: isWorkspaceLicensesFileActive(),
           cloudLicenseError: lastCloudLicenseReadError,
         });
@@ -1794,6 +1836,8 @@ export const Route = createFileRoute("/api/public/results/sync")({
               : null;
           let cloudLicenseSyncOk: boolean | null = null;
           let cloudLicenseError: string | null = null;
+          let uploadedAnimalImageUrl: string | null = null;
+          let animalImageStorageError: string | null = null;
           const trackCloudResult = (res: { ok: boolean; error?: string }) => {
             cloudLicenseSyncOk = res.ok;
             if (!res.ok && res.error) cloudLicenseError = res.error;
@@ -2151,7 +2195,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 if (!match && cleanPin && realClient) {
                   try {
                     const { data: directRow } = await realClient
-                      .from("client_licenses")
+                      .from(SUPABASE_LICENSES_TABLE)
                       .select("*")
                       .eq("pin_code", cleanPin)
                       .maybeSingle();
@@ -2459,30 +2503,44 @@ export const Route = createFileRoute("/api/public/results/sync")({
             }
           }
 
-          if (animalImage && !isDefaultCatalogImageUrl(animalImage.image_url)) {
+          if (animalImage && !isBaseOrDefaultCatalogImageUrl(animalImage.image_url)) {
+            const storageRes = await uploadAnimalImageToSupabaseStorage(
+              animalImage.game_id,
+              animalImage.animal_number,
+              animalImage.image_url,
+            );
+            const finalImageUrl = storageRes.url;
+            uploadedAnimalImageUrl = finalImageUrl;
+            if (storageRes.error) {
+              animalImageStorageError = storageRes.error;
+            }
+            const resolvedAnimalImage: AnimalImage = {
+              id: animalImage.id ?? `img-${animalImage.game_id}-${animalImage.animal_number}`,
+              game_id: animalImage.game_id,
+              animal_number: animalImage.animal_number,
+              image_url: finalImageUrl,
+            };
+
             const existingIdx = mockStore.animal_images.findIndex(
               (img) =>
-                img.game_id === animalImage.game_id &&
-                img.animal_number === animalImage.animal_number,
+                img.game_id === resolvedAnimalImage.game_id &&
+                img.animal_number === resolvedAnimalImage.animal_number,
             );
             if (existingIdx >= 0) {
               mockStore.animal_images[existingIdx] = {
                 ...mockStore.animal_images[existingIdx],
-                ...animalImage,
+                ...resolvedAnimalImage,
               };
             } else {
-              mockStore.animal_images.push({
-                id: animalImage.id ?? `img-${animalImage.game_id}-${animalImage.animal_number}`,
-                ...animalImage,
-              });
+              mockStore.animal_images.push(resolvedAnimalImage);
             }
             saveServerAnimalImages();
             try {
               await supabaseAdmin.from("animal_images").upsert(
                 {
-                  game_id: animalImage.game_id,
-                  animal_number: animalImage.animal_number,
-                  image_url: animalImage.image_url,
+                  game_id: resolvedAnimalImage.game_id,
+                  animal_number: resolvedAnimalImage.animal_number,
+                  image_url: resolvedAnimalImage.image_url,
                 },
                 { onConflict: "game_id,animal_number" },
               );
@@ -2493,7 +2551,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
 
           if (Array.isArray(animalImagesBatch) && animalImagesBatch.length > 0) {
             await ensureCustomCatalogLoaded();
-            const validBatch: AnimalImage[] = animalImagesBatch
+            const rawValidBatch: AnimalImage[] = animalImagesBatch
               .filter(
                 (item: unknown) =>
                   Boolean(item) &&
@@ -2510,6 +2568,18 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 animal_number: item.animal_number,
                 image_url: item.image_url,
               }));
+            const validBatch: AnimalImage[] = [];
+            for (const item of rawValidBatch) {
+              const storageRes = await uploadAnimalImageToSupabaseStorage(
+                item.game_id,
+                item.animal_number,
+                item.image_url,
+              );
+              if (storageRes.error && !animalImageStorageError) {
+                animalImageStorageError = storageRes.error;
+              }
+              validBatch.push({ ...item, image_url: storageRes.url });
+            }
             if (validBatch.length > 0) {
               mockStore.animal_images = mergeAnimalImagesPreserveCustom(
                 mockStore.animal_images,
@@ -2532,6 +2602,11 @@ export const Route = createFileRoute("/api/public/results/sync")({
           }
 
           if (deleteAnimalImage && typeof deleteAnimalImage === "object") {
+            const existingToDelete = mockStore.animal_images.find(
+              (img) =>
+                img.game_id === deleteAnimalImage.game_id &&
+                img.animal_number === deleteAnimalImage.animal_number,
+            );
             mockStore.animal_images = mockStore.animal_images.filter(
               (img) =>
                 !(
@@ -2540,6 +2615,11 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 ),
             );
             saveServerAnimalImages();
+            await removeAnimalImageFromSupabaseStorage(
+              deleteAnimalImage.game_id,
+              deleteAnimalImage.animal_number,
+              existingToDelete?.image_url,
+            );
             try {
               await supabaseAdmin
                 .from("animal_images")
@@ -2578,6 +2658,8 @@ export const Route = createFileRoute("/api/public/results/sync")({
             results: mockStore.results,
             tripleResults: serverTripleResults,
             animalImages: filterAdminCustomAnimalImages(mockStore.animal_images),
+            uploadedAnimalImageUrl,
+            animalImageStorageError,
             games: mockStore.games,
             customGameLogos: serverCustomGameLogos,
             logosVersion: serverCustomGameLogosVersion,
@@ -2592,12 +2674,8 @@ export const Route = createFileRoute("/api/public/results/sync")({
             licenseActivation,
             cloudLicenseSyncOk,
             cloudLicenseError,
-            cloudLicenseConfigured: putCloudDiag.configured || putCloudDiag.hasKvBinding,
-            cloudLicenseStorageMode: putCloudDiag.configured
-              ? "supabase"
-              : putCloudDiag.hasKvBinding
-                ? "cloudflare-kv"
-                : "local-memory",
+            cloudLicenseConfigured: putCloudDiag.configured,
+            cloudLicenseStorageMode: putCloudDiag.configured ? "supabase" : "local-memory",
             workspaceLicenseFileActive: isWorkspaceLicensesFileActive(),
           });
         } catch (err) {

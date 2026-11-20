@@ -1981,14 +1981,18 @@ function AnimalsManager({ games }: { games: Game[] }) {
       const permanentDataUrl = await fileToPermanentDataUrl(file);
       let finalUrl = permanentDataUrl;
 
-      // 1. Upload to Supabase Storage bucket 'animal-images' (if external HTTPS storage is active, use it; otherwise keep permanent Base64 DataURL)
+      // 1. Direct upload to Supabase Storage bucket 'animal-images' when VITE_SUPABASE_URL is active in browser
       try {
         const rawExt = file.name.split(".").pop() ?? "webp";
         const ext = rawExt.toLowerCase().replace(/[^a-z0-9]/g, "") || "webp";
         const storagePath = `animals/${selectedGame}/animal-${animalNumber}-${Date.now()}.${ext}`;
         const { error: upErr } = await supabase.storage
           .from("animal-images")
-          .upload(storagePath, permanentDataUrl, { upsert: true, cacheControl: "31536000" });
+          .upload(storagePath, file, {
+            contentType: file.type || undefined,
+            upsert: true,
+            cacheControl: "31536000",
+          });
         if (!upErr) {
           const storageUrl = await getMediaUrl("animal-images", storagePath);
           if (storageUrl.startsWith("http://") || storageUrl.startsWith("https://")) {
@@ -1996,7 +2000,35 @@ function AnimalsManager({ games }: { games: Game[] }) {
           }
         }
       } catch {
-        // Keep permanentDataUrl
+        // Fallback to server-side upload to Supabase Storage bucket 'animal-images'
+      }
+
+      // 2. Sync via server API (uploads DataURL to Supabase Storage 'animal-images' using SUPABASE_URL + SUPABASE_KEY and persists to animal_images)
+      try {
+        const syncRes = await fetch("/api/public/results/sync", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            animalImage: {
+              game_id: selectedGame,
+              animal_number: animalNumber,
+              image_url: finalUrl,
+            },
+          }),
+        });
+        if (syncRes.ok) {
+          const syncData = await syncRes.json().catch(() => null);
+          if (
+            syncData &&
+            typeof syncData.uploadedAnimalImageUrl === "string" &&
+            (syncData.uploadedAnimalImageUrl.startsWith("http://") ||
+              syncData.uploadedAnimalImageUrl.startsWith("https://"))
+          ) {
+            finalUrl = syncData.uploadedAnimalImageUrl;
+          }
+        }
+      } catch {
+        // ignore
       }
 
       await supabase.from("animal_images").upsert(
@@ -2038,19 +2070,7 @@ function AnimalsManager({ games }: { games: Game[] }) {
         }
       }
 
-      // Sync to server disk storage so all TVs and devices have it
       try {
-        await fetch("/api/public/results/sync", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            animalImage: {
-              game_id: selectedGame,
-              animal_number: animalNumber,
-              image_url: finalUrl,
-            },
-          }),
-        });
         const bc = new BroadcastChannel("pizarra_lottery_channel");
         bc.postMessage({
           type: "ANIMAL_MEDIA_UPDATED",

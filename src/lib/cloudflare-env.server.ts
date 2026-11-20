@@ -1,359 +1,175 @@
-export interface CloudflareKvNamespace {
-  get: (key: string, type?: "text" | "json") => Promise<unknown>;
-  put: (key: string, value: string) => Promise<void>;
-  delete?: (key: string) => Promise<void>;
-}
-
-type EnvRecord = Record<string, unknown>;
+export type CloudflareRuntimeEnv = Record<string, unknown>;
 
 interface AsyncStorageLike<T> {
-  run: <R>(store: T, callback: () => R) => R;
-  getStore: () => T | undefined;
+  getStore(): T | undefined;
+  run<R>(store: T, callback: () => R): R;
 }
 
-const PREFERRED_KV_BINDINGS = [
-  "PIZARRA_KV",
-  "LICENSES_KV",
-  "KV_LICENSES",
-  "PIZARRA_LICENSES",
-  "KV",
-];
+let runtimeEnvStorage: AsyncStorageLike<CloudflareRuntimeEnv> | null = null;
+let alsLoadPromise: Promise<void> | null = null;
 
-let runtimeEnvAls: AsyncStorageLike<EnvRecord> | null = null;
-let alsInitPromise: Promise<void> | null = null;
-let latestRuntimeEnv: EnvRecord | null = null;
-let cachedWorkersModuleEnv: EnvRecord | null = null;
-let workersModuleChecked = false;
+function initAsyncLocalStorage(): Promise<void> {
+  if (typeof window !== "undefined") return Promise.resolve();
+  if (runtimeEnvStorage) return Promise.resolve();
+  if (!alsLoadPromise) {
+    const nodeAsyncHooksSpecifier = "node:async_hooks";
+    alsLoadPromise = import(/* @vite-ignore */ nodeAsyncHooksSpecifier)
+      .then((mod) => {
+        const Ctor = (mod as { AsyncLocalStorage?: new <T>() => AsyncStorageLike<T> })
+          .AsyncLocalStorage;
+        if (typeof Ctor === "function" && !runtimeEnvStorage) {
+          runtimeEnvStorage = new Ctor<CloudflareRuntimeEnv>();
+        }
+      })
+      .catch(() => {
+        // Environment does not provide node:async_hooks; latestRuntimeEnv fallback remains active.
+      });
+  }
+  return alsLoadPromise;
+}
 
-function asNonEmptyRecord(candidate: unknown): EnvRecord | null {
-  if (!candidate || typeof candidate !== "object") return null;
-  const rec = candidate as EnvRecord;
-  if (Object.keys(rec).length > 0) return rec;
-  for (const k of PREFERRED_KV_BINDINGS) {
-    if (rec[k] !== undefined) return rec;
+if (typeof window === "undefined") {
+  void initAsyncLocalStorage();
+}
+
+// Fallback reference for Cloudflare Worker isolates where a nested callback
+// drops AsyncLocalStorage context. Updated on every incoming request.
+let latestRuntimeEnv: CloudflareRuntimeEnv | undefined;
+
+function asNonEmptyRecord(value: unknown): CloudflareRuntimeEnv | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const rec = value as CloudflareRuntimeEnv;
+  try {
+    if (Object.keys(rec).length > 0) return rec;
+  } catch {
+    // Some Cloudflare Workers env proxies hide keys from Object.keys; probe known keys.
   }
   if (
-    rec["ASSETS"] !== undefined ||
     rec["SUPABASE_URL"] !== undefined ||
+    rec["SUPABASE_KEY"] !== undefined ||
+    rec["SUPABASE_SERVICE_ROLE_KEY"] !== undefined ||
+    rec["SUPABASE_SECRET_KEY"] !== undefined ||
+    rec["SUPABASE_PUBLISHABLE_KEY"] !== undefined ||
+    rec["SUPABASE_ANON_KEY"] !== undefined ||
     rec["VITE_SUPABASE_URL"] !== undefined ||
-    rec["CF_ACCOUNT_ID"] !== undefined ||
-    rec["CF_API_KEY"] !== undefined ||
-    rec["CF_API_TOKEN"] !== undefined
+    rec["VITE_SUPABASE_PUBLISHABLE_KEY"] !== undefined ||
+    rec["ASSETS"] !== undefined
   ) {
     return rec;
   }
-  return null;
+  return undefined;
 }
 
-async function loadCloudflareWorkersModuleEnv(): Promise<EnvRecord | null> {
-  if (workersModuleChecked) return cachedWorkersModuleEnv;
-  workersModuleChecked = true;
-  try {
-    const cfModuleName = ["cloudflare", "workers"].join(":");
-    const mod = (await import(/* @vite-ignore */ cfModuleName)) as { env?: unknown };
-    const envObj = asNonEmptyRecord(mod?.env);
-    if (envObj) {
-      cachedWorkersModuleEnv = envObj;
-    }
-  } catch {
-    // Not running on Cloudflare workerd (e.g. Node.js / Vitest)
+/**
+ * Extracts Cloudflare Worker / Pages runtime `env` bindings from all known
+ * injection points used by Nitro / TanStack Start on Cloudflare Pages:
+ * 1. Explicit `env` parameter passed to `fetch(request, env, ctx)`
+ * 2. Nitro's `request.runtime.cloudflare.env` or `request.cloudflare.env`
+ * 3. Nitro's `globalThis.__env__`
+ * 4. Cloudflare Workers' built-in `cloudflare:workers` module (`import { env }`)
+ */
+export async function resolveCloudflareRuntimeEnv(
+  explicitEnv?: unknown,
+  request?: Request,
+): Promise<CloudflareRuntimeEnv | undefined> {
+  const fromExplicit = asNonEmptyRecord(explicitEnv);
+  if (fromExplicit) return fromExplicit;
+
+  if (request) {
+    const reqAny = request as unknown as {
+      runtime?: { cloudflare?: { env?: unknown } };
+      cloudflare?: { env?: unknown };
+      context?: { cloudflare?: { env?: unknown } };
+    };
+    const fromReq =
+      asNonEmptyRecord(reqAny.runtime?.cloudflare?.env) ??
+      asNonEmptyRecord(reqAny.cloudflare?.env) ??
+      asNonEmptyRecord(reqAny.context?.cloudflare?.env);
+    if (fromReq) return fromReq;
   }
-  return cachedWorkersModuleEnv;
-}
 
-function extractEnvSync(request?: unknown, directEnv?: unknown, ctx?: unknown): EnvRecord | null {
-  const fromDirect = asNonEmptyRecord(directEnv);
-  if (fromDirect) return fromDirect;
-
-  const reqAny = request as
-    | {
-        runtime?: { cloudflare?: { env?: unknown } };
-        context?: { cloudflare?: { env?: unknown }; env?: unknown };
-        cloudflare?: { env?: unknown };
-      }
-    | undefined;
-
-  const fromReqRuntime = asNonEmptyRecord(reqAny?.runtime?.cloudflare?.env);
-  if (fromReqRuntime) return fromReqRuntime;
-
-  const fromReqContextCf = asNonEmptyRecord(reqAny?.context?.cloudflare?.env);
-  if (fromReqContextCf) return fromReqContextCf;
-
-  const fromReqContext = asNonEmptyRecord(reqAny?.context?.env);
-  if (fromReqContext) return fromReqContext;
-
-  const fromReqCf = asNonEmptyRecord(reqAny?.cloudflare?.env);
-  if (fromReqCf) return fromReqCf;
-
-  const ctxAny = ctx as { env?: unknown; cloudflare?: { env?: unknown } } | undefined;
-  const fromCtxEnv = asNonEmptyRecord(ctxAny?.env) || asNonEmptyRecord(ctxAny?.cloudflare?.env);
-  if (fromCtxEnv) return fromCtxEnv;
-
-  const fromGlobal = asNonEmptyRecord((globalThis as { __env__?: unknown }).__env__);
+  const globalAny = globalThis as unknown as {
+    __env__?: unknown;
+    __cloudflare_env__?: unknown;
+  };
+  const fromGlobal =
+    asNonEmptyRecord(globalAny.__env__) ?? asNonEmptyRecord(globalAny.__cloudflare_env__);
   if (fromGlobal) return fromGlobal;
 
-  if (cachedWorkersModuleEnv) return cachedWorkersModuleEnv;
-
-  return null;
-}
-
-export async function resolveCloudflareRuntimeEnv(
-  request?: unknown,
-  directEnv?: unknown,
-  ctx?: unknown,
-): Promise<EnvRecord | null> {
-  // If directEnv was explicitly passed (even empty `{}` in tests), preserve test isolation semantics
-  if (directEnv && typeof directEnv === "object") {
-    return directEnv as EnvRecord;
+  if (typeof window === "undefined") {
+    try {
+      const specifier = "cloudflare:workers";
+      const cfMod = (await import(/* @vite-ignore */ specifier)) as { env?: unknown };
+      const fromModule = asNonEmptyRecord(cfMod?.env);
+      if (fromModule) return fromModule;
+    } catch {
+      // Not running on Cloudflare Workers (e.g. local Node.js / Vitest)
+    }
   }
-  const syncEnv = extractEnvSync(request, directEnv, ctx);
-  if (syncEnv) return syncEnv;
-  return await loadCloudflareWorkersModuleEnv();
+
+  return undefined;
 }
 
-export async function ensureCloudflareEnvFromRequest(
-  request?: unknown,
-  directEnv?: unknown,
-  ctx?: unknown,
-): Promise<EnvRecord | null> {
-  const resolved = await resolveCloudflareRuntimeEnv(request, directEnv, ctx);
-  if (resolved && asNonEmptyRecord(resolved)) {
+export async function ensureCloudflareEnvFromRequest(request?: Request): Promise<void> {
+  await initAsyncLocalStorage();
+  const current = runtimeEnvStorage?.getStore();
+  if (current && asNonEmptyRecord(current)) return;
+
+  const resolved = await resolveCloudflareRuntimeEnv(undefined, request);
+  if (resolved) {
     latestRuntimeEnv = resolved;
   }
-  return resolved;
 }
 
-function ensureAsyncLocalStorage(): Promise<void> {
-  if (runtimeEnvAls || alsInitPromise) {
-    return alsInitPromise ?? Promise.resolve();
-  }
-  alsInitPromise = (async () => {
-    try {
-      const mod = await import("node:async_hooks");
-      if (mod && typeof mod.AsyncLocalStorage === "function") {
-        runtimeEnvAls = new mod.AsyncLocalStorage<EnvRecord>();
-      }
-    } catch {
-      // Runtime without node:async_hooks falls back to latestRuntimeEnv
+export function runWithCloudflareEnv<T>(env: unknown, fn: () => T): T {
+  if (env && typeof env === "object") {
+    const record = env as CloudflareRuntimeEnv;
+    latestRuntimeEnv = record;
+    if (runtimeEnvStorage) {
+      return runtimeEnvStorage.run(record, fn);
     }
-  })();
-  return alsInitPromise;
+  }
+  return fn();
 }
 
-export async function runWithCloudflareEnv<T>(env: unknown, fn: () => Promise<T> | T): Promise<T> {
-  const normalized: EnvRecord | null = env && typeof env === "object" ? (env as EnvRecord) : null;
-  if (normalized) {
-    latestRuntimeEnv = normalized;
-  }
-  await ensureAsyncLocalStorage();
-  if (runtimeEnvAls && normalized) {
-    return await runtimeEnvAls.run(normalized, fn);
-  }
-  return await fn();
-}
+function getCurrentEnvObject(): CloudflareRuntimeEnv | undefined {
+  const fromStore = runtimeEnvStorage?.getStore();
+  if (fromStore) return fromStore;
 
-export function getActiveRuntimeEnv(): EnvRecord | null {
-  const fromAls = runtimeEnvAls?.getStore();
-  if (fromAls) return fromAls;
-  if (asNonEmptyRecord(latestRuntimeEnv)) {
-    return latestRuntimeEnv;
-  }
-  const fromGlobal = asNonEmptyRecord((globalThis as { __env__?: unknown }).__env__);
+  const globalAny = globalThis as unknown as {
+    __env__?: unknown;
+    __cloudflare_env__?: unknown;
+  };
+  const fromGlobal =
+    asNonEmptyRecord(globalAny.__env__) ?? asNonEmptyRecord(globalAny.__cloudflare_env__);
   if (fromGlobal) return fromGlobal;
-  if (cachedWorkersModuleEnv) return cachedWorkersModuleEnv;
+
   return latestRuntimeEnv;
 }
 
-export function getRuntimeEnvVar(key: string): string | undefined {
-  const candidates = [
-    runtimeEnvAls?.getStore(),
-    latestRuntimeEnv,
-    asNonEmptyRecord((globalThis as { __env__?: unknown }).__env__),
-    cachedWorkersModuleEnv,
-  ];
-  for (const activeEnv of candidates) {
-    if (activeEnv) {
-      const val = activeEnv[key];
-      if (typeof val === "string" && val.trim().length > 0) {
-        return val.trim();
-      }
-    }
+export function getRuntimeEnvVar(name: string): string | undefined {
+  const cfEnv = getCurrentEnvObject();
+  const cfVal = cfEnv?.[name];
+  if (typeof cfVal === "string" && cfVal.trim().length > 0) {
+    return cfVal.trim();
   }
 
-  if (typeof process !== "undefined" && process.env && process.env[key]) {
-    const val = process.env[key];
-    if (typeof val === "string" && val.trim().length > 0) {
-      return val.trim();
+  if (typeof process !== "undefined" && process.env) {
+    const procVal = process.env[name];
+    if (typeof procVal === "string" && procVal.trim().length > 0) {
+      return procVal.trim();
     }
   }
 
   try {
-    const metaEnv = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
-    if (metaEnv && metaEnv[key]) {
-      const val = metaEnv[key];
-      if (typeof val === "string" && val.trim().length > 0) {
-        return val.trim();
-      }
+    const metaEnv = (import.meta as unknown as { env?: Record<string, unknown> }).env;
+    const val = metaEnv?.[name];
+    if (typeof val === "string" && val.trim().length > 0) {
+      return val.trim();
     }
   } catch {
     // ignore
   }
 
   return undefined;
-}
-
-function isKvNamespace(candidate: unknown): candidate is CloudflareKvNamespace {
-  if (!candidate || typeof candidate !== "object") return false;
-  const rec = candidate as Record<string, unknown>;
-  // Cloudflare Fetcher / ASSETS / Service RPC proxies have `.fetch` and/or return functions for any arbitrary property name.
-  if (typeof rec["fetch"] === "function") return false;
-  if (typeof rec["__pizarra_kv_probe_nonexistent__"] === "function") return false;
-  return typeof rec["get"] === "function" && typeof rec["put"] === "function";
-}
-
-function findKvInEnv(envObj: EnvRecord | null | undefined): CloudflareKvNamespace | null {
-  if (!envObj) return null;
-  for (const name of PREFERRED_KV_BINDINGS) {
-    const candidate = envObj[name];
-    if (isKvNamespace(candidate)) {
-      return candidate;
-    }
-  }
-  for (const [key, value] of Object.entries(envObj)) {
-    const upper = key.toUpperCase();
-    if (upper === "ASSETS" || upper === "__STATIC_CONTENT") continue;
-    if (!(upper === "KV" || upper.endsWith("_KV") || upper.startsWith("KV_"))) continue;
-    if (isKvNamespace(value)) {
-      return value;
-    }
-  }
-  return null;
-}
-
-function getRestCloudflareKvConfig(): {
-  accountId: string;
-  namespaceId: string;
-  apiKey?: string;
-  email?: string;
-  apiToken?: string;
-} | null {
-  const accountId = getRuntimeEnvVar("CF_ACCOUNT_ID") || getRuntimeEnvVar("CLOUDFLARE_ACCOUNT_ID");
-  const namespaceId =
-    getRuntimeEnvVar("CF_KV_NAMESPACE_ID") ||
-    getRuntimeEnvVar("PIZARRA_KV_NAMESPACE_ID") ||
-    getRuntimeEnvVar("CLOUDFLARE_KV_NAMESPACE_ID");
-  const apiKey = getRuntimeEnvVar("CF_API_KEY") || getRuntimeEnvVar("CLOUDFLARE_API_KEY");
-  const email = getRuntimeEnvVar("CF_EMAIL") || getRuntimeEnvVar("CLOUDFLARE_EMAIL");
-  const apiToken = getRuntimeEnvVar("CF_API_TOKEN") || getRuntimeEnvVar("CLOUDFLARE_API_TOKEN");
-
-  const hasGlobalKey = Boolean(apiKey && email);
-  const hasApiToken = Boolean(apiToken);
-  if (!accountId || !namespaceId || (!hasGlobalKey && !hasApiToken)) {
-    return null;
-  }
-
-  return {
-    accountId,
-    namespaceId,
-    ...(apiKey ? { apiKey } : {}),
-    ...(email ? { email } : {}),
-    ...(apiToken ? { apiToken } : {}),
-  };
-}
-
-let cachedRestKvKey = "";
-let cachedRestKvClient: CloudflareKvNamespace | null = null;
-
-function getRestCloudflareKv(): CloudflareKvNamespace | null {
-  const cfg = getRestCloudflareKvConfig();
-  if (!cfg) return null;
-  const cacheKey = `${cfg.accountId}:${cfg.namespaceId}:${cfg.email || ""}:${cfg.apiKey || ""}:${cfg.apiToken || ""}`;
-  if (cachedRestKvClient && cachedRestKvKey === cacheKey) {
-    return cachedRestKvClient;
-  }
-
-  const headers: Record<string, string> = {
-    "Content-Type": "text/plain",
-  };
-  if (cfg.apiKey && cfg.email) {
-    headers["X-Auth-Key"] = String(cfg.apiKey).trim();
-    headers["X-Auth-Email"] = String(cfg.email).trim();
-  } else if (cfg.apiToken) {
-    headers["Authorization"] = `Bearer ${String(cfg.apiToken).trim()}`;
-  }
-
-  const baseUrl = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(cfg.accountId)}/storage/kv/namespaces/${encodeURIComponent(cfg.namespaceId)}/values`;
-  cachedRestKvKey = cacheKey;
-  cachedRestKvClient = {
-    async get(key: string, type?: "text" | "json") {
-      const res = await fetch(`${baseUrl}/${encodeURIComponent(key)}`, {
-        method: "GET",
-        headers,
-      });
-      if (res.status === 404) return null;
-      if (!res.ok) {
-        const body = await res.text().catch(() => "");
-        throw new Error(
-          `Cloudflare KV REST GET HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ""}`,
-        );
-      }
-      if (type === "json") return await res.json();
-      return await res.text();
-    },
-    async put(key: string, value: string) {
-      const res = await fetch(`${baseUrl}/${encodeURIComponent(key)}`, {
-        method: "PUT",
-        headers,
-        body: value,
-      });
-      if (!res.ok) {
-        const body = await res.text().catch(() => "");
-        throw new Error(
-          `Cloudflare KV REST PUT HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ""}`,
-        );
-      }
-    },
-    async delete(key: string) {
-      const res = await fetch(`${baseUrl}/${encodeURIComponent(key)}`, {
-        method: "DELETE",
-        headers,
-      });
-      if (res.status !== 404 && !res.ok) {
-        const body = await res.text().catch(() => "");
-        throw new Error(
-          `Cloudflare KV REST DELETE HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ""}`,
-        );
-      }
-    },
-  };
-  return cachedRestKvClient;
-}
-
-function getNativeBoundCloudflareKv(): CloudflareKvNamespace | null {
-  const fromAls = runtimeEnvAls?.getStore();
-  if (fromAls) {
-    return findKvInEnv(fromAls);
-  }
-  return (
-    findKvInEnv(latestRuntimeEnv) ||
-    findKvInEnv(asNonEmptyRecord((globalThis as { __env__?: unknown }).__env__)) ||
-    findKvInEnv(cachedWorkersModuleEnv)
-  );
-}
-
-export function getCloudflareKvStorageKind(): "binding" | "rest-api" | null {
-  if (getNativeBoundCloudflareKv()) return "binding";
-  if (getRestCloudflareKvConfig()) return "rest-api";
-  return null;
-}
-
-export function getBoundCloudflareKv(): CloudflareKvNamespace | null {
-  return getNativeBoundCloudflareKv() || getRestCloudflareKv();
-}
-
-export function getCloudflareEnvKeysSummary(): string {
-  const active = getActiveRuntimeEnv();
-  if (!active) return "sin env";
-  const keys = Object.keys(active).filter(Boolean);
-  return keys.length > 0 ? keys.slice(0, 12).join(", ") : "env vacío";
 }

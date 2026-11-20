@@ -70,10 +70,13 @@ function isInactiveSupabaseUrl(url?: string): boolean {
 function createSupabaseClient() {
   const SUPABASE_URL = import.meta.env["VITE_SUPABASE_URL"] || process.env["SUPABASE_URL"];
   const SUPABASE_PUBLISHABLE_KEY =
-    import.meta.env["VITE_SUPABASE_PUBLISHABLE_KEY"] || process.env["SUPABASE_PUBLISHABLE_KEY"];
-  const SUPABASE_SERVICE_ROLE_KEY = process.env["SUPABASE_SERVICE_ROLE_KEY"];
+    import.meta.env["VITE_SUPABASE_PUBLISHABLE_KEY"] ||
+    process.env["SUPABASE_PUBLISHABLE_KEY"] ||
+    process.env["SUPABASE_KEY"];
+  const SUPABASE_SERVICE_ROLE_KEY =
+    process.env["SUPABASE_SERVICE_ROLE_KEY"] || process.env["SUPABASE_KEY"];
 
-  // Connect to external Supabase when an active .supabase.co URL or service role key is configured;
+  // Connect to external Supabase when an active .supabase.co URL or server key is configured;
   // otherwise use the self-contained mock database so the board always renders reliably.
   const isExternalSupabase = Boolean(
     !_supabaseOffline &&

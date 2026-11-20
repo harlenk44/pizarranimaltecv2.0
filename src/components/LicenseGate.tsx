@@ -37,7 +37,13 @@ import {
 
 function hasExternalSupabaseConfigured(): boolean {
   const sbUrl = import.meta.env["VITE_SUPABASE_URL"];
-  return typeof sbUrl === "string" && sbUrl.includes(".supabase.co");
+  return (
+    typeof sbUrl === "string" &&
+    sbUrl.includes(".supabase.co") &&
+    !sbUrl.includes("ebpunrzbagmcdtammjqn.supabase.co") &&
+    !sbUrl.includes("dqpomustswauzejggfui.supabase.co") &&
+    !sbUrl.includes(".lovable.cloud")
+  );
 }
 
 function mapSupabaseRowToClientLicense(d: Record<string, unknown>): ClientLicense {
@@ -235,7 +241,7 @@ export default function LicenseGate({
   const syncLicenseState = useCallback(async () => {
     try {
       const sbDirectPromise = hasExternalSupabaseConfigured()
-        ? Promise.resolve(supabase.from("client_licenses").select("*"))
+        ? Promise.resolve(supabase.from("licenses").select("*"))
             .then((r) => (!r.error && Array.isArray(r.data) ? r.data : null))
             .catch(() => null)
         : Promise.resolve(null);
@@ -567,7 +573,7 @@ export default function LicenseGate({
       if (hasExternalSupabaseConfigured()) {
         try {
           const { data: sbRow, error: sbErr } = await supabase
-            .from("client_licenses")
+            .from("licenses")
             .select("*")
             .eq("pin_code", cleanPin)
             .maybeSingle();
@@ -655,7 +661,7 @@ export default function LicenseGate({
             };
             if (!alreadyBound) {
               void supabase
-                .from("client_licenses")
+                .from("licenses")
                 .update({ bound_device_ids: nextBound })
                 .eq("id", supabaseDirectMatch.id)
                 .then(
