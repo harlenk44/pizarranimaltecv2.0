@@ -59,6 +59,7 @@ import {
   isCustomUploadedGameLogo,
 } from "@/lib/game-logos";
 import { deduplicateGamesList, matchResultsForGame } from "@/lib/game-slugs";
+import { DEFAULT_APP_SETTINGS, parseAppSettingsFromSupabase } from "@/lib/types";
 import {
   getGameNeonColor,
   getNeonFlexCardStyle,
@@ -1086,21 +1087,49 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
 
             // Sync appSettings from cloud/server into BoardSettingsContext and localStorage
             if (syncData?.appSettings && typeof syncData.appSettings === "object") {
-              const incoming = syncData.appSettings as AppSettings;
+              const rawIncoming = syncData.appSettings as Record<string, unknown>;
+              const parsedIncoming = parseAppSettingsFromSupabase(rawIncoming);
+              const incoming: AppSettings = {
+                ...DEFAULT_APP_SETTINGS,
+                ...(rawIncoming as Partial<AppSettings>),
+                ...(parsedIncoming || {}),
+                id: "global",
+              };
               const incomingTime = incoming.updated_at
                 ? new Date(incoming.updated_at).getTime()
                 : 0;
+              let localParsed: AppSettings | null = null;
               let localTime = 0;
               try {
                 const raw = localStorage.getItem("pizarra_app_settings");
                 if (raw) {
-                  const parsed = JSON.parse(raw);
-                  if (parsed?.updated_at) localTime = new Date(parsed.updated_at).getTime();
+                  localParsed = JSON.parse(raw) as AppSettings;
+                  if (localParsed?.updated_at) {
+                    localTime = new Date(localParsed.updated_at).getTime();
+                  }
                 }
               } catch {
                 // ignore
               }
-              if (incomingTime >= localTime || localTime === 0) {
+              const visualChanged =
+                !localParsed ||
+                localParsed.background_color !== incoming.background_color ||
+                localParsed.surface_color !== incoming.surface_color ||
+                localParsed.primary_color !== incoming.primary_color ||
+                localParsed.text_color !== incoming.text_color ||
+                localParsed.card_color !== incoming.card_color ||
+                localParsed.result_row_color !== incoming.result_row_color ||
+                localParsed.font_family !== incoming.font_family ||
+                localParsed.base_font_size !== incoming.base_font_size ||
+                localParsed.card_style !== incoming.card_style ||
+                localParsed.logo_size !== incoming.logo_size ||
+                localParsed.font_size_scale !== incoming.font_size_scale ||
+                localParsed.hero_card_scale !== incoming.hero_card_scale ||
+                localParsed.animal_scale !== incoming.animal_scale ||
+                JSON.stringify(localParsed.game_colors || {}) !==
+                  JSON.stringify(incoming.game_colors || {});
+
+              if (visualChanged && (incomingTime >= localTime || localTime === 0)) {
                 updateSettings(incoming);
               }
             }

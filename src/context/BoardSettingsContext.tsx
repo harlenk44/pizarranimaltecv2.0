@@ -1,6 +1,22 @@
 import { createContext, useContext, useEffect, useState, useCallback, type ReactNode } from "react";
 import { supabase } from "@/lib/supabase";
-import { DEFAULT_APP_SETTINGS, type AppSettings, parseAppSettingsFromSupabase } from "@/lib/types";
+import {
+  DEFAULT_APP_SETTINGS,
+  type AppSettings,
+  cleanFontFamily,
+  parseAppSettingsFromSupabase,
+} from "@/lib/types";
+
+function hasExternalSupabaseConfigured(): boolean {
+  const sbUrl = import.meta.env["VITE_SUPABASE_URL"];
+  return (
+    typeof sbUrl === "string" &&
+    sbUrl.includes(".supabase.co") &&
+    !sbUrl.includes("ebpunrzbagmcdtammjqn.supabase.co") &&
+    !sbUrl.includes("dqpomustswauzejggfui.supabase.co") &&
+    !sbUrl.includes(".lovable.cloud")
+  );
+}
 
 interface BoardSettingsContextType {
   settings: AppSettings;
@@ -23,7 +39,14 @@ function getInitialSettings(): AppSettings {
       if (saved) {
         const parsed = JSON.parse(saved);
         if (parsed && typeof parsed === "object") {
-          return { ...DEFAULT_APP_SETTINGS, ...parsed };
+          const decoded = parseAppSettingsFromSupabase(parsed as Record<string, unknown>);
+          return {
+            ...DEFAULT_APP_SETTINGS,
+            ...parsed,
+            ...(decoded || {}),
+            font_family: cleanFontFamily((decoded?.font_family || parsed.font_family) as string),
+            id: "global",
+          };
         }
       }
     } catch {
@@ -39,36 +62,42 @@ export function BoardSettingsProvider({ children }: { children: ReactNode }) {
   const refreshSettings = useCallback(async () => {
     let cloudData: Partial<AppSettings> | null = null;
     let serverData: Partial<AppSettings> | null = null;
+    const useDirectSupabase = hasExternalSupabaseConfigured();
 
-    // 1. Fetch from Supabase app_settings table
-    try {
-      const { data, error } = await supabase
-        .from("app_settings")
-        .select("*")
-        .eq("id", "global")
-        .maybeSingle();
+    // 1. Fetch from Supabase app_settings table ONLY when an external browser Supabase URL is configured.
+    //    When the app connects via server-only Cloudflare Pages env vars (SUPABASE_URL + SUPABASE_KEY),
+    //    the browser supabase client falls back to mock-db (DEFAULT_APP_SETTINGS) and MUST NOT overwrite
+    //    the authoritative global settings returned by /api/public/results/sync.
+    if (useDirectSupabase) {
+      try {
+        const { data, error } = await supabase
+          .from("app_settings")
+          .select("*")
+          .eq("id", "global")
+          .maybeSingle();
 
-      if (!error && data) {
-        cloudData = parseAppSettingsFromSupabase(data as Record<string, unknown>);
-        console.log(
-          "[BoardDesign:Context] Datos recibidos de tabla Supabase app_settings:",
-          cloudData,
-        );
-      } else if (error) {
-        console.warn("[BoardDesign:Context] Aviso al consultar Supabase app_settings:", error);
+        if (!error && data) {
+          cloudData = parseAppSettingsFromSupabase(data as Record<string, unknown>);
+        } else if (error) {
+          console.warn("[BoardDesign:Context] Aviso al consultar Supabase app_settings:", error);
+        }
+      } catch (err) {
+        console.warn("[BoardDesign:Context] Excepción al consultar Supabase:", err);
       }
-    } catch (err) {
-      console.warn("[BoardDesign:Context] Excepción al consultar Supabase:", err);
     }
 
-    // 2. Fetch from server sync endpoint (app_settings.persisted.json)
+    // 2. Fetch authoritative global settings from server sync endpoint (backed by Supabase SUPABASE_URL/SUPABASE_KEY)
     try {
-      const res = await fetch("/api/public/results/sync");
+      const res = await fetch("/api/public/results/sync", { cache: "no-store" });
       if (res.ok) {
         const syncJson = await res.json();
         if (syncJson?.appSettings && typeof syncJson.appSettings === "object") {
-          serverData = syncJson.appSettings as AppSettings;
-          console.log("[BoardDesign:Context] Datos recibidos de sync endpoint:", serverData);
+          const rawServer = syncJson.appSettings as Record<string, unknown>;
+          const parsedServer = parseAppSettingsFromSupabase(rawServer);
+          serverData = {
+            ...(rawServer as Partial<AppSettings>),
+            ...(parsedServer || {}),
+          };
         }
       }
     } catch {
@@ -85,43 +114,28 @@ export function BoardSettingsProvider({ children }: { children: ReactNode }) {
       }
     }
 
-    // Merge baseline defaults, server persisted data, and cloud Supabase (strictly read-only:
-    // opening a board on one TV/browser must NEVER push localStorage back to global cloud app_settings)
+    // Pick newest authoritative remote source (serverData vs real cloudData)
+    const serverTime = serverData?.updated_at ? new Date(serverData.updated_at).getTime() : 0;
+    const cloudTime = cloudData?.updated_at ? new Date(cloudData.updated_at).getTime() : 0;
+    const cloudIsNewer = Boolean(cloudData && (!serverData || cloudTime > serverTime));
+
     const hasAuthoritativeRemote = Boolean(cloudData || serverData);
     const merged: AppSettings = {
       ...DEFAULT_APP_SETTINGS,
       ...(localData && !hasAuthoritativeRemote ? localData : {}),
-      ...(serverData || {}),
-      ...(cloudData || {}),
+      ...(cloudIsNewer ? serverData || {} : cloudData || {}),
+      ...(cloudIsNewer ? cloudData || {} : serverData || {}),
       id: "global",
     };
 
-    if (hasAuthoritativeRemote && localData) {
-      // Preserve local extended settings only when neither cloud nor server defines them
-      if (!cloudData?.game_colors && !serverData?.game_colors && localData.game_colors) {
-        merged.game_colors = { ...localData.game_colors };
-      } else {
-        merged.game_colors = {
-          ...(serverData?.game_colors || {}),
-          ...(cloudData?.game_colors || {}),
-        };
-      }
-      if (!cloudData?.card_style && !serverData?.card_style && localData.card_style) {
-        merged.card_style = localData.card_style;
-      }
+    merged.font_family = cleanFontFamily(merged.font_family);
+    merged.game_colors = {
+      ...(cloudIsNewer ? serverData?.game_colors || {} : cloudData?.game_colors || {}),
+      ...(cloudIsNewer ? cloudData?.game_colors || {} : serverData?.game_colors || {}),
+    };
+    if (!hasAuthoritativeRemote && localData?.game_colors) {
+      merged.game_colors = { ...localData.game_colors };
     }
-
-    console.log("[BoardDesign:Context] Configuración final consolidada para renderizar:", {
-      background_color: merged.background_color,
-      surface_color: merged.surface_color,
-      card_color: merged.card_color,
-      primary_color: merged.primary_color,
-      result_row_color: merged.result_row_color,
-      text_color: merged.text_color,
-      card_style: merged.card_style,
-      font_family: merged.font_family,
-      updated_at: merged.updated_at,
-    });
 
     setSettings(merged);
     if (typeof window !== "undefined") {
@@ -135,9 +149,14 @@ export function BoardSettingsProvider({ children }: { children: ReactNode }) {
 
   const updateSettings = useCallback((newSettings: Partial<AppSettings>) => {
     setSettings((prev) => {
+      const decoded = parseAppSettingsFromSupabase(newSettings as Record<string, unknown>);
       const updated: AppSettings = {
         ...prev,
         ...newSettings,
+        ...(decoded || {}),
+        font_family: cleanFontFamily(
+          (decoded?.font_family || newSettings.font_family || prev.font_family) as string,
+        ),
         id: "global",
         updated_at: newSettings.updated_at ?? new Date().toISOString(),
       };
@@ -151,7 +170,7 @@ export function BoardSettingsProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     refreshSettings();
 
-    // BroadcastChannel for instant inter-tab/inter-window sync
+    // BroadcastChannel for instant inter-tab/inter-window sync on same browser profile
     let bc: BroadcastChannel | null = null;
     try {
       bc = new BroadcastChannel("pizarra_lottery_channel");
@@ -164,18 +183,23 @@ export function BoardSettingsProvider({ children }: { children: ReactNode }) {
       // ignore
     }
 
-    const channel = supabase
-      .channel("app-settings-realtime-sync")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "app_settings" },
-        refreshSettings,
-      )
-      .subscribe();
+    const useDirectSupabase = hasExternalSupabaseConfigured();
+    const channel = useDirectSupabase
+      ? supabase
+          .channel("app-settings-realtime-sync")
+          .on(
+            "postgres_changes",
+            { event: "*", schema: "public", table: "app_settings" },
+            refreshSettings,
+          )
+          .subscribe()
+      : null;
 
     return () => {
       bc?.close();
-      supabase.removeChannel(channel);
+      if (channel) {
+        supabase.removeChannel(channel);
+      }
     };
   }, [refreshSettings]);
 

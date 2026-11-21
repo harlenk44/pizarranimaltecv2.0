@@ -11,6 +11,7 @@ import { generateLicenseUuid } from "@/lib/license-lotteries";
 
 const WORKSPACE_LICENSES_PATH = path.join(process.cwd(), "client_licenses.persisted.json");
 const WORKSPACE_ANIMAL_IMAGES_PATH = path.join(process.cwd(), "animal_images.persisted.json");
+const WORKSPACE_APP_SETTINGS_PATH = path.join(process.cwd(), "app_settings.persisted.json");
 
 type SyncHandlers = {
   GET: (ctx: { request: Request }) => Promise<Response>;
@@ -32,6 +33,7 @@ function getSyncHandlers(): SyncHandlers {
 describe("Supabase licenses table & animal-images Storage bucket integration", () => {
   let originalLicensesFileContent: string | null = null;
   let originalAnimalImagesFileContent: string | null = null;
+  let originalAppSettingsFileContent: string | null = null;
 
   beforeAll(() => {
     if (fs.existsSync(WORKSPACE_LICENSES_PATH)) {
@@ -39,6 +41,9 @@ describe("Supabase licenses table & animal-images Storage bucket integration", (
     }
     if (fs.existsSync(WORKSPACE_ANIMAL_IMAGES_PATH)) {
       originalAnimalImagesFileContent = fs.readFileSync(WORKSPACE_ANIMAL_IMAGES_PATH, "utf-8");
+    }
+    if (fs.existsSync(WORKSPACE_APP_SETTINGS_PATH)) {
+      originalAppSettingsFileContent = fs.readFileSync(WORKSPACE_APP_SETTINGS_PATH, "utf-8");
     }
   });
 
@@ -48,6 +53,9 @@ describe("Supabase licenses table & animal-images Storage bucket integration", (
     }
     if (originalAnimalImagesFileContent !== null) {
       fs.writeFileSync(WORKSPACE_ANIMAL_IMAGES_PATH, originalAnimalImagesFileContent);
+    }
+    if (originalAppSettingsFileContent !== null) {
+      fs.writeFileSync(WORKSPACE_APP_SETTINGS_PATH, originalAppSettingsFileContent);
     }
     await runWithCloudflareEnv({}, async () => {});
   });
@@ -672,5 +680,136 @@ describe("Supabase licenses table & animal-images Storage bucket integration", (
         }),
       });
     });
+  });
+
+  it("persists global appSettings (colors, font_family, card_style, game_colors, scales) to Supabase app_settings and returns them cleanly on fresh GET (Incognito)", async () => {
+    let storedAppSettingsRow: Record<string, unknown> | null = null;
+    const originalFetch = globalThis.fetch;
+
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.startsWith("https://global-design.supabase.co/rest/v1/")) {
+        const parsed = new URL(url);
+        const table = parsed.pathname.replace("/rest/v1/", "");
+        const method = (
+          init?.method || (input instanceof Request ? input.method : "GET")
+        ).toUpperCase();
+        const headers = new Headers(input instanceof Request ? input.headers : undefined);
+        if (init?.headers) {
+          new Headers(init.headers).forEach((v, k) => headers.set(k, v));
+        }
+        const wantsObject = (headers.get("accept") || "").includes(
+          "application/vnd.pgrst.object+json",
+        );
+
+        if (table === "app_settings") {
+          if (method === "GET") {
+            if (wantsObject) {
+              if (!storedAppSettingsRow) {
+                return new Response(JSON.stringify({ code: "PGRST116", message: "0 rows" }), {
+                  status: 406,
+                  headers: { "Content-Type": "application/json" },
+                });
+              }
+              return new Response(JSON.stringify(storedAppSettingsRow), {
+                status: 200,
+                headers: { "Content-Type": "application/json" },
+              });
+            }
+            return new Response(
+              JSON.stringify(storedAppSettingsRow ? [storedAppSettingsRow] : []),
+              {
+                status: 200,
+                headers: { "Content-Type": "application/json" },
+              },
+            );
+          }
+          if (method === "POST") {
+            const rawBody =
+              typeof init?.body === "string"
+                ? init.body
+                : input instanceof Request
+                  ? await input.clone().text()
+                  : "{}";
+            const parsedBody = JSON.parse(rawBody);
+            const row = Array.isArray(parsedBody) ? parsedBody[0] : parsedBody;
+            storedAppSettingsRow = { ...row };
+            return new Response(JSON.stringify([storedAppSettingsRow]), {
+              status: 201,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+        }
+
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return originalFetch(input, init);
+    }) as typeof fetch;
+
+    const handlers = getSyncHandlers();
+    try {
+      await runWithCloudflareEnv(
+        {
+          SUPABASE_URL: "https://global-design.supabase.co",
+          SUPABASE_KEY: "eyJtest.global.design.key",
+        },
+        async () => {
+          const putRes = await handlers.PUT({
+            request: new Request("http://localhost/api/public/results/sync", {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                appSettings: {
+                  id: "global",
+                  background_color: "#000000",
+                  surface_color: "#111111",
+                  primary_color: "#10b981",
+                  text_color: "#ffffff",
+                  card_color: "#0a0a0a",
+                  result_row_color: "#141414",
+                  font_family: "Georgia",
+                  base_font_size: 18,
+                  card_style: "solid",
+                  logo_size: 84,
+                  font_size_scale: 112,
+                  hero_card_scale: 105,
+                  animal_scale: 110,
+                  game_colors: { "la-granjita": "#facc15" },
+                  updated_at: "2026-11-20T22:15:00.000Z",
+                },
+              }),
+            }),
+          });
+          const putJson = await putRes.json();
+          expect(putJson.cloudSettingsSyncOk).toBe(true);
+          expect(putJson.cloudSettingsError).toBeNull();
+          expect(storedAppSettingsRow).not.toBeNull();
+          expect(storedAppSettingsRow?.["surface_color"]).toBe("#111111");
+          expect(storedAppSettingsRow?.["card_color"]).toBe("#0a0a0a");
+
+          // Fresh Incognito GET (even with stale poll/settingsVersion query) always receives decoded global design
+          const getRes = await handlers.GET({
+            request: new Request(
+              "http://localhost/api/public/results/sync?poll=1&settingsVersion=1",
+            ),
+          });
+          const getJson = await getRes.json();
+          expect(getJson.appSettings?.background_color).toBe("#000000");
+          expect(getJson.appSettings?.surface_color).toBe("#111111");
+          expect(getJson.appSettings?.card_color).toBe("#0a0a0a");
+          expect(getJson.appSettings?.result_row_color).toBe("#141414");
+          expect(getJson.appSettings?.font_family).toBe("Georgia");
+          expect(getJson.appSettings?.card_style).toBe("solid");
+          expect(getJson.appSettings?.logo_size).toBe(84);
+          expect(getJson.appSettings?.font_size_scale).toBe(112);
+          expect(getJson.appSettings?.game_colors).toEqual({ "la-granjita": "#facc15" });
+        },
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

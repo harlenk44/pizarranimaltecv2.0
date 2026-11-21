@@ -49,7 +49,7 @@ import {
 import { type AppSettings, type ClientLicense, sanitizeAppSettingsForSupabase } from "@/lib/types";
 
 export default function DesignManager() {
-  const { settings, refreshSettings, updateSettings } = useBoardSettings();
+  const { settings, updateSettings } = useBoardSettings();
   const [draft, setDraft] = useState<AppSettings>(settings);
   const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>(loadVoiceSettings());
   const [testingVoice, setTestingVoice] = useState(false);
@@ -153,45 +153,86 @@ export default function DesignManager() {
     };
   }, []);
 
-  const persistSettings = useCallback(async (payload: AppSettings) => {
-    const sanitized = sanitizeAppSettingsForSupabase(payload);
-    console.log("[BoardDesign:DesignManager] Sincronizando diseño Global...", {
-      sanitized_db: sanitized,
-      full_payload: payload,
-    });
+  const persistSettings = useCallback(
+    async (
+      payload: AppSettings,
+    ): Promise<{ ok: boolean; error?: string; appSettings?: AppSettings }> => {
+      const sanitized = sanitizeAppSettingsForSupabase(payload);
+      let directCloudOk = false;
+      let accessToken: string | null = null;
 
-    try {
-      const { error } = await supabase.from("app_settings").upsert(sanitized, { onConflict: "id" });
-      if (error) {
-        console.warn("[BoardDesign:DesignManager] Aviso en Supabase app_settings upsert:", error);
-      } else {
-        console.log("[BoardDesign:DesignManager] Guardado exitoso en tabla Supabase app_settings");
+      try {
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
+        accessToken = session?.access_token ?? null;
+      } catch {
+        // ignore
       }
-    } catch (err) {
-      console.warn("[BoardDesign:DesignManager] Excepción al guardar en Supabase:", err);
-    }
 
-    try {
-      await fetch("/api/public/results/sync", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ appSettings: payload }),
-      });
-      console.log(
-        "[BoardDesign:DesignManager] Guardado exitoso en endpoint de sincronización del servidor",
-      );
-    } catch (err) {
-      console.warn("[BoardDesign:DesignManager] Error en PUT sync:", err);
-    }
+      if (hasExternalSupabase) {
+        try {
+          const { error } = await supabase
+            .from("app_settings")
+            .upsert(sanitized, { onConflict: "id" });
+          if (error) {
+            console.warn(
+              "[BoardDesign:DesignManager] Aviso en Supabase app_settings upsert:",
+              error,
+            );
+          } else {
+            directCloudOk = true;
+          }
+        } catch (err) {
+          console.warn("[BoardDesign:DesignManager] Excepción al guardar en Supabase:", err);
+        }
+      }
 
-    try {
-      const bc = new BroadcastChannel("pizarra_lottery_channel");
-      bc.postMessage({ type: "APP_SETTINGS_UPDATED", settings: payload });
-      setTimeout(() => bc.close(), 1000);
-    } catch {
-      // ignore
-    }
-  }, []);
+      try {
+        const res = await fetch("/api/public/results/sync", {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+          },
+          body: JSON.stringify({ appSettings: payload }),
+        });
+        const data = await res.json().catch(() => null);
+        const serverCloudOk = Boolean(res.ok && data && data.cloudSettingsSyncOk !== false);
+
+        if (!serverCloudOk && !directCloudOk) {
+          const errDetail =
+            (data && typeof data.cloudSettingsError === "string" && data.cloudSettingsError) ||
+            (data && typeof data.error === "string" && data.error) ||
+            `No se pudo guardar el diseño global en Supabase (HTTP ${res.status}).`;
+          return { ok: false, error: errDetail };
+        }
+
+        try {
+          const bc = new BroadcastChannel("pizarra_lottery_channel");
+          bc.postMessage({ type: "APP_SETTINGS_UPDATED", settings: payload });
+          setTimeout(() => bc.close(), 1000);
+        } catch {
+          // ignore
+        }
+
+        return {
+          ok: true,
+          appSettings:
+            data?.appSettings && typeof data.appSettings === "object"
+              ? (data.appSettings as AppSettings)
+              : payload,
+        };
+      } catch (err) {
+        const netErr = err instanceof Error ? err.message : String(err);
+        if (directCloudOk) {
+          return { ok: true, appSettings: payload };
+        }
+        return { ok: false, error: `Error de red al guardar diseño global: ${netErr}` };
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!hasUnsavedGlobalChanges) {
@@ -434,14 +475,21 @@ export default function DesignManager() {
     };
     latestDraftRef.current = fullPayload;
 
-    updateSettings(fullPayload);
-    await persistSettings(fullPayload);
+    const persistResult = await persistSettings(fullPayload);
+    if (!persistResult.ok) {
+      setMessage(
+        `Error al guardar el diseño global en la nube: ${persistResult.error || "No se pudo confirmar escritura en Supabase."}`,
+      );
+      setSaving(false);
+      return;
+    }
+
+    const confirmedSettings = persistResult.appSettings || fullPayload;
+    latestDraftRef.current = confirmedSettings;
+    updateSettings(confirmedSettings);
     setHasUnsavedGlobalChanges(false);
 
-    setMessage(
-      "¡Diseño global guardado y sincronizado exitosamente para pantallas sin diseño propio!",
-    );
-    await refreshSettings();
+    setMessage("¡Diseño global guardado y sincronizado en la nube para todas las pantallas!");
     setSaving(false);
   }
 

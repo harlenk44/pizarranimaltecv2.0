@@ -8,7 +8,14 @@ import {
   filterAdminCustomAnimalImages,
   ensureCustomCatalogLoaded,
 } from "@/lib/mock-db";
-import { type ClientLicense, type AnimalImage, sanitizeAppSettingsForSupabase } from "@/lib/types";
+import {
+  type ClientLicense,
+  type AnimalImage,
+  type AppSettings,
+  DEFAULT_APP_SETTINGS,
+  parseAppSettingsFromSupabase,
+  sanitizeAppSettingsForSupabase,
+} from "@/lib/types";
 import {
   getDefaultGameScheduleTimes,
   getGameScheduleTimes,
@@ -1785,16 +1792,126 @@ function ensureServerDataInitialized() {
 
 let lastAppSettingsCloudSyncAt = 0;
 let appSettingsCloudSyncPromise: Promise<void> | null = null;
-const APP_SETTINGS_CLOUD_TTL_MS = 30_000;
+const APP_SETTINGS_CLOUD_TTL_MS = 10_000;
+
+function normalizeAppSettingsRecord(raw: Record<string, unknown> | null | undefined): AppSettings {
+  const base = mockStore.app_settings[0] || DEFAULT_APP_SETTINGS;
+  const decoded = parseAppSettingsFromSupabase(raw);
+  return {
+    ...DEFAULT_APP_SETTINGS,
+    ...base,
+    ...(raw as Partial<AppSettings>),
+    ...(decoded || {}),
+    id: "global",
+  };
+}
+
+async function upsertAppSettingsToSupabase(
+  settings: AppSettings,
+  requestBearerToken?: string | null,
+): Promise<{
+  ok: boolean;
+  error?: string;
+  supabaseError?: DetailedSupabaseError;
+}> {
+  const diag = getSupabaseCloudDiagnostics();
+  if (!diag.configured) {
+    return { ok: true };
+  }
+
+  const adminClient = createRealSupabaseAdminClient();
+  if (!adminClient) {
+    return {
+      ok: false,
+      error: diag.reason || "No se pudo inicializar el cliente de Supabase para app_settings.",
+    };
+  }
+
+  const sanitizedDb = sanitizeAppSettingsForSupabase(settings);
+
+  const attemptUpsert = async (
+    client: ReturnType<typeof createRealSupabaseAdminClient>,
+  ): Promise<{ ok: boolean; error?: string; supabaseError?: DetailedSupabaseError }> => {
+    if (!client) {
+      return { ok: false, error: "Cliente Supabase no disponible." };
+    }
+    try {
+      const { data, error } = await client
+        .from("app_settings")
+        .upsert(sanitizedDb as never, { onConflict: "id" })
+        .select("id");
+
+      if (error) {
+        const detailed = toDetailedSupabaseError(error, "app_settings");
+        return {
+          ok: false,
+          error: formatDetailedSupabaseError(detailed),
+          supabaseError: detailed,
+        };
+      }
+
+      if (!Array.isArray(data) || data.length === 0) {
+        const detailed: DetailedSupabaseError = {
+          code: "42501",
+          message: "Supabase no confirmó filas guardadas en app_settings",
+          details: "upsert().select('id') retornó 0 filas",
+          hint: "Verifica RLS o permisos de escritura para SUPABASE_KEY en la tabla app_settings",
+          table: "app_settings",
+        };
+        return {
+          ok: false,
+          error: formatDetailedSupabaseError(detailed),
+          supabaseError: detailed,
+        };
+      }
+
+      return { ok: true };
+    } catch (err) {
+      const detailed = toDetailedSupabaseError(err, "app_settings");
+      return {
+        ok: false,
+        error: formatDetailedSupabaseError(detailed),
+        supabaseError: detailed,
+      };
+    }
+  };
+
+  let res = await attemptUpsert(adminClient);
+  if (
+    !res.ok &&
+    requestBearerToken &&
+    (res.supabaseError?.code === "42501" ||
+      /row-level security|permission denied|not allowed|0 filas/i.test(res.error || ""))
+  ) {
+    const tokenClient = createSupabaseClientWithToken(requestBearerToken);
+    if (tokenClient) {
+      const tokenRes = await attemptUpsert(tokenClient);
+      if (tokenRes.ok) {
+        res = tokenRes;
+      }
+    }
+  }
+
+  if (!res.ok) {
+    console.error("[supabase-app-settings-upsert-failed]", res.supabaseError || res.error);
+  } else {
+    lastAppSettingsCloudSyncAt = Date.now();
+  }
+
+  return res;
+}
 
 async function syncAppSettingsWithSupabase(force = false): Promise<void> {
   const now = Date.now();
   if (!force && appSettingsCloudSyncPromise) return appSettingsCloudSyncPromise;
   if (!force && now - lastAppSettingsCloudSyncAt < APP_SETTINGS_CLOUD_TTL_MS) return;
 
+  const client = createRealSupabaseAdminClient();
+  if (!client) return;
+
   const run = (async () => {
     try {
-      const { data, error } = await supabaseAdmin
+      const { data, error } = await client
         .from("app_settings")
         .select("*")
         .eq("id", "global")
@@ -1802,20 +1919,27 @@ async function syncAppSettingsWithSupabase(force = false): Promise<void> {
 
       if (!error && data) {
         lastAppSettingsCloudSyncAt = Date.now();
-        const merged = {
-          ...mockStore.app_settings[0],
-          ...(data as Record<string, unknown>),
+        const decoded = parseAppSettingsFromSupabase(data as Record<string, unknown>);
+        const current = mockStore.app_settings[0] || DEFAULT_APP_SETTINGS;
+        const merged: AppSettings = {
+          ...DEFAULT_APP_SETTINGS,
+          ...current,
+          ...(decoded || {}),
           id: "global",
         };
-        mockStore.app_settings = [merged as (typeof mockStore.app_settings)[0]];
-        saveServerAppSettings();
+        const prevSerialized = JSON.stringify(current);
+        const nextSerialized = JSON.stringify(merged);
+        if (prevSerialized !== nextSerialized) {
+          mockStore.app_settings = [merged];
+          saveServerAppSettings();
+        }
       } else if (!error && !data && mockStore.app_settings[0]) {
         lastAppSettingsCloudSyncAt = Date.now();
         const sanitizedDb = sanitizeAppSettingsForSupabase({
           ...mockStore.app_settings[0],
           id: "global",
         });
-        await supabaseAdmin.from("app_settings").upsert(sanitizedDb, { onConflict: "id" });
+        await client.from("app_settings").upsert(sanitizedDb as never, { onConflict: "id" });
       }
     } catch {
       // ignore
@@ -2258,7 +2382,6 @@ export const Route = createFileRoute("/api/public/results/sync")({
         const clientLogosVer = reqUrl.searchParams.get("logosVersion");
         const clientGamesVer = reqUrl.searchParams.get("gamesVersion");
         const clientImagesVer = reqUrl.searchParams.get("imagesVersion");
-        const clientSettingsVer = reqUrl.searchParams.get("settingsVersion");
         const isPoll = reqUrl.searchParams.get("poll") === "1" || clientGamesVer !== null;
 
         const serverToday = lotteryDate();
@@ -2331,8 +2454,6 @@ export const Route = createFileRoute("/api/public/results/sync")({
         const shouldSendGames = !clientGamesVer || clientGamesVer !== String(serverGamesVersion);
         const shouldSendImages =
           !clientImagesVer || clientImagesVer !== String(serverAnimalImagesVersion);
-        const shouldSendSettings =
-          !clientSettingsVer || clientSettingsVer !== String(serverAppSettingsVersion);
 
         if (shouldSendImages) {
           await ensureCustomCatalogLoaded().catch(() => {});
@@ -2378,7 +2499,13 @@ export const Route = createFileRoute("/api/public/results/sync")({
             : null,
           games: shouldSendGames ? mockStore.games : null,
           customGameLogos: shouldSendLogos ? serverCustomGameLogos : null,
-          appSettings: shouldSendSettings ? mockStore.app_settings[0] || null : null,
+          // Always return decoded global appSettings (~400 bytes) so multi-isolate Cloudflare Workers
+          // never skip pushing updated global design changes to Incognito or already-open TV screens.
+          appSettings: mockStore.app_settings[0]
+            ? normalizeAppSettingsRecord(
+                mockStore.app_settings[0] as unknown as Record<string, unknown>,
+              )
+            : null,
           requireLicense: serverLicenseState.requireLicense,
           clientLicenses: isPoll ? null : serverLicenseState.licenses,
           deletedIds: isPoll ? null : serverLicenseState.deletedIds || [],
@@ -3431,15 +3558,37 @@ export const Route = createFileRoute("/api/public/results/sync")({
             }
           }
 
+          let cloudSettingsSyncOk: boolean | null = null;
+          let cloudSettingsError: string | null = null;
+          let cloudSettingsSupabaseError: DetailedSupabaseError | null = null;
+
           if (appSettings && typeof appSettings === "object") {
-            const merged = { ...mockStore.app_settings[0], ...appSettings, id: "global" };
+            const prevAppSettings = mockStore.app_settings[0]
+              ? { ...mockStore.app_settings[0] }
+              : null;
+            const merged = normalizeAppSettingsRecord({
+              ...(mockStore.app_settings[0] as unknown as Record<string, unknown>),
+              ...(appSettings as Record<string, unknown>),
+              id: "global",
+              updated_at:
+                typeof (appSettings as Record<string, unknown>).updated_at === "string" &&
+                String((appSettings as Record<string, unknown>).updated_at).trim()
+                  ? String((appSettings as Record<string, unknown>).updated_at)
+                  : new Date().toISOString(),
+            });
             mockStore.app_settings = [merged];
             saveServerAppSettings();
-            try {
-              const sanitizedDb = sanitizeAppSettingsForSupabase(merged);
-              await supabaseAdmin.from("app_settings").upsert(sanitizedDb, { onConflict: "id" });
-            } catch (err) {
-              console.warn("[sync.ts] Supabase app_settings upsert error:", err);
+
+            const cloudSettingsRes = await upsertAppSettingsToSupabase(merged, bearerToken);
+            cloudSettingsSyncOk = cloudSettingsRes.ok;
+            if (!cloudSettingsRes.ok) {
+              cloudSettingsError =
+                cloudSettingsRes.error || "No se pudo guardar app_settings en Supabase.";
+              cloudSettingsSupabaseError = cloudSettingsRes.supabaseError || null;
+              if (prevAppSettings) {
+                mockStore.app_settings = [prevAppSettings];
+                saveServerAppSettings();
+              }
             }
           }
 
@@ -3468,7 +3617,14 @@ export const Route = createFileRoute("/api/public/results/sync")({
             gamesVersion: serverGamesVersion,
             imagesVersion: serverAnimalImagesVersion,
             settingsVersion: serverAppSettingsVersion,
-            appSettings: mockStore.app_settings[0] || null,
+            appSettings: mockStore.app_settings[0]
+              ? normalizeAppSettingsRecord(
+                  mockStore.app_settings[0] as unknown as Record<string, unknown>,
+                )
+              : null,
+            cloudSettingsSyncOk,
+            cloudSettingsError,
+            cloudSettingsSupabaseError,
             requireLicense: serverLicenseState.requireLicense,
             clientLicenses: serverLicenseState.licenses,
             deletedIds: serverLicenseState.deletedIds || [],

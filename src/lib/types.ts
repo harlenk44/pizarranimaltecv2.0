@@ -125,13 +125,77 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   updated_at: "",
 };
 
+const FONT_FAMILY_EXT_DELIMITER = "||";
+
+/**
+ * Strips any packed extended-design JSON metadata suffix from font_family
+ * so CSS always receives a clean font name (e.g. "Georgia", "Inter").
+ */
+export function cleanFontFamily(raw?: string | null): string {
+  if (!raw || typeof raw !== "string") return DEFAULT_APP_SETTINGS.font_family;
+  const idx = raw.indexOf(FONT_FAMILY_EXT_DELIMITER);
+  const cleaned = (idx >= 0 ? raw.slice(0, idx) : raw).trim();
+  return cleaned || DEFAULT_APP_SETTINGS.font_family;
+}
+
 /**
  * Sanitizes AppSettings into the exact standard columns of the Supabase public.app_settings table.
- * Strips non-column properties so PostgREST never fails with 'column not found' errors.
+ * Strips non-column properties so PostgREST never fails with 'column not found' errors,
+ * while safely packing extended global design settings (card_style, game_colors, scales)
+ * inside font_family using a backward-compatible "||" delimiter.
  */
 export function sanitizeAppSettingsForSupabase(
   settings: Partial<AppSettings>,
 ): Record<string, unknown> {
+  const baseFont = cleanFontFamily(settings.font_family);
+  const extended: Record<string, unknown> = {};
+
+  if (settings.card_style === "solid" || settings.card_style === "neon") {
+    if (settings.card_style !== DEFAULT_APP_SETTINGS.card_style) {
+      extended["cs"] = settings.card_style;
+    }
+  }
+  if (settings.game_colors && typeof settings.game_colors === "object") {
+    const cleanColors: Record<string, string> = {};
+    for (const [k, v] of Object.entries(settings.game_colors)) {
+      if (typeof v === "string" && v.trim()) {
+        cleanColors[k] = v.trim();
+      }
+    }
+    if (Object.keys(cleanColors).length > 0) {
+      extended["gc"] = cleanColors;
+    }
+  }
+  if (
+    typeof settings.logo_size === "number" &&
+    settings.logo_size !== DEFAULT_APP_SETTINGS.logo_size
+  ) {
+    extended["ls"] = settings.logo_size;
+  }
+  if (
+    typeof settings.font_size_scale === "number" &&
+    settings.font_size_scale !== DEFAULT_APP_SETTINGS.font_size_scale
+  ) {
+    extended["fs"] = settings.font_size_scale;
+  }
+  if (
+    typeof settings.hero_card_scale === "number" &&
+    settings.hero_card_scale !== DEFAULT_APP_SETTINGS.hero_card_scale
+  ) {
+    extended["hc"] = settings.hero_card_scale;
+  }
+  if (
+    typeof settings.animal_scale === "number" &&
+    settings.animal_scale !== DEFAULT_APP_SETTINGS.animal_scale
+  ) {
+    extended["as"] = settings.animal_scale;
+  }
+
+  const packedFontFamily =
+    Object.keys(extended).length > 0
+      ? `${baseFont}${FONT_FAMILY_EXT_DELIMITER}${JSON.stringify(extended)}`
+      : baseFont;
+
   return {
     id: "global",
     background_color: settings.background_color || DEFAULT_APP_SETTINGS.background_color,
@@ -140,7 +204,7 @@ export function sanitizeAppSettingsForSupabase(
     text_color: settings.text_color || DEFAULT_APP_SETTINGS.text_color,
     card_color: settings.card_color || DEFAULT_APP_SETTINGS.card_color,
     result_row_color: settings.result_row_color || DEFAULT_APP_SETTINGS.result_row_color,
-    font_family: settings.font_family || DEFAULT_APP_SETTINGS.font_family,
+    font_family: packedFontFamily,
     base_font_size:
       typeof settings.base_font_size === "number"
         ? settings.base_font_size
@@ -157,12 +221,36 @@ export function sanitizeAppSettingsForSupabase(
 
 /**
  * Parses raw row data from Supabase app_settings table into a clean Partial<AppSettings>,
- * safely inspecting standard columns and any theme_config/custom_styles JSON columns if present.
+ * safely unpacking packed font_family extended metadata and any theme_config/custom_styles JSON columns.
  */
 export function parseAppSettingsFromSupabase(
   data: Record<string, unknown> | null | undefined,
 ): Partial<AppSettings> | null {
   if (!data || typeof data !== "object") return null;
+
+  let decodedFontFamily: string | undefined;
+  let packedExt: Record<string, unknown> | null = null;
+  if (typeof data["font_family"] === "string") {
+    const rawFont = data["font_family"];
+    const delimIdx = rawFont.indexOf(FONT_FAMILY_EXT_DELIMITER);
+    if (delimIdx >= 0) {
+      decodedFontFamily = rawFont.slice(0, delimIdx).trim() || DEFAULT_APP_SETTINGS.font_family;
+      const jsonPart = rawFont.slice(delimIdx + FONT_FAMILY_EXT_DELIMITER.length).trim();
+      if (jsonPart.startsWith("{")) {
+        try {
+          const parsed = JSON.parse(jsonPart);
+          if (parsed && typeof parsed === "object") {
+            packedExt = parsed as Record<string, unknown>;
+          }
+        } catch {
+          // ignore malformed suffix
+        }
+      }
+    } else {
+      decodedFontFamily = rawFont.trim() || DEFAULT_APP_SETTINGS.font_family;
+    }
+  }
+
   const result: Partial<AppSettings> = {
     id: "global",
     background_color:
@@ -173,7 +261,7 @@ export function parseAppSettingsFromSupabase(
     card_color: typeof data["card_color"] === "string" ? data["card_color"] : undefined,
     result_row_color:
       typeof data["result_row_color"] === "string" ? data["result_row_color"] : undefined,
-    font_family: typeof data["font_family"] === "string" ? data["font_family"] : undefined,
+    font_family: decodedFontFamily,
     base_font_size: typeof data["base_font_size"] === "number" ? data["base_font_size"] : undefined,
     rotation_enabled:
       typeof data["rotation_enabled"] === "boolean" ? data["rotation_enabled"] : undefined,
@@ -184,6 +272,20 @@ export function parseAppSettingsFromSupabase(
     start_view: data["start_view"] === "weekly" ? "weekly" : "daily",
     updated_at: typeof data["updated_at"] === "string" ? data["updated_at"] : undefined,
   };
+
+  // Unpack extended properties stored inside font_family suffix
+  if (packedExt) {
+    if (packedExt["cs"] === "solid" || packedExt["cs"] === "neon") {
+      result.card_style = packedExt["cs"];
+    }
+    if (packedExt["gc"] && typeof packedExt["gc"] === "object") {
+      result.game_colors = packedExt["gc"] as Record<string, string>;
+    }
+    if (typeof packedExt["ls"] === "number") result.logo_size = packedExt["ls"];
+    if (typeof packedExt["fs"] === "number") result.font_size_scale = packedExt["fs"];
+    if (typeof packedExt["hc"] === "number") result.hero_card_scale = packedExt["hc"];
+    if (typeof packedExt["as"] === "number") result.animal_scale = packedExt["as"];
+  }
 
   // If theme_config or custom_styles JSON column exists in Supabase table, extract extended properties
   const extended = (data["theme_config"] || data["custom_styles"]) as
@@ -211,6 +313,10 @@ export function parseAppSettingsFromSupabase(
   if (data["game_colors"] && typeof data["game_colors"] === "object") {
     result.game_colors = data["game_colors"] as Record<string, string>;
   }
+  if (typeof data["logo_size"] === "number") result.logo_size = data["logo_size"];
+  if (typeof data["font_size_scale"] === "number") result.font_size_scale = data["font_size_scale"];
+  if (typeof data["hero_card_scale"] === "number") result.hero_card_scale = data["hero_card_scale"];
+  if (typeof data["animal_scale"] === "number") result.animal_scale = data["animal_scale"];
 
   return result;
 }
