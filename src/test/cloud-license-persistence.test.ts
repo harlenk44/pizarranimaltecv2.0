@@ -812,4 +812,159 @@ describe("Supabase licenses table & animal-images Storage bucket integration", (
       globalThis.fetch = originalFetch;
     }
   });
+
+  it("persists global appSettings via Master License (291007) in 'licenses' table when 'app_settings' table fails with RLS/error and resets client license design overrides", async () => {
+    const originalFetch = globalThis.fetch;
+    const storedLicenses = new Map<string, Record<string, unknown>>();
+    storedLicenses.set("11111111-1111-4111-8111-111111111111", {
+      id: "11111111-1111-4111-8111-111111111111",
+      client_name:
+        'taller||{"tarjetasPorPantalla":8,"tiempoTransicion":25,"diseno":{"card_color":"#0f172a","surface_color":"#0f172a","background_color":"#020617","useCustomDesign":true}}',
+      pin_code: "554433",
+      status: "active",
+      expires_at: null,
+      max_devices: 2,
+      bound_device_ids: [],
+      notes: "",
+      created_at: "2026-01-01T00:00:00.000Z",
+    });
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const urlStr =
+        typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (urlStr.startsWith("https://fallback-design.supabase.co/rest/v1/")) {
+        const parsedUrl = new URL(urlStr);
+        const table = parsedUrl.pathname.replace("/rest/v1/", "");
+        const method = (
+          init?.method ||
+          (input instanceof Request ? input.method : "GET") ||
+          "GET"
+        ).toUpperCase();
+
+        // Simulate app_settings table failing with RLS error 42501
+        if (table === "app_settings") {
+          return new Response(
+            JSON.stringify({
+              code: "42501",
+              message: 'new row violates row-level security policy for table "app_settings"',
+              details: null,
+              hint: null,
+            }),
+            {
+              status: 403,
+              headers: { "Content-Type": "application/json" },
+            },
+          );
+        }
+
+        if (table === "licenses") {
+          if (method === "GET") {
+            const pinEq = parsedUrl.searchParams.get("pin_code");
+            let rows = Array.from(storedLicenses.values());
+            if (pinEq?.startsWith("eq.")) {
+              const targetPin = pinEq.slice(3);
+              rows = rows.filter((r) => r["pin_code"] === targetPin);
+            }
+            const headers = new Headers(input instanceof Request ? input.headers : undefined);
+            if (init?.headers) {
+              new Headers(init.headers).forEach((v, k) => headers.set(k, v));
+            }
+            const wantsObject = (headers.get("accept") || "").includes(
+              "application/vnd.pgrst.object+json",
+            );
+            if (wantsObject) {
+              return new Response(JSON.stringify(rows[0] ?? null), {
+                status: 200,
+                headers: { "Content-Type": "application/json" },
+              });
+            }
+            return new Response(JSON.stringify(rows), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+
+          if (method === "POST" || method === "PATCH") {
+            const rawBody =
+              typeof init?.body === "string"
+                ? init.body
+                : input instanceof Request
+                  ? await input.clone().text()
+                  : "{}";
+            const parsedBody = JSON.parse(rawBody);
+            const incomingRows = Array.isArray(parsedBody) ? parsedBody : [parsedBody];
+            const savedRows: Record<string, unknown>[] = [];
+            for (const row of incomingRows) {
+              const id =
+                (row["id"] as string) ||
+                parsedUrl.searchParams.get("id")?.replace(/^eq\./, "") ||
+                "00000000-0000-4000-8000-000000291007";
+              const existing = storedLicenses.get(id) || {};
+              const merged = { ...existing, ...row, id };
+              storedLicenses.set(id, merged);
+              savedRows.push(merged);
+            }
+            return new Response(JSON.stringify(savedRows), {
+              status: 201,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+        }
+
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return originalFetch(input, init);
+    }) as typeof fetch;
+
+    const handlers = getSyncHandlers();
+    try {
+      await runWithCloudflareEnv(
+        {
+          SUPABASE_URL: "https://fallback-design.supabase.co",
+          SUPABASE_KEY: "eyJtest.fallback.design.key",
+        },
+        async () => {
+          const putRes = await handlers.PUT({
+            request: new Request("http://localhost/api/public/results/sync", {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                applyToAllLicenses: true,
+                appSettings: {
+                  id: "global",
+                  background_color: "#000000",
+                  surface_color: "#000000",
+                  primary_color: "#2563eb",
+                  text_color: "#ffffff",
+                  card_color: "#000000",
+                  result_row_color: "#0a0a0a",
+                  font_family: "Inter",
+                  card_style: "neon",
+                  updated_at: "2026-11-20T23:00:00.000Z",
+                },
+              }),
+            }),
+          });
+          const putJson = await putRes.json();
+          expect(putJson.cloudSettingsSyncOk).toBe(true);
+          expect(putJson.cloudSettingsError).toBeNull();
+
+          // Master license row in Supabase 'licenses' table now holds ||GLOBAL_DESIGN:
+          const masterRow = storedLicenses.get("00000000-0000-4000-8000-000000291007");
+          expect(masterRow).toBeDefined();
+          expect(String(masterRow?.["notes"])).toContain("||GLOBAL_DESIGN:");
+
+          // Client license "taller" had its old navy-blue diseno override stripped so it uses Global Design
+          const tallerRow = storedLicenses.get("11111111-1111-4111-8111-111111111111");
+          expect(String(tallerRow?.["client_name"])).not.toContain('"diseno"');
+          expect(String(tallerRow?.["client_name"])).not.toContain("#0f172a");
+        },
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

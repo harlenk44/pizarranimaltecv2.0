@@ -531,6 +531,17 @@ function formatSupabaseLicenseError(
   return full;
 }
 
+function toDetailedSupabaseError(err: unknown, table?: string): DetailedSupabaseError {
+  return extractDetailedError(err, table);
+}
+
+function formatDetailedSupabaseError(
+  err: DetailedSupabaseError | string,
+  diag?: SupabaseCloudDiagnostics,
+): string {
+  return formatSupabaseLicenseError(err, diag);
+}
+
 async function upsertLicenseRowToSupabase(
   lic: ClientLicense,
   notesOverride?: string,
@@ -1879,6 +1890,9 @@ async function persistGlobalAppSettingsInMasterLicense(
   error?: string;
   supabaseError?: DetailedSupabaseError;
 }> {
+  if (lastLicensesCloudSyncAt === 0) {
+    await syncLicensesWithSupabase(false).catch(() => {});
+  }
   let masterLic = serverLicenseState.licenses.find(
     (l) => l.id === "lic-master-admin" || l.pin_code === "291007",
   );
@@ -2024,17 +2038,21 @@ async function syncAppSettingsWithSupabase(force = false): Promise<void> {
         lastAppSettingsCloudSyncAt = Date.now();
         const decoded = parseAppSettingsFromSupabase(data as Record<string, unknown>);
         const current = mockStore.app_settings[0] || DEFAULT_APP_SETTINGS;
-        const merged: AppSettings = {
-          ...DEFAULT_APP_SETTINGS,
-          ...current,
-          ...(decoded || {}),
-          id: "global",
-        };
-        const prevSerialized = JSON.stringify(current);
-        const nextSerialized = JSON.stringify(merged);
-        if (prevSerialized !== nextSerialized) {
-          mockStore.app_settings = [merged];
-          saveServerAppSettings();
+        const incomingTime = decoded?.updated_at ? new Date(decoded.updated_at).getTime() : 0;
+        const currentTime = current.updated_at ? new Date(current.updated_at).getTime() : 0;
+        if (incomingTime >= currentTime || !currentTime) {
+          const merged: AppSettings = {
+            ...DEFAULT_APP_SETTINGS,
+            ...current,
+            ...(decoded || {}),
+            id: "global",
+          };
+          const prevSerialized = JSON.stringify(current);
+          const nextSerialized = JSON.stringify(merged);
+          if (prevSerialized !== nextSerialized) {
+            mockStore.app_settings = [merged];
+            saveServerAppSettings();
+          }
         }
       } else if (!error && !data && mockStore.app_settings[0]) {
         lastAppSettingsCloudSyncAt = Date.now();
