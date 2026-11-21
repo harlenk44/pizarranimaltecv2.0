@@ -1135,12 +1135,29 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
               }
             }
 
-            // If server broadcasted a latestAlert, announce it only if this draw hasn't been alerted yet
-            if (syncData?.latestAlert && (syncData.latestAlert as Record<string, unknown>).id) {
-              const alert = syncData.latestAlert as ResultAlertItem;
-              const enqueued = enqueueUniqueAlert(alert);
-              if (enqueued) {
-                scheduleHardReload(alert.id);
+            // Enqueue any recentAlerts / latestAlert broadcasted by server (only after initial load)
+            if (!isInitialLoadRef.current) {
+              if (Array.isArray(syncData?.recentAlerts) && syncData.recentAlerts.length > 0) {
+                for (const rawAlert of syncData.recentAlerts) {
+                  if (
+                    rawAlert &&
+                    typeof rawAlert === "object" &&
+                    (rawAlert as Record<string, unknown>).id
+                  ) {
+                    const alert = rawAlert as ResultAlertItem;
+                    const enqueued = enqueueUniqueAlert(alert);
+                    if (enqueued) {
+                      scheduleHardReload(alert.id);
+                    }
+                  }
+                }
+              }
+              if (syncData?.latestAlert && (syncData.latestAlert as Record<string, unknown>).id) {
+                const alert = syncData.latestAlert as ResultAlertItem;
+                const enqueued = enqueueUniqueAlert(alert);
+                if (enqueued) {
+                  scheduleHardReload(alert.id);
+                }
               }
             }
           }
@@ -1423,8 +1440,11 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
 
             frozenGameResults.push(effectiveRes);
 
+            const drawSlotSigKey = `${gameObj.id}:${effectiveRes.draw_date}:${slotKey}`;
             const sig = `${effectiveRes.animal_number}:${effectiveRes.animal_name}:${effectiveRes.draw_time}`;
-            const prevSig = prevSignaturesRef.current.get(effectiveRes.id);
+            const prevSig =
+              prevSignaturesRef.current.get(drawSlotSigKey) ??
+              prevSignaturesRef.current.get(effectiveRes.id);
 
             if (!isInitialLoadRef.current) {
               if (prevSig === undefined || prevSig !== sig) {
@@ -1461,6 +1481,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
                 }
               }
             }
+            prevSignaturesRef.current.set(drawSlotSigKey, sig);
             prevSignaturesRef.current.set(effectiveRes.id, sig);
           }
 
@@ -1638,7 +1659,11 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         }
       }
       if (payload && Array.isArray(payload["results"]) && payload["results"].length > 0) {
-        setResultsMap(getInitialResultsMap());
+        if (isInitialLoadRef.current) {
+          setResultsMap(getInitialResultsMap());
+        } else {
+          void fetchAll();
+        }
       }
     };
     window.addEventListener("pizarra:custom-images-loaded", onCustomImagesLoaded);

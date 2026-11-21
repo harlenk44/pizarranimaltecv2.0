@@ -54,19 +54,6 @@ function isMissingColumnError(err: unknown): boolean {
   );
 }
 
-function isMissingRpcError(err: unknown): boolean {
-  if (!err || typeof err !== "object") return false;
-  const e = err as { code?: unknown; message?: unknown };
-  const code = typeof e.code === "string" ? e.code : "";
-  const msg = typeof e.message === "string" ? e.message.toLowerCase() : "";
-  return (
-    code === "PGRST202" ||
-    code === "42883" ||
-    msg.includes("could not find the function") ||
-    msg.includes("sync_automatic_result")
-  );
-}
-
 let supabaseSupportsGameSlugColumn = true;
 let persistedCloudDrawDate = "";
 const persistedCloudDrawKeys = new Set<string>();
@@ -139,8 +126,8 @@ async function persistAutomaticDrawToSupabase(
       return rpcData === true;
     }
 
-    // 2. Fallback only if sync_automatic_result RPC does not exist in this Supabase project
-    if (isMissingRpcError(rpcError)) {
+    // 2. Fallback whenever sync_automatic_result RPC is missing or rejects (e.g. legacy check constraint on numbers > 36)
+    if (rpcError && typeof realClient.from === "function") {
       const { data: existing } = await realClient
         .from("results")
         .select("id, source")

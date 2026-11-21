@@ -91,6 +91,8 @@ let serverAnimalImagesVersion = 1;
 let serverAppSettingsVersion = 1;
 let serverLicensesVersion = 1;
 let serverLatestAlert: Record<string, unknown> | null = null;
+let serverRecentAlerts: Array<Record<string, unknown>> = [];
+let serverRecentAlertsDate = "";
 let serverDataInitialized = false;
 let initialAutoSyncDone = false;
 let initialAnimalImagesSeeded = false;
@@ -2070,13 +2072,90 @@ async function syncAppSettingsWithSupabase(force = false): Promise<void> {
 }
 
 let lastAutoSyncTimestamp = 0;
-let isAutoSyncing = false;
+let autoSyncInFlightPromise: Promise<void> | null = null;
 const AUTO_SYNC_INTERVAL_MS = 15_000;
 
 let lastTriplesSyncTimestamp = 0;
 let triplesFastSyncPromise: Promise<{ newlyAdded: TripleResult[]; newTripleCount: number }> | null =
   null;
 const TRIPLES_SYNC_INTERVAL_MS = 15_000;
+
+const CORE_LDH_ANIMALITO_SLUGS = new Set([
+  "guacharo-activo",
+  "el-guacharito-millonario",
+  "selva-plus",
+  "lotto-activo",
+]);
+
+function areCoreAnimalitosMissingForDate(drawDate: string): boolean {
+  const gamesById = new Map(mockStore.games.map((g) => [g.id, normalizeGameSlug(g.slug, g.name)]));
+  const presentCoreSlugs = new Set<string>();
+  for (const r of mockStore.results) {
+    if (r.draw_date !== drawDate) continue;
+    const slug =
+      (r.game_slug ? normalizeGameSlug(r.game_slug) : "") ||
+      gamesById.get(r.game_id) ||
+      normalizeGameSlug(r.game_id);
+    if (slug && CORE_LDH_ANIMALITO_SLUGS.has(slug)) {
+      presentCoreSlugs.add(slug);
+    }
+  }
+  return presentCoreSlugs.size < CORE_LDH_ANIMALITO_SLUGS.size;
+}
+
+function buildAnimalAlertPayload(
+  item: (typeof mockStore.results)[number],
+): Record<string, unknown> {
+  const gameObj = mockStore.games.find((g) => g.id === item.game_id);
+  const canonical = resolveCanonicalAnimal(
+    gameObj?.slug ?? item.game_id,
+    item.animal_number,
+    item.animal_name,
+  );
+  const exactImg = mockStore.animal_images.find(
+    (img) =>
+      (img.game_id === item.game_id || (gameObj && img.game_id === gameObj.slug)) &&
+      img.animal_number === canonical.number,
+  );
+  const alertAnimalImageUrl =
+    exactImg?.image_url && !isBaseOrDefaultCatalogImageUrl(exactImg.image_url)
+      ? exactImg.image_url
+      : canonical.imageUrl;
+  return {
+    id: `auto-${item.id || `${item.game_id}-${item.draw_date}-${item.draw_time}`}`,
+    gameId: item.game_id,
+    gameName: gameObj?.name || "Lotería",
+    gameColor: gameObj?.color || "#10b981",
+    gameLogoUrl: getGameLogo(gameObj || item.game_id),
+    drawDate: item.draw_date,
+    drawTime: item.draw_time,
+    animalNumber: canonical.number,
+    animalLabel: canonical.label,
+    animalName: canonical.name,
+    animalImageUrl: alertAnimalImageUrl ?? null,
+  };
+}
+
+function pushServerRecentAlert(alertPayload: Record<string, unknown>, today = lotteryDate()) {
+  if (serverRecentAlertsDate !== today) {
+    serverRecentAlertsDate = today;
+    serverRecentAlerts = [];
+  }
+  const key = `${String(alertPayload["gameId"] || "")}|${String(alertPayload["drawDate"] || "")}|${String(alertPayload["drawTime"] || "").slice(0, 5)}`;
+  const filtered = serverRecentAlerts.filter(
+    (a) =>
+      `${String(a["gameId"] || "")}|${String(a["drawDate"] || "")}|${String(a["drawTime"] || "").slice(0, 5)}` !==
+      key,
+  );
+  filtered.push(alertPayload);
+  serverRecentAlerts = filtered.slice(-30);
+  serverLatestAlert = alertPayload;
+  try {
+    fs.writeFileSync(LATEST_ALERT_FILE, JSON.stringify(alertPayload));
+  } catch {
+    // ignore
+  }
+}
 
 function resolveOfficialGameIdBySlug(canonicalSlug: string): string | undefined {
   const target = mockStore.games.find((g) => normalizeGameSlug(g.slug, g.name) === canonicalSlug);
@@ -2252,167 +2331,180 @@ async function syncTriplesFast(
   return run;
 }
 
-async function triggerBackgroundSync(forceWait = false) {
+async function triggerBackgroundSync(forceWait = false): Promise<void> {
   const now = Date.now();
-  if (isAutoSyncing) return;
-  if (!forceWait && now - lastAutoSyncTimestamp < AUTO_SYNC_INTERVAL_MS) return;
-
-  isAutoSyncing = true;
-  lastAutoSyncTimestamp = now;
-
-  try {
-    loadServerGames();
-    loadServerResults();
-    loadServerTripleResults();
-    loadServerAnimalImages();
-    loadServerLicenses();
-    const prevCount = mockStore.results.length;
-
-    // Launch fast triples sync IMMEDIATELY in parallel so it never waits for games/animalitos/images
-    const triplesPromise = syncTriplesFast(forceWait).catch(() => ({
-      newlyAdded: [] as TripleResult[],
-      newTripleCount: 0,
-    }));
-
-    // Sincronizar juegos primero para asegurar que mockStore.games tenga los UUIDs oficiales de Supabase
-    await syncGamesWithSupabase(false).catch(() => {});
-
-    const [
-      { synchronizeAutomaticResults },
-      { getCachedMultiloteriasItems },
-      { synchronizeArrejuntaoOfficialData },
-    ] = await Promise.all([
-      import("@/lib/result-sync.server"),
-      import("@/lib/multiloterias-provider.server"),
-      import("@/lib/arrejuntao-provider.server"),
-    ]);
-
-    const [reportsSettled, arrejuntaoSettled] = await Promise.allSettled([
-      synchronizeAutomaticResults(),
-      synchronizeArrejuntaoOfficialData({
-        currentDate: lotteryDate(),
-        forceRefresh: forceWait,
-        resolveGameId: resolveOfficialGameIdBySlug,
-        currentAnimalResults: mockStore.results,
-      }),
-      triplesPromise,
-      syncLicensesWithSupabase().catch(() => null),
-      syncAnimalImagesWithSupabase().catch(() => null),
-    ]);
-
-    const reports = reportsSettled.status === "fulfilled" ? reportsSettled.value : [];
-    if (arrejuntaoSettled.status === "fulfilled") {
-      const arrRes = arrejuntaoSettled.value;
-      if (arrRes.payload.tripleResults.length > 0) {
-        applyIncomingTriplesToServer(arrRes.payload.tripleResults, lotteryDate());
-      }
-      if (arrRes.upsertedResults.length > 0) {
-        mockStore.results = sanitizeResultsList(
-          mergeResultsPreserveToday(mockStore.results, arrRes.upsertedResults),
-        );
-      }
-    }
-
-    consolidateInMemoryGamesAndResults();
-    saveServerResults();
-
-    // Ensure Multiloterias official images (including 37-48 for Lottopantera) are stored in memory
-    try {
-      const [lotoItems, panteraItems] = await Promise.all([
-        getCachedMultiloteriasItems("lotoanimalito"),
-        getCachedMultiloteriasItems("lottopantera"),
-      ]);
-      const lotoOfficialId =
-        resolveOfficialGameIdBySlug("lotoanimalito") || "d953f80c-4335-4bc9-9f78-9b56193286fe";
-      for (const item of lotoItems) {
-        const num = parseCanonicalAnimalNumber("lotoanimalito", item.number, item.name);
-        if (Number.isFinite(num) && item.imageUrl) {
-          if (
-            !mockStore.animal_images.some(
-              (img) =>
-                (img.game_id === lotoOfficialId || img.game_id === "lotoanimalito") &&
-                img.animal_number === num,
-            )
-          ) {
-            mockStore.animal_images.push({
-              id: `img-lotoanimalito-${num}`,
-              game_id: lotoOfficialId,
-              animal_number: num,
-              image_url: item.imageUrl,
-            });
-          }
-        }
-      }
-      const panteraOfficialId =
-        resolveOfficialGameIdBySlug("lottopantera") || "61580ccf-5a2d-4d10-877e-4883515135e4";
-      for (const item of panteraItems) {
-        const num = parseCanonicalAnimalNumber("lottopantera", item.number, item.name);
-        if (Number.isFinite(num) && item.imageUrl) {
-          if (
-            !mockStore.animal_images.some(
-              (img) =>
-                (img.game_id === panteraOfficialId || img.game_id === "lottopantera") &&
-                img.animal_number === num,
-            )
-          ) {
-            mockStore.animal_images.push({
-              id: `img-lottopantera-${num}`,
-              game_id: panteraOfficialId,
-              animal_number: num,
-              image_url: item.imageUrl,
-            });
-          }
-        }
-      }
-    } catch {
-      // ignore
-    }
-
-    const anyWritten = reports.some((r) => r.written > 0) || mockStore.results.length > prevCount;
-    if (anyWritten) {
-      const latest = mockStore.results[mockStore.results.length - 1];
-      if (latest) {
-        const gameObj = mockStore.games.find((g) => g.id === latest.game_id);
-        const canonical = resolveCanonicalAnimal(
-          gameObj?.slug ?? latest.game_id,
-          latest.animal_number,
-          latest.animal_name,
-        );
-        const exactImg = mockStore.animal_images.find(
-          (img) =>
-            (img.game_id === latest.game_id || (gameObj && img.game_id === gameObj.slug)) &&
-            img.animal_number === canonical.number,
-        );
-        const alertAnimalImageUrl =
-          exactImg?.image_url && !isBaseOrDefaultCatalogImageUrl(exactImg.image_url)
-            ? exactImg.image_url
-            : canonical.imageUrl;
-        const alertPayload = {
-          id: `auto-${latest.id || `${latest.game_id}-${latest.draw_date}-${latest.draw_time}`}`,
-          gameId: latest.game_id,
-          gameName: gameObj?.name || "Lotería",
-          gameColor: gameObj?.color || "#10b981",
-          gameLogoUrl: getGameLogo(gameObj || latest.game_id),
-          drawDate: latest.draw_date,
-          drawTime: latest.draw_time,
-          animalNumber: canonical.number,
-          animalLabel: canonical.label,
-          animalName: canonical.name,
-          animalImageUrl: alertAnimalImageUrl ?? null,
-        };
-        serverLatestAlert = alertPayload;
-        try {
-          fs.writeFileSync(LATEST_ALERT_FILE, JSON.stringify(alertPayload));
-        } catch {
-          // ignore
-        }
-      }
-    }
-  } catch (err) {
-    console.warn("[auto-sync-warn]", err);
-  } finally {
-    isAutoSyncing = false;
+  if (autoSyncInFlightPromise) {
+    return autoSyncInFlightPromise;
   }
+  if (!forceWait && now - lastAutoSyncTimestamp < AUTO_SYNC_INTERVAL_MS) {
+    return;
+  }
+
+  const run = (async () => {
+    try {
+      loadServerGames();
+      loadServerResults();
+      loadServerTripleResults();
+      loadServerAnimalImages();
+      loadServerLicenses();
+
+      const today = lotteryDate();
+      const hadCoreResultsBefore = !areCoreAnimalitosMissingForDate(today);
+      const prevDrawSlotKeys = new Set(
+        mockStore.results
+          .filter((r) => r.draw_date === today)
+          .map((r) => `${r.game_id}|${r.draw_date}|${r.draw_time.slice(0, 5)}|${r.animal_number}`),
+      );
+
+      // Launch fast triples sync IMMEDIATELY in parallel so it never waits for games/animalitos/images
+      const triplesPromise = syncTriplesFast(forceWait).catch(() => ({
+        newlyAdded: [] as TripleResult[],
+        newTripleCount: 0,
+      }));
+
+      // Sincronizar juegos primero para asegurar que mockStore.games tenga los UUIDs oficiales de Supabase
+      await syncGamesWithSupabase(false).catch(() => {});
+
+      const [
+        { synchronizeAutomaticResults },
+        { getCachedMultiloteriasItems },
+        { synchronizeArrejuntaoOfficialData },
+      ] = await Promise.all([
+        import("@/lib/result-sync.server"),
+        import("@/lib/multiloterias-provider.server"),
+        import("@/lib/arrejuntao-provider.server"),
+      ]);
+
+      const [reportsSettled, arrejuntaoSettled] = await Promise.allSettled([
+        synchronizeAutomaticResults(),
+        synchronizeArrejuntaoOfficialData({
+          currentDate: today,
+          forceRefresh: forceWait,
+          resolveGameId: resolveOfficialGameIdBySlug,
+          currentAnimalResults: mockStore.results,
+        }),
+        triplesPromise,
+        syncLicensesWithSupabase().catch(() => null),
+        syncAnimalImagesWithSupabase().catch(() => null),
+      ]);
+
+      const reports = reportsSettled.status === "fulfilled" ? reportsSettled.value : [];
+      if (arrejuntaoSettled.status === "fulfilled") {
+        const arrRes = arrejuntaoSettled.value;
+        if (arrRes.payload.tripleResults.length > 0) {
+          applyIncomingTriplesToServer(arrRes.payload.tripleResults, today);
+        }
+        if (arrRes.upsertedResults.length > 0) {
+          mockStore.results = sanitizeResultsList(
+            mergeResultsPreserveToday(mockStore.results, arrRes.upsertedResults),
+          );
+        }
+      }
+
+      consolidateInMemoryGamesAndResults();
+      saveServerResults();
+
+      if (!areCoreAnimalitosMissingForDate(today)) {
+        lastAutoSyncTimestamp = Date.now();
+      }
+
+      // Ensure Multiloterias official images (including 37-48 for Lottopantera) are stored in memory
+      try {
+        const [lotoItems, panteraItems] = await Promise.all([
+          getCachedMultiloteriasItems("lotoanimalito"),
+          getCachedMultiloteriasItems("lottopantera"),
+        ]);
+        const lotoOfficialId =
+          resolveOfficialGameIdBySlug("lotoanimalito") || "d953f80c-4335-4bc9-9f78-9b56193286fe";
+        for (const item of lotoItems) {
+          const num = parseCanonicalAnimalNumber("lotoanimalito", item.number, item.name);
+          if (Number.isFinite(num) && item.imageUrl) {
+            if (
+              !mockStore.animal_images.some(
+                (img) =>
+                  (img.game_id === lotoOfficialId || img.game_id === "lotoanimalito") &&
+                  img.animal_number === num,
+              )
+            ) {
+              mockStore.animal_images.push({
+                id: `img-lotoanimalito-${num}`,
+                game_id: lotoOfficialId,
+                animal_number: num,
+                image_url: item.imageUrl,
+              });
+            }
+          }
+        }
+        const panteraOfficialId =
+          resolveOfficialGameIdBySlug("lottopantera") || "61580ccf-5a2d-4d10-877e-4883515135e4";
+        for (const item of panteraItems) {
+          const num = parseCanonicalAnimalNumber("lottopantera", item.number, item.name);
+          if (Number.isFinite(num) && item.imageUrl) {
+            if (
+              !mockStore.animal_images.some(
+                (img) =>
+                  (img.game_id === panteraOfficialId || img.game_id === "lottopantera") &&
+                  img.animal_number === num,
+              )
+            ) {
+              mockStore.animal_images.push({
+                id: `img-lottopantera-${num}`,
+                game_id: panteraOfficialId,
+                animal_number: num,
+                image_url: item.imageUrl,
+              });
+            }
+          }
+        }
+      } catch {
+        // ignore
+      }
+
+      const newlyAddedDraws = mockStore.results.filter(
+        (r) =>
+          r.draw_date === today &&
+          !prevDrawSlotKeys.has(
+            `${r.game_id}|${r.draw_date}|${r.draw_time.slice(0, 5)}|${r.animal_number}`,
+          ),
+      );
+
+      if (newlyAddedDraws.length > 0 || reports.some((r) => r.written > 0)) {
+        const sortedNew = [...newlyAddedDraws].sort((a, b) =>
+          a.draw_time.localeCompare(b.draw_time),
+        );
+        if (hadCoreResultsBefore && sortedNew.length > 0) {
+          // Incremental sync during the day: push ALL new draws (including Guácharo, Guacharito, Selva Plus)
+          // so simultaneous hourly draws never overwrite each other's voice alert!
+          for (const item of sortedNew) {
+            pushServerRecentAlert(buildAnimalAlertPayload(item), today);
+          }
+        } else {
+          // Cold start: only record the most recent draw time of today as latestAlert
+          const latestByTime =
+            sortedNew[sortedNew.length - 1] ||
+            [...mockStore.results.filter((r) => r.draw_date === today)].sort((a, b) =>
+              a.draw_time.localeCompare(b.draw_time),
+            )[0];
+          if (latestByTime) {
+            const payload = buildAnimalAlertPayload(latestByTime);
+            serverLatestAlert = payload;
+            try {
+              fs.writeFileSync(LATEST_ALERT_FILE, JSON.stringify(payload));
+            } catch {
+              // ignore
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("[auto-sync-warn]", err);
+    } finally {
+      autoSyncInFlightPromise = null;
+    }
+  })();
+
+  autoSyncInFlightPromise = run;
+  return run;
 }
 
 function serveOnDemandAnimalImage(animalImageParam: string, labelParam: string): Response {
@@ -2613,9 +2705,6 @@ export const Route = createFileRoute("/api/public/results/sync")({
           new Promise((resolve) => setTimeout(resolve, isPoll ? 900 : 1800)),
         ]);
 
-        const todayResultsCount = mockStore.results.filter(
-          (r) => r.draw_date === serverToday,
-        ).length;
         const todayTriplesCount = serverTripleResults.filter(
           (r) => r.draw_date === serverToday,
         ).length;
@@ -2628,15 +2717,19 @@ export const Route = createFileRoute("/api/public/results/sync")({
           ]);
         }
 
-        // 3. Trigger full animalitos scraper sync when cold-empty or interval elapsed (non-blocking when RAM is warm!)
+        // 3. Trigger full animalitos scraper sync when core LoteriaDeHoy lotteries (Guácharo, Guacharito, Selva Plus, Lotto Activo)
+        //    are missing in RAM or interval elapsed, and await with bounded timeout so Cloudflare Workers never freezes the sync mid-flight.
         const isStaleSync = Date.now() - lastAutoSyncTimestamp >= AUTO_SYNC_INTERVAL_MS;
-        const isColdAnimalitosEmpty = todayResultsCount === 0;
-        if (!initialAutoSyncDone || isColdAnimalitosEmpty || isStaleSync) {
+        const isCoreAnimalitosMissing = areCoreAnimalitosMissingForDate(serverToday);
+        if (!initialAutoSyncDone || isCoreAnimalitosMissing || isStaleSync || forceCloudSync) {
           initialAutoSyncDone = true;
-          const syncPromise = triggerBackgroundSync(isColdAnimalitosEmpty).catch(() => {});
-          if (isColdAnimalitosEmpty) {
-            await Promise.race([syncPromise, new Promise((resolve) => setTimeout(resolve, 4000))]);
-          }
+          const syncPromise = triggerBackgroundSync(
+            isCoreAnimalitosMissing || forceCloudSync,
+          ).catch(() => {});
+          await Promise.race([
+            syncPromise,
+            new Promise((resolve) => setTimeout(resolve, isCoreAnimalitosMissing ? 4500 : 2500)),
+          ]);
         }
 
         // Garantizar siempre respuesta libre de duplicados y con game_id + game_slug 100% consistentes
@@ -2659,17 +2752,30 @@ export const Route = createFileRoute("/api/public/results/sync")({
             // ignore
           }
         }
-        if (
-          latestAlert &&
-          typeof latestAlert.animalImageUrl === "string" &&
-          latestAlert.animalImageUrl.startsWith("data:") &&
-          isBaseOrDefaultCatalogImageUrl(latestAlert.animalImageUrl)
-        ) {
-          latestAlert = {
-            ...latestAlert,
-            animalImageUrl: `/api/public/results/sync?animalImage=${encodeURIComponent(String(latestAlert.gameId))}:${latestAlert.animalNumber}&label=${encodeURIComponent(String(latestAlert.animalLabel || ""))}`,
-          };
-        }
+        const sanitizeAlertMediaUrl = (
+          alertObj: Record<string, unknown> | null,
+        ): Record<string, unknown> | null => {
+          if (!alertObj) return null;
+          if (
+            typeof alertObj["animalImageUrl"] === "string" &&
+            alertObj["animalImageUrl"].startsWith("data:") &&
+            isBaseOrDefaultCatalogImageUrl(alertObj["animalImageUrl"])
+          ) {
+            return {
+              ...alertObj,
+              animalImageUrl: `/api/public/results/sync?animalImage=${encodeURIComponent(String(alertObj["gameId"]))}:${alertObj["animalNumber"]}&label=${encodeURIComponent(String(alertObj["animalLabel"] || ""))}`,
+            };
+          }
+          return alertObj;
+        };
+
+        latestAlert = sanitizeAlertMediaUrl(latestAlert);
+        const recentAlerts =
+          serverRecentAlertsDate === serverToday
+            ? serverRecentAlerts
+                .map((a) => sanitizeAlertMediaUrl(a))
+                .filter((a): a is Record<string, unknown> => Boolean(a))
+            : [];
 
         const cloudDiag = getSupabaseCloudDiagnostics();
         return noStoreJson({
@@ -2679,6 +2785,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
           tripleResults: serverTripleResults,
           deletedTripleIds: serverDeletedTripleIds,
           latestAlert,
+          recentAlerts,
           logosVersion: serverCustomGameLogosVersion,
           gamesVersion: serverGamesVersion,
           imagesVersion: serverAnimalImagesVersion,
