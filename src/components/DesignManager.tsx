@@ -40,13 +40,32 @@ import {
   DEFAULT_ANIMAL_LOTTERIES,
   ALL_TRIPLE_LOTTERIES,
   DEFAULT_CLIENT_VOICE_CONFIG,
+  MASTER_LICENSE_UUID,
+  isValidUuid,
   saveLocalLicenseOverride,
   saveLocalLicensesSnapshot,
   reconcileClientLicensesWithLocal,
   type ClientVoiceConfig,
   type ClientDesignConfig,
 } from "@/lib/license-lotteries";
-import { type AppSettings, type ClientLicense, sanitizeAppSettingsForSupabase } from "@/lib/types";
+import {
+  DEFAULT_APP_SETTINGS,
+  type AppSettings,
+  type ClientLicense,
+  sanitizeAppSettingsForSupabase,
+  packMasterNotesWithGlobalSettings,
+} from "@/lib/types";
+
+const hasExternalSupabase = (() => {
+  const sbUrl = import.meta.env["VITE_SUPABASE_URL"];
+  return (
+    typeof sbUrl === "string" &&
+    sbUrl.includes(".supabase.co") &&
+    !sbUrl.includes("ebpunrzbagmcdtammjqn.supabase.co") &&
+    !sbUrl.includes("dqpomustswauzejggfui.supabase.co") &&
+    !sbUrl.includes(".lovable.cloud")
+  );
+})();
 
 export default function DesignManager() {
   const { settings, updateSettings } = useBoardSettings();
@@ -65,6 +84,7 @@ export default function DesignManager() {
     DEFAULT_CLIENT_VOICE_CONFIG,
   );
   const [hasUnsavedGlobalChanges, setHasUnsavedGlobalChanges] = useState<boolean>(false);
+  const [applyToAllLicenses, setApplyToAllLicenses] = useState<boolean>(true);
 
   // Selected game in the per-game dual color palette editor
   const [selectedGameSlug, setSelectedGameSlug] = useState<string>(
@@ -156,6 +176,7 @@ export default function DesignManager() {
   const persistSettings = useCallback(
     async (
       payload: AppSettings,
+      shouldApplyToAllLicenses: boolean,
     ): Promise<{ ok: boolean; error?: string; appSettings?: AppSettings }> => {
       const sanitized = sanitizeAppSettingsForSupabase(payload);
       let directCloudOk = false;
@@ -186,6 +207,55 @@ export default function DesignManager() {
         } catch (err) {
           console.warn("[BoardDesign:DesignManager] Excepción al guardar en Supabase:", err);
         }
+
+        // Also mirror Global Design inside the Master License (291007) row in the `licenses` table
+        // so Global Design persists reliably even if `app_settings` table has RLS restrictions.
+        try {
+          const masterNotes = packMasterNotesWithGlobalSettings(requireLicenseFlag, payload);
+          const { error: licErr } = await supabase.from("licenses").upsert(
+            {
+              id: MASTER_LICENSE_UUID,
+              client_name: "Administrador Maestro (PIN 291007)",
+              pin_code: "291007",
+              status: "active",
+              expires_at: null,
+              max_devices: 99,
+              bound_device_ids: [],
+              notes: masterNotes,
+              created_at: "2025-01-01T00:00:00.000Z",
+            },
+            { onConflict: "id" },
+          );
+          if (!licErr) {
+            directCloudOk = true;
+          }
+        } catch {
+          // ignore and let server route persist
+        }
+
+        if (shouldApplyToAllLicenses && licenses.length > 0) {
+          for (const lic of licenses) {
+            if (lic.pin_code === "291007" || !isValidUuid(lic.id)) continue;
+            const parsed = parseClientLicenseName(lic.client_name);
+            if (parsed.designConfig !== null) {
+              const resetName = formatClientLicenseName(
+                parsed.cleanName,
+                parsed.allowedLotteries,
+                ALL_AVAILABLE_LOTTERIES.length,
+                parsed.cardsPerScreen,
+                parsed.transitionSeconds,
+                parsed.voiceConfig,
+                null,
+                parsed.fullscreenAuto,
+              );
+              try {
+                await supabase.from("licenses").update({ client_name: resetName }).eq("id", lic.id);
+              } catch {
+                // ignore
+              }
+            }
+          }
+        }
       }
 
       try {
@@ -195,7 +265,10 @@ export default function DesignManager() {
             "Content-Type": "application/json",
             ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
           },
-          body: JSON.stringify({ appSettings: payload }),
+          body: JSON.stringify({
+            appSettings: payload,
+            applyToAllLicenses: shouldApplyToAllLicenses,
+          }),
         });
         const data = await res.json().catch(() => null);
         const serverCloudOk = Boolean(res.ok && data && data.cloudSettingsSyncOk !== false);
@@ -208,9 +281,25 @@ export default function DesignManager() {
           return { ok: false, error: errDetail };
         }
 
+        if (data && Array.isArray(data.clientLicenses)) {
+          const nextRequire =
+            typeof data.requireLicense === "boolean" ? data.requireLicense : requireLicenseFlag;
+          const reconciled = reconcileClientLicensesWithLocal(
+            data.clientLicenses,
+            data.deletedIds,
+            data.deletedPins,
+            { allowOverrideServer: false },
+          );
+          setLicenses(reconciled.licenses);
+          saveLocalLicensesSnapshot(nextRequire, reconciled.licenses);
+        }
+
         try {
           const bc = new BroadcastChannel("pizarra_lottery_channel");
           bc.postMessage({ type: "APP_SETTINGS_UPDATED", settings: payload });
+          if (shouldApplyToAllLicenses) {
+            bc.postMessage({ type: "LICENSES_UPDATED" });
+          }
           setTimeout(() => bc.close(), 1000);
         } catch {
           // ignore
@@ -231,7 +320,7 @@ export default function DesignManager() {
         return { ok: false, error: `Error de red al guardar diseño global: ${netErr}` };
       }
     },
-    [],
+    [requireLicenseFlag, licenses],
   );
 
   useEffect(() => {
@@ -475,7 +564,7 @@ export default function DesignManager() {
     };
     latestDraftRef.current = fullPayload;
 
-    const persistResult = await persistSettings(fullPayload);
+    const persistResult = await persistSettings(fullPayload, applyToAllLicenses);
     if (!persistResult.ok) {
       setMessage(
         `Error al guardar el diseño global en la nube: ${persistResult.error || "No se pudo confirmar escritura en Supabase."}`,
@@ -489,7 +578,11 @@ export default function DesignManager() {
     updateSettings(confirmedSettings);
     setHasUnsavedGlobalChanges(false);
 
-    setMessage("¡Diseño global guardado y sincronizado en la nube para todas las pantallas!");
+    setMessage(
+      applyToAllLicenses
+        ? "¡Diseño global guardado en Supabase y aplicado a todas las licencias activas!"
+        : "¡Diseño global guardado y sincronizado en la nube para todas las pantallas!",
+    );
     setSaving(false);
   }
 
@@ -613,10 +706,13 @@ export default function DesignManager() {
       | "card_color"
       | "result_row_color",
   ): string => {
-    if (isUserMode && userDesignDraft[key]) {
-      return userDesignDraft[key] as string;
+    if (isUserMode) {
+      if (userDesignDraft[key]) {
+        return userDesignDraft[key] as string;
+      }
+      return settings[key] || draft[key] || DEFAULT_APP_SETTINGS[key] || "#000000";
     }
-    return draft[key] || "#000000";
+    return draft[key] || settings[key] || DEFAULT_APP_SETTINGS[key] || "#000000";
   };
 
   // Voice values (either Global or User-specific)
@@ -703,26 +799,42 @@ export default function DesignManager() {
           </div>
         </div>
 
-        <div className="flex items-center gap-2 flex-wrap">
-          <label className="text-xs text-slate-400 font-medium">Aplicar cambios a:</label>
-          <select
-            value={selectedLicenseId}
-            onChange={(e) => handleSelectTargetScope(e.target.value)}
-            className="bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs font-bold text-white focus:outline-none focus:border-blue-500 cursor-pointer"
-          >
-            <option value="GLOBAL">🌐 Diseño Global (Por defecto para todos)</option>
-            {licenses.map((lic) => {
-              const parsed = parseClientLicenseName(lic.client_name);
-              const hasCustomDesign =
-                parsed.designConfig && Object.keys(parsed.designConfig).length > 0;
-              return (
-                <option key={lic.id} value={lic.id}>
-                  👤 {parsed.cleanName} — PIN: {lic.pin_code}
-                  {hasCustomDesign ? " (Diseño Personalizado)" : ""}
-                </option>
-              );
-            })}
-          </select>
+        <div className="flex flex-col sm:items-end gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="text-xs text-slate-400 font-medium">Aplicar cambios a:</label>
+            <select
+              value={selectedLicenseId}
+              onChange={(e) => handleSelectTargetScope(e.target.value)}
+              className="bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs font-bold text-white focus:outline-none focus:border-blue-500 cursor-pointer"
+            >
+              <option value="GLOBAL">🌐 Diseño Global (Por defecto para todos)</option>
+              {licenses.map((lic) => {
+                const parsed = parseClientLicenseName(lic.client_name);
+                const hasCustomDesign =
+                  parsed.designConfig && Object.keys(parsed.designConfig).length > 0;
+                return (
+                  <option key={lic.id} value={lic.id}>
+                    👤 {parsed.cleanName} — PIN: {lic.pin_code}
+                    {hasCustomDesign ? " (Diseño Personalizado)" : ""}
+                  </option>
+                );
+              })}
+            </select>
+          </div>
+          {!isUserMode && (
+            <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={applyToAllLicenses}
+                onChange={(e) => setApplyToAllLicenses(e.target.checked)}
+                className="rounded border-slate-600 bg-slate-950 text-blue-500 focus:ring-blue-500"
+              />
+              <span>
+                Aplicar este diseño global a todas las licencias existentes (ej. Taller y demás
+                clientes)
+              </span>
+            </label>
+          )}
         </div>
       </div>
 

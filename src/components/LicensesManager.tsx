@@ -29,7 +29,7 @@ import {
   Minimize,
   AlertTriangle,
 } from "lucide-react";
-import type { ClientLicense } from "@/lib/types";
+import { type ClientLicense, stripInternalMasterNotes } from "@/lib/types";
 import LicenseGate from "@/components/LicenseGate";
 import {
   parseClientLicenseName,
@@ -182,10 +182,7 @@ export default function LicensesManager() {
                 bound_device_ids: Array.isArray(d["bound_device_ids"])
                   ? (d["bound_device_ids"] as string[])
                   : [],
-                notes:
-                  typeof d["notes"] === "string"
-                    ? d["notes"].replace(/\|\|REQUIRE:[01]/g, "").trim()
-                    : "",
+                notes: typeof d["notes"] === "string" ? stripInternalMasterNotes(d["notes"]) : "",
                 created_at: d["created_at"]
                   ? new Date(d["created_at"] as string).toISOString()
                   : new Date().toISOString(),
@@ -1715,9 +1712,7 @@ export default function LicensesManager() {
                     allowedLotteries !== null
                       ? allowedLotteries.length
                       : ALL_AVAILABLE_LOTTERIES.length;
-                  const cleanNotes = lic.notes
-                    ? lic.notes.replace(/\|\|REQUIRE:[01]/g, "").trim()
-                    : "";
+                  const cleanNotes = lic.notes ? stripInternalMasterNotes(lic.notes) : "";
                   const isVoiceOn = voiceConfig?.enabled ?? true;
                   const customCardStyle = designConfig?.card_style;
 

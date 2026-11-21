@@ -329,13 +329,13 @@ function DisplayShell({ children }: { children: ReactNode }) {
       designConfig.text_color),
   );
   const effectiveDesign = isCustom ? designConfig : null;
-  const currentCardColor = effectiveDesign?.card_color || settings.card_color || "#0f172a";
+  const currentCardColor = effectiveDesign?.card_color || settings.card_color || "#000000";
   const currentBgColor =
-    effectiveDesign?.background_color || settings.background_color || "#020617";
-  const currentSurfaceColor = effectiveDesign?.surface_color || settings.surface_color || "#0f172a";
+    effectiveDesign?.background_color || settings.background_color || "#000000";
+  const currentSurfaceColor = effectiveDesign?.surface_color || settings.surface_color || "#000000";
   const currentTextColor = effectiveDesign?.text_color || settings.text_color || "#f8fafc";
   const currentRowColor =
-    effectiveDesign?.result_row_color || settings.result_row_color || "#1e293b";
+    effectiveDesign?.result_row_color || settings.result_row_color || "#0a0a0a";
 
   const variables = {
     "--display-scale": preferences.resultScale / 100,

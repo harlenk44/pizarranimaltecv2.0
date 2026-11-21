@@ -105,12 +105,12 @@ export interface AppSettings {
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
   id: "global",
-  background_color: "#020617",
-  surface_color: "#0f172a",
+  background_color: "#000000",
+  surface_color: "#000000",
   primary_color: "#2563eb",
   text_color: "#f8fafc",
-  card_color: "#0f172a",
-  result_row_color: "#1e293b",
+  card_color: "#000000",
+  result_row_color: "#0a0a0a",
   font_family: "Inter",
   base_font_size: 16,
   rotation_enabled: false,
@@ -364,4 +364,52 @@ export interface ClientLicense {
   bound_device_ids: string[];
   notes?: string;
   created_at: string;
+}
+
+const MASTER_GLOBAL_DESIGN_DELIMITER = "||GLOBAL_DESIGN:";
+
+export function packMasterNotesWithGlobalSettings(
+  requireLicense: boolean,
+  settings?: Partial<AppSettings> | null,
+): string {
+  const base = requireLicense ? "PIN Maestro: 291007" : "PIN Maestro: 291007||REQUIRE:0";
+  if (!settings) return base;
+  try {
+    return `${base}${MASTER_GLOBAL_DESIGN_DELIMITER}${JSON.stringify(settings)}`;
+  } catch {
+    return base;
+  }
+}
+
+export function parseGlobalSettingsFromMasterNotes(notes?: string | null): AppSettings | null {
+  if (!notes || typeof notes !== "string") return null;
+  const idx = notes.indexOf(MASTER_GLOBAL_DESIGN_DELIMITER);
+  if (idx < 0) return null;
+  const jsonStr = notes.slice(idx + MASTER_GLOBAL_DESIGN_DELIMITER.length).trim();
+  if (!jsonStr.startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(jsonStr);
+    if (!parsed || typeof parsed !== "object") return null;
+    const decoded = parseAppSettingsFromSupabase(parsed as Record<string, unknown>);
+    const merged: AppSettings = {
+      ...DEFAULT_APP_SETTINGS,
+      ...(parsed as Partial<AppSettings>),
+      ...(decoded || {}),
+      id: "global",
+      font_family: cleanFontFamily(
+        (decoded?.font_family || (parsed as Partial<AppSettings>).font_family) as string,
+      ),
+    };
+    return merged;
+  } catch {
+    return null;
+  }
+}
+
+export function stripInternalMasterNotes(notes?: string | null): string {
+  if (!notes || typeof notes !== "string") return "";
+  return notes
+    .replace(/\|\|GLOBAL_DESIGN:\{[\s\S]*\}$/, "")
+    .replace(/\|\|REQUIRE:[01]/g, "")
+    .trim();
 }

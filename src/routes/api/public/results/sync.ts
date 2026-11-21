@@ -31,7 +31,14 @@ import {
   type SupabaseCloudDiagnostics,
 } from "@/integrations/supabase/client.server";
 import { ensureCloudflareEnvFromRequest } from "@/lib/cloudflare-env.server";
-import { toSupabaseLicenseUuid, generateLicenseUuid, isValidUuid } from "@/lib/license-lotteries";
+import {
+  toSupabaseLicenseUuid,
+  generateLicenseUuid,
+  isValidUuid,
+  parseClientLicenseName,
+  formatClientLicenseName,
+  ALL_AVAILABLE_LOTTERIES,
+} from "@/lib/license-lotteries";
 import { resolveCanonicalAnimal, parseCanonicalAnimalNumber } from "@/lib/official-animals";
 import { getGameLogo, isBrokenExternalLogo, isCustomUploadedGameLogo } from "@/lib/game-logos";
 import {
@@ -306,7 +313,7 @@ function noStoreJson(payload: unknown, init?: ResponseInit): Response {
 }
 
 function packMasterNotesWithRequire(requireLicense: boolean): string {
-  return requireLicense ? "PIN Maestro: 291007" : "PIN Maestro: 291007||REQUIRE:0";
+  return packMasterNotesWithSettings(requireLicense, mockStore.app_settings[0]);
 }
 
 function parseRequireFromMasterNotes(notes?: string | null): boolean | null {
@@ -881,6 +888,27 @@ async function syncLicensesWithSupabase(force = false): Promise<void> {
                   serverLicenseState.requireLicense = parsedReq;
                 }
               }
+              const parsedMasterSettings = parseGlobalAppSettingsFromMasterNotes(sLic.notes);
+              if (parsedMasterSettings) {
+                const currentSettings = mockStore.app_settings[0] || DEFAULT_APP_SETTINGS;
+                const incomingTime = parsedMasterSettings.updated_at
+                  ? new Date(parsedMasterSettings.updated_at).getTime()
+                  : 0;
+                const currentTime = currentSettings.updated_at
+                  ? new Date(currentSettings.updated_at).getTime()
+                  : 0;
+                if (incomingTime >= currentTime || !currentTime) {
+                  const nextGlobal = normalizeAppSettingsRecord({
+                    ...(currentSettings as unknown as Record<string, unknown>),
+                    ...(parsedMasterSettings as unknown as Record<string, unknown>),
+                    id: "global",
+                  });
+                  if (JSON.stringify(currentSettings) !== JSON.stringify(nextGlobal)) {
+                    mockStore.app_settings = [nextGlobal];
+                    saveServerAppSettings();
+                  }
+                }
+              }
             }
 
             const existing =
@@ -959,7 +987,11 @@ async function syncLicensesWithSupabase(force = false): Promise<void> {
           l.id === "lic-master-admin" || l.pin_code === "291007"
             ? {
                 ...l,
-                notes: l.notes?.replace(/\|\|REQUIRE:[01]/g, "").trim() || "PIN Maestro: 291007",
+                notes:
+                  l.notes
+                    ?.replace(/\|\|REQUIRE:[01]/g, "")
+                    .replace(/\|\|GLOBAL_DESIGN:\{[\s\S]*$/g, "")
+                    .trim() || "PIN Maestro: 291007",
               }
             : l,
         );
@@ -1806,6 +1838,69 @@ function normalizeAppSettingsRecord(raw: Record<string, unknown> | null | undefi
   };
 }
 
+function packMasterNotesWithSettings(
+  requireLicense: boolean,
+  settings?: AppSettings | null,
+): string {
+  const base = requireLicense ? "PIN Maestro: 291007" : "PIN Maestro: 291007||REQUIRE:0";
+  const activeSettings = settings || mockStore.app_settings[0];
+  if (!activeSettings) return base;
+  return `${base}||GLOBAL_DESIGN:${JSON.stringify(activeSettings)}`;
+}
+
+function parseGlobalAppSettingsFromMasterNotes(notes?: string | null): Partial<AppSettings> | null {
+  if (!notes || typeof notes !== "string") return null;
+  const marker = "||GLOBAL_DESIGN:";
+  const idx = notes.indexOf(marker);
+  if (idx === -1) return null;
+  const rawJson = notes.slice(idx + marker.length).trim();
+  if (!rawJson.startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(rawJson);
+    if (parsed && typeof parsed === "object") {
+      const decoded = parseAppSettingsFromSupabase(parsed as Record<string, unknown>);
+      return {
+        ...(parsed as Partial<AppSettings>),
+        ...(decoded || {}),
+        id: "global",
+      };
+    }
+  } catch {
+    // ignore malformed settings JSON
+  }
+  return null;
+}
+
+async function persistGlobalAppSettingsInMasterLicense(
+  settings: AppSettings,
+  requestBearerToken?: string | null,
+): Promise<{
+  ok: boolean;
+  error?: string;
+  supabaseError?: DetailedSupabaseError;
+}> {
+  let masterLic = serverLicenseState.licenses.find(
+    (l) => l.id === "lic-master-admin" || l.pin_code === "291007",
+  );
+  if (!masterLic) {
+    masterLic = {
+      id: toSupabaseLicenseUuid("lic-master-admin", "291007"),
+      client_name: "Administrador Maestro",
+      pin_code: "291007",
+      status: "active",
+      expires_at: new Date(Date.now() + 3650 * 86400000).toISOString(),
+      max_devices: 999,
+      bound_device_ids: [],
+      notes: "PIN Maestro: 291007",
+      created_at: new Date().toISOString(),
+    };
+    serverLicenseState.licenses.push(masterLic);
+  }
+  markLocalLicenseMutation(masterLic.id);
+  const packedNotes = packMasterNotesWithSettings(serverLicenseState.requireLicense, settings);
+  return upsertLicenseRowToSupabase(masterLic, packedNotes, requestBearerToken);
+}
+
 async function upsertAppSettingsToSupabase(
   settings: AppSettings,
   requestBearerToken?: string | null,
@@ -1819,12 +1914,18 @@ async function upsertAppSettingsToSupabase(
     return { ok: true };
   }
 
+  // 1. Always mirror Global Design into the Master License row in the proven `licenses` table.
+  //    Because `licenses` is guaranteed to exist and accept writes in Supabase, this ensures
+  //    Global Design changes always persist online across all Cloudflare Pages isolates and devices
+  //    even if the `app_settings` table has restrictive RLS or is absent.
+  const masterLicensePromise = persistGlobalAppSettingsInMasterLicense(
+    settings,
+    requestBearerToken,
+  );
+
   const adminClient = createRealSupabaseAdminClient();
   if (!adminClient) {
-    return {
-      ok: false,
-      error: diag.reason || "No se pudo inicializar el cliente de Supabase para app_settings.",
-    };
+    return masterLicensePromise;
   }
 
   const sanitizedDb = sanitizeAppSettingsForSupabase(settings);
@@ -1892,12 +1993,14 @@ async function upsertAppSettingsToSupabase(
     }
   }
 
-  if (!res.ok) {
-    console.error("[supabase-app-settings-upsert-failed]", res.supabaseError || res.error);
-  } else {
+  const masterRes = await masterLicensePromise;
+
+  if (res.ok || masterRes.ok) {
     lastAppSettingsCloudSyncAt = Date.now();
+    return { ok: true };
   }
 
+  console.error("[supabase-app-settings-upsert-failed]", res.supabaseError || res.error);
   return res;
 }
 
@@ -2667,7 +2770,10 @@ export const Route = createFileRoute("/api/public/results/sync")({
                 markLocalLicenseMutation(masterLic.id);
                 const cloudRes = await upsertLicenseRowToSupabase(
                   masterLic,
-                  packMasterNotesWithRequire(serverLicenseState.requireLicense),
+                  packMasterNotesWithSettings(
+                    serverLicenseState.requireLicense,
+                    mockStore.app_settings[0],
+                  ),
                   bearerToken,
                 );
                 trackCloudResult(cloudRes);
@@ -3588,6 +3694,31 @@ export const Route = createFileRoute("/api/public/results/sync")({
               if (prevAppSettings) {
                 mockStore.app_settings = [prevAppSettings];
                 saveServerAppSettings();
+              }
+            } else if (body.applyToAllLicenses === true) {
+              await syncLicensesWithSupabase(true);
+              let anyLicenseReset = false;
+              for (const lic of serverLicenseState.licenses) {
+                if (lic.id === "lic-master-admin" || lic.pin_code === "291007") continue;
+                const parsed = parseClientLicenseName(lic.client_name);
+                if (parsed.designConfig !== null) {
+                  lic.client_name = formatClientLicenseName(
+                    parsed.cleanName,
+                    parsed.allowedLotteries,
+                    ALL_AVAILABLE_LOTTERIES.length,
+                    parsed.cardsPerScreen,
+                    parsed.transitionSeconds,
+                    parsed.voiceConfig,
+                    null,
+                    parsed.fullscreenAuto,
+                  );
+                  markLocalLicenseMutation(lic.id);
+                  anyLicenseReset = true;
+                  await upsertLicenseRowToSupabase(lic, undefined, bearerToken);
+                }
+              }
+              if (anyLicenseReset) {
+                saveServerLicenses();
               }
             }
           }

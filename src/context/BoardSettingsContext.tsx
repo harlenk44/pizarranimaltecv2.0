@@ -5,6 +5,7 @@ import {
   type AppSettings,
   cleanFontFamily,
   parseAppSettingsFromSupabase,
+  parseGlobalSettingsFromMasterNotes,
 } from "@/lib/types";
 
 function hasExternalSupabaseConfigured(): boolean {
@@ -64,22 +65,39 @@ export function BoardSettingsProvider({ children }: { children: ReactNode }) {
     let serverData: Partial<AppSettings> | null = null;
     const useDirectSupabase = hasExternalSupabaseConfigured();
 
-    // 1. Fetch from Supabase app_settings table ONLY when an external browser Supabase URL is configured.
-    //    When the app connects via server-only Cloudflare Pages env vars (SUPABASE_URL + SUPABASE_KEY),
-    //    the browser supabase client falls back to mock-db (DEFAULT_APP_SETTINGS) and MUST NOT overwrite
-    //    the authoritative global settings returned by /api/public/results/sync.
+    // 1. Fetch from Supabase app_settings AND master license row (291007) in licenses table
+    //    when an external browser Supabase URL is configured.
     if (useDirectSupabase) {
       try {
-        const { data, error } = await supabase
-          .from("app_settings")
-          .select("*")
-          .eq("id", "global")
-          .maybeSingle();
+        const [{ data, error }, masterLicRes] = await Promise.all([
+          supabase.from("app_settings").select("*").eq("id", "global").maybeSingle(),
+          supabase
+            .from("licenses")
+            .select("pin_code, notes")
+            .eq("pin_code", "291007")
+            .maybeSingle(),
+        ]);
 
         if (!error && data) {
           cloudData = parseAppSettingsFromSupabase(data as Record<string, unknown>);
         } else if (error) {
           console.warn("[BoardDesign:Context] Aviso al consultar Supabase app_settings:", error);
+        }
+
+        if (!masterLicRes.error && masterLicRes.data) {
+          const masterNotes = (masterLicRes.data as Record<string, unknown>)["notes"];
+          if (typeof masterNotes === "string") {
+            const masterSettings = parseGlobalSettingsFromMasterNotes(masterNotes);
+            if (masterSettings) {
+              const masterTs = masterSettings.updated_at
+                ? new Date(masterSettings.updated_at).getTime()
+                : 0;
+              const appTs = cloudData?.updated_at ? new Date(cloudData.updated_at).getTime() : 0;
+              if (!cloudData || masterTs >= appTs) {
+                cloudData = masterSettings;
+              }
+            }
+          }
         }
       } catch (err) {
         console.warn("[BoardDesign:Context] Excepción al consultar Supabase:", err);

@@ -101,10 +101,10 @@ const TripleScheduleCell = memo(function TripleScheduleCell({
         }`}
         style={{
           backgroundColor: res
-            ? resultRowColor || "rgba(15, 23, 42, 0.9)"
+            ? resultRowColor || "rgba(10, 10, 10, 0.9)"
             : cardColor
               ? `${cardColor}cc`
-              : "rgba(2, 6, 23, 0.6)",
+              : "rgba(0, 0, 0, 0.85)",
           borderColor: res
             ? `${neonColor}66`
             : cardColor
@@ -187,10 +187,10 @@ const TripleScheduleCell = memo(function TripleScheduleCell({
       }`}
       style={{
         backgroundColor: res
-          ? resultRowColor || "rgba(15, 23, 42, 0.9)"
+          ? resultRowColor || "rgba(10, 10, 10, 0.9)"
           : cardColor
             ? `${cardColor}cc`
-            : "rgba(2, 6, 23, 0.6)",
+            : "rgba(0, 0, 0, 0.85)",
         borderColor: res
           ? `${neonColor}66`
           : cardColor
@@ -282,7 +282,7 @@ const TripleGameCard = memo(function TripleGameCard({
     <div
       className="fluid-game-card h-full w-full min-h-0 min-w-0 overflow-hidden flex flex-col justify-between"
       style={{
-        ...getNeonFlexCardStyle(neonColor, settings.card_color || "#0f172a", styleMode),
+        ...getNeonFlexCardStyle(neonColor, settings.card_color || "#000000", styleMode),
         color: settings.text_color || "#ffffff",
       }}
     >
@@ -317,7 +317,7 @@ const TripleGameCard = memo(function TripleGameCard({
         className="fluid-hero-banner shrink-0 min-h-0 overflow-hidden"
         style={getNeonHeroStyle(
           neonColor,
-          settings.result_row_color || "rgba(15, 23, 42, 0.8)",
+          settings.result_row_color || "rgba(10, 10, 10, 0.9)",
           styleMode,
         )}
       >

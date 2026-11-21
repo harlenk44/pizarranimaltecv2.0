@@ -9,7 +9,15 @@ import {
   RefreshCw,
   ShieldCheck,
 } from "lucide-react";
-import type { ClientLicense, Game, Result } from "@/lib/types";
+import {
+  type AppSettings,
+  type ClientLicense,
+  type Game,
+  type Result,
+  parseGlobalSettingsFromMasterNotes,
+  stripInternalMasterNotes,
+} from "@/lib/types";
+import { useBoardSettings } from "@/context/BoardSettingsContext";
 import {
   ensureCustomCatalogLoaded,
   mockStore,
@@ -132,6 +140,7 @@ export default function LicenseGate({
   forceClientPreview = false,
   onExitPreview,
 }: LicenseGateProps) {
+  const { updateSettings } = useBoardSettings();
   const [deviceId] = useState<string>(() => getOrCreateDeviceId());
   const [activatedPin, setActivatedPin] = useState<string>(() => {
     if (typeof window === "undefined") return "";
@@ -220,6 +229,10 @@ export default function LicenseGate({
         data && typeof data.requireLicense === "boolean" ? data.requireLicense : true;
       let serverList: ClientLicense[] =
         data && Array.isArray(data.clientLicenses) ? [...data.clientLicenses] : [];
+      let latestGlobalSettings: Partial<AppSettings> | null =
+        data?.appSettings && typeof data.appSettings === "object"
+          ? (data.appSettings as Partial<AppSettings>)
+          : null;
 
       if (Array.isArray(sbRows) && sbRows.length > 0) {
         const mappedSb = sbRows.map((row) =>
@@ -231,6 +244,18 @@ export default function LicenseGate({
         } else if (masterSb?.notes?.includes("||REQUIRE:1")) {
           nextRequire = true;
         }
+        const masterNotesGlobalSettings = parseGlobalSettingsFromMasterNotes(masterSb?.notes);
+        if (masterNotesGlobalSettings) {
+          const masterTs = masterNotesGlobalSettings.updated_at
+            ? new Date(masterNotesGlobalSettings.updated_at).getTime()
+            : 0;
+          const serverTs = latestGlobalSettings?.updated_at
+            ? new Date(latestGlobalSettings.updated_at).getTime()
+            : 0;
+          if (!latestGlobalSettings || masterTs >= serverTs) {
+            latestGlobalSettings = masterNotesGlobalSettings;
+          }
+        }
         const byPin = new Map<string, ClientLicense>();
         for (const l of serverList) {
           if (l.pin_code) byPin.set(l.pin_code, l);
@@ -238,11 +263,15 @@ export default function LicenseGate({
         for (const l of mappedSb) {
           const cleanNotes =
             l.pin_code === "291007"
-              ? l.notes?.replace(/\|\|REQUIRE:[01]/g, "").trim() || "PIN Maestro: 291007"
+              ? stripInternalMasterNotes(l.notes) || "PIN Maestro: 291007"
               : l.notes;
           if (l.pin_code) byPin.set(l.pin_code, { ...l, notes: cleanNotes });
         }
         serverList = Array.from(byPin.values());
+      }
+
+      if (latestGlobalSettings) {
+        updateSettings(latestGlobalSettings);
       }
 
       if (data || (Array.isArray(sbRows) && sbRows.length > 0)) {
@@ -288,7 +317,7 @@ export default function LicenseGate({
     } finally {
       setInitialLoaded((prev) => (prev ? prev : true));
     }
-  }, []);
+  }, [updateSettings]);
 
   useEffect(() => {
     syncLicenseState();

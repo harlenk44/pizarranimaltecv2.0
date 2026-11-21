@@ -411,10 +411,10 @@ const ScheduleCell = memo(function ScheduleCell({
       }`}
       style={{
         backgroundColor: hasResult
-          ? resultRowColor || "rgba(15, 23, 42, 0.9)"
+          ? resultRowColor || "rgba(10, 10, 10, 0.9)"
           : cardColor
             ? `${cardColor}cc`
-            : "rgba(2, 6, 23, 0.6)",
+            : "rgba(0, 0, 0, 0.85)",
         borderColor: hasResult
           ? `${neonColor}66`
           : cardColor
@@ -538,7 +538,7 @@ const GameCard = memo(
       <div
         className="fluid-game-card h-full w-full min-h-0 min-w-0 overflow-hidden flex flex-col justify-between"
         style={{
-          ...getNeonFlexCardStyle(neonColor, settings.card_color || "#0f172a", styleMode),
+          ...getNeonFlexCardStyle(neonColor, settings.card_color || "#000000", styleMode),
           color: settings.text_color || "#ffffff",
         }}
       >
@@ -574,7 +574,7 @@ const GameCard = memo(
           className="fluid-hero-banner shrink-0 min-h-0 overflow-hidden"
           style={getNeonHeroStyle(
             neonColor,
-            settings.result_row_color || "rgba(15, 23, 42, 0.8)",
+            settings.result_row_color || "rgba(10, 10, 10, 0.9)",
             styleMode,
           )}
         >
@@ -1946,9 +1946,9 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         color: effectiveSettings.text_color || "#ffffff",
         fontFamily: effectiveSettings.font_family || "inherit",
         ["--board-bg" as string]: effectiveSettings.background_color || "#000000",
-        ["--board-surface" as string]: effectiveSettings.surface_color || "#0f172a",
-        ["--board-card" as string]: effectiveSettings.card_color || "#0f172a",
-        ["--board-row" as string]: effectiveSettings.result_row_color || "#1e293b",
+        ["--board-surface" as string]: effectiveSettings.surface_color || "#000000",
+        ["--board-card" as string]: effectiveSettings.card_color || "#000000",
+        ["--board-row" as string]: effectiveSettings.result_row_color || "#0a0a0a",
         ["--board-primary" as string]: effectiveSettings.primary_color || "#2563eb",
         ["--board-text" as string]: effectiveSettings.text_color || "#ffffff",
       }}
@@ -1957,7 +1957,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       <header
         className="board-fluid-header shrink-0 flex items-center justify-between"
         style={{
-          backgroundColor: effectiveSettings.surface_color || "#0f172a",
+          backgroundColor: effectiveSettings.surface_color || "#000000",
           borderBottom: `1px solid ${effectiveSettings.primary_color ? `${effectiveSettings.primary_color}40` : "#1e293b"}`,
         }}
       >
