@@ -1204,7 +1204,10 @@ function loadServerGameLogos() {
     if (persistedGameLogosJson && typeof persistedGameLogosJson === "object") {
       for (const [k, v] of Object.entries(persistedGameLogosJson as Record<string, unknown>)) {
         if (typeof v === "string" && isCustomUploadedGameLogo(v)) {
-          serverCustomGameLogos[k.trim().toLowerCase()] = v;
+          const canonKey = normalizeGameSlug(k) || k.trim().toLowerCase();
+          if (canonKey && !/^[0-9a-f-]{36}$/i.test(canonKey)) {
+            serverCustomGameLogos[canonKey] = v;
+          }
         }
       }
     }
@@ -1215,7 +1218,10 @@ function loadServerGameLogos() {
           if (parsed && typeof parsed === "object") {
             for (const [k, v] of Object.entries(parsed)) {
               if (typeof v === "string" && isCustomUploadedGameLogo(v)) {
-                serverCustomGameLogos[k.trim().toLowerCase()] = v;
+                const canonKey = normalizeGameSlug(k) || k.trim().toLowerCase();
+                if (canonKey && !/^[0-9a-f-]{36}$/i.test(canonKey)) {
+                  serverCustomGameLogos[canonKey] = v;
+                }
               }
             }
           }
@@ -1265,17 +1271,11 @@ function loadServerGames() {
         };
 
         if (isCustomUploadedGameLogo(savedGame.logo_url)) {
-          const idKey = savedGame.id ? String(savedGame.id).trim().toLowerCase() : "";
-          const aliasKeys = getGameSlugAliases(canonicalSlug || savedGame.slug);
-          if (idKey && serverCustomGameLogos[idKey] !== savedGame.logo_url) {
-            serverCustomGameLogos[idKey] = savedGame.logo_url;
+          const logoKey =
+            canonicalSlug || (savedGame.id ? String(savedGame.id).trim().toLowerCase() : "");
+          if (logoKey && serverCustomGameLogos[logoKey] !== savedGame.logo_url) {
+            serverCustomGameLogos[logoKey] = savedGame.logo_url;
             logosUpdated = true;
-          }
-          for (const aliasKey of aliasKeys) {
-            if (aliasKey && serverCustomGameLogos[aliasKey] !== savedGame.logo_url) {
-              serverCustomGameLogos[aliasKey] = savedGame.logo_url;
-              logosUpdated = true;
-            }
           }
         }
 
@@ -1382,8 +1382,9 @@ function saveServerGames() {
     serverGamesVersion++;
     for (const g of mockStore.games) {
       if (isCustomUploadedGameLogo(g.logo_url)) {
-        if (g.id) serverCustomGameLogos[g.id.trim().toLowerCase()] = g.logo_url;
-        if (g.slug) serverCustomGameLogos[g.slug.trim().toLowerCase()] = g.logo_url;
+        const canonSlug = normalizeGameSlug(g.slug, g.name);
+        const key = canonSlug || (g.id ? g.id.trim().toLowerCase() : "");
+        if (key) serverCustomGameLogos[key] = g.logo_url;
       }
     }
     saveServerGameLogos();
@@ -1486,15 +1487,10 @@ async function syncGamesWithSupabase(force = false): Promise<void> {
 
           const logoUrl = typeof row["logo_url"] === "string" ? row["logo_url"] : null;
           if (logoUrl && isCustomUploadedGameLogo(logoUrl)) {
-            if (id && serverCustomGameLogos[id.toLowerCase()] !== logoUrl) {
-              serverCustomGameLogos[id.toLowerCase()] = logoUrl;
+            const logoKey = canonicalSlug || id.toLowerCase();
+            if (logoKey && serverCustomGameLogos[logoKey] !== logoUrl) {
+              serverCustomGameLogos[logoKey] = logoUrl;
               changed = true;
-            }
-            for (const aliasKey of getGameSlugAliases(canonicalSlug)) {
-              if (aliasKey && serverCustomGameLogos[aliasKey] !== logoUrl) {
-                serverCustomGameLogos[aliasKey] = logoUrl;
-                changed = true;
-              }
             }
           }
 
@@ -2582,7 +2578,9 @@ export const Route = createFileRoute("/api/public/results/sync")({
         const clientLogosVer = reqUrl.searchParams.get("logosVersion");
         const clientGamesVer = reqUrl.searchParams.get("gamesVersion");
         const clientImagesVer = reqUrl.searchParams.get("imagesVersion");
-        const isPoll = reqUrl.searchParams.get("poll") === "1" || clientGamesVer !== null;
+        const isPoll = reqUrl.searchParams.get("poll") === "1";
+        const includeLicenses = !isPoll || reqUrl.searchParams.get("includeLicenses") === "1";
+        const forceCloudSync = reqUrl.searchParams.get("forceSync") === "1";
 
         const serverToday = lotteryDate();
         resetDeletedTriplesIfNewDay();
@@ -2590,32 +2588,29 @@ export const Route = createFileRoute("/api/public/results/sync")({
         const todayTriplesBefore = serverTripleResults.filter(
           (r) => r.draw_date === serverToday,
         ).length;
-        const forceTriplesSync = reqUrl.searchParams.get("forceSync") === "1";
 
         // Start fast triples sync IN PARALLEL with Supabase reads when today's triples are empty or stale
         const triplesNeedSync =
-          forceTriplesSync ||
+          forceCloudSync ||
           todayTriplesBefore === 0 ||
           Date.now() - lastTriplesSyncTimestamp >= TRIPLES_SYNC_INTERVAL_MS;
         const triplesSyncInFlight = triplesNeedSync
-          ? syncTriplesFast(forceTriplesSync).catch(() => ({
+          ? syncTriplesFast(forceCloudSync).catch(() => ({
               newlyAdded: [] as TripleResult[],
               newTripleCount: 0,
             }))
           : null;
 
-        // 1. Sincronizar games[], licenses[], appSettings y results[] desde Supabase con timeouts acotados
+        // 1. Sincronizar games[], licenses[], appSettings y results[] desde Supabase en paralelo respetando TTL
         await Promise.race([
-          (async () => {
-            await Promise.all([
-              syncGamesWithSupabase(!isPoll),
-              syncLicensesWithSupabase(!isPoll),
-              syncAppSettingsWithSupabase(!isPoll),
-              ...(!isPoll ? [syncAnimalImagesWithSupabase()] : []),
-            ]);
-            await syncResultsWithSupabase(!isPoll);
-          })(),
-          new Promise((resolve) => setTimeout(resolve, isPoll ? 1200 : 2500)),
+          Promise.all([
+            syncGamesWithSupabase(forceCloudSync),
+            syncLicensesWithSupabase(forceCloudSync),
+            syncAppSettingsWithSupabase(forceCloudSync),
+            syncResultsWithSupabase(forceCloudSync),
+            ...(forceCloudSync ? [syncAnimalImagesWithSupabase()] : []),
+          ]),
+          new Promise((resolve) => setTimeout(resolve, isPoll ? 900 : 1800)),
         ]);
 
         const todayResultsCount = mockStore.results.filter(
@@ -2625,24 +2620,22 @@ export const Route = createFileRoute("/api/public/results/sync")({
           (r) => r.draw_date === serverToday,
         ).length;
 
-        // 2. If today's triples are still empty (cold isolate), wait ONLY on the fast triples promise (max 4.5s)
-        if (triplesSyncInFlight && (todayTriplesCount === 0 || forceTriplesSync)) {
+        // 2. If today's triples are still empty (cold isolate), wait ONLY on the fast triples promise (max 4s)
+        if (triplesSyncInFlight && (todayTriplesCount === 0 || forceCloudSync)) {
           await Promise.race([
             triplesSyncInFlight,
-            new Promise((resolve) => setTimeout(resolve, 4500)),
+            new Promise((resolve) => setTimeout(resolve, 4000)),
           ]);
         }
 
-        // 3. Trigger full animalitos scraper sync when cold-empty or interval elapsed (non-blocking on warm polls!)
+        // 3. Trigger full animalitos scraper sync when cold-empty or interval elapsed (non-blocking when RAM is warm!)
         const isStaleSync = Date.now() - lastAutoSyncTimestamp >= AUTO_SYNC_INTERVAL_MS;
         const isColdAnimalitosEmpty = todayResultsCount === 0;
         if (!initialAutoSyncDone || isColdAnimalitosEmpty || isStaleSync) {
           initialAutoSyncDone = true;
           const syncPromise = triggerBackgroundSync(isColdAnimalitosEmpty).catch(() => {});
           if (isColdAnimalitosEmpty) {
-            await Promise.race([syncPromise, new Promise((resolve) => setTimeout(resolve, 4500))]);
-          } else if (!isPoll) {
-            await Promise.race([syncPromise, new Promise((resolve) => setTimeout(resolve, 900))]);
+            await Promise.race([syncPromise, new Promise((resolve) => setTimeout(resolve, 4000))]);
           }
         }
 
@@ -2654,10 +2647,6 @@ export const Route = createFileRoute("/api/public/results/sync")({
         const shouldSendGames = !clientGamesVer || clientGamesVer !== String(serverGamesVersion);
         const shouldSendImages =
           !clientImagesVer || clientImagesVer !== String(serverAnimalImagesVersion);
-
-        if (shouldSendImages) {
-          await ensureCustomCatalogLoaded().catch(() => {});
-        }
 
         let latestAlert = serverLatestAlert;
         if (!latestAlert) {
@@ -2707,9 +2696,9 @@ export const Route = createFileRoute("/api/public/results/sync")({
               )
             : null,
           requireLicense: serverLicenseState.requireLicense,
-          clientLicenses: isPoll ? null : serverLicenseState.licenses,
-          deletedIds: isPoll ? null : serverLicenseState.deletedIds || [],
-          deletedPins: isPoll ? null : serverLicenseState.deletedPins || [],
+          clientLicenses: includeLicenses ? serverLicenseState.licenses : null,
+          deletedIds: includeLicenses ? serverLicenseState.deletedIds || [] : null,
+          deletedPins: includeLicenses ? serverLicenseState.deletedPins || [] : null,
           cloudLicenseConfigured: cloudDiag.configured,
           cloudLicenseStorageMode: cloudDiag.configured ? "supabase" : "local-memory",
           workspaceLicenseFileActive: isWorkspaceLicensesFileActive(),

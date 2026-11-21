@@ -106,7 +106,10 @@ export function BoardSettingsProvider({ children }: { children: ReactNode }) {
 
     // 2. Fetch authoritative global settings from server sync endpoint (backed by Supabase SUPABASE_URL/SUPABASE_KEY)
     try {
-      const res = await fetch("/api/public/results/sync", { cache: "no-store" });
+      const res = await fetch(
+        "/api/public/results/sync?poll=1&logosVersion=1&gamesVersion=1&imagesVersion=1",
+        { cache: "no-store" },
+      );
       if (res.ok) {
         const syncJson = await res.json();
         if (syncJson?.appSettings && typeof syncJson.appSettings === "object") {

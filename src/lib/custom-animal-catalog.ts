@@ -55,10 +55,6 @@ export async function loadCustomAnimalCatalog(): Promise<CustomAnimalEntry[]> {
   return _loadPromise;
 }
 
-if (typeof window !== "undefined") {
-  void loadCustomAnimalCatalog();
-}
-
 /**
  * Retorna true si la URL pertenece al catálogo base de 451 animalitos (`custom-animal-catalog.json`).
  * Esto permite distinguir entre el catálogo base (que se carga por separado bajo demanda)

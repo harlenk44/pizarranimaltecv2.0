@@ -702,7 +702,10 @@ function buildInitialPersistedLogosMap(): Record<string, string> {
   if (persistedGameLogosJson && typeof persistedGameLogosJson === "object") {
     for (const [k, v] of Object.entries(persistedGameLogosJson as Record<string, unknown>)) {
       if (typeof v === "string" && isCustomUploadedGameLogo(v)) {
-        initial[k.trim().toLowerCase()] = v;
+        const cleanKey = k.trim().toLowerCase();
+        initial[cleanKey] = v;
+        const canon = normalizeGameSlug(cleanKey);
+        if (canon) initial[canon] = v;
       }
     }
   }

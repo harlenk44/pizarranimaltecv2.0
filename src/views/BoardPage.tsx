@@ -44,7 +44,6 @@ import {
 import { getResponsiveBoardGridStyle, DEFAULT_CARDS_PER_SCREEN } from "@/lib/license-lotteries";
 import {
   mockStore,
-  ensureCustomCatalogLoaded,
   mergeAnimalImagesPreserveCustom,
   mergeResultsPreserveToday,
   recoverCustomAnimalImagesFromLocalStorage,
@@ -792,10 +791,15 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
   const [animalLabels, setAnimalLabels] = useState<AnimalLabelMap>({});
   const [loading, setLoading] = useState<boolean>(() => getInitialGames().length === 0);
   const lastUpdateRef = useRef<Date>(new Date());
-  const lastLogosVersionRef = useRef<number>(0);
-  const lastGamesVersionRef = useRef<number>(0);
-  const lastImagesVersionRef = useRef<number>(0);
-  const lastSettingsVersionRef = useRef<number>(0);
+  const initialSyncSeed =
+    typeof window !== "undefined"
+      ? ((window as unknown as Record<string, unknown>)["__PIZARRA_LAST_SYNC_DATA__"] as
+          Record<string, unknown> | undefined)
+      : undefined;
+  const lastLogosVersionRef = useRef<number>(Number(initialSyncSeed?.["logosVersion"]) || 1);
+  const lastGamesVersionRef = useRef<number>(Number(initialSyncSeed?.["gamesVersion"]) || 0);
+  const lastImagesVersionRef = useRef<number>(Number(initialSyncSeed?.["imagesVersion"]) || 1);
+  const lastSettingsVersionRef = useRef<number>(Number(initialSyncSeed?.["settingsVersion"]) || 0);
   const lastGamesJsonRef = useRef<string>("");
   const lastImgMapJsonRef = useRef<string>("");
   const lastNameMapJsonRef = useRef<string>("");
@@ -964,9 +968,6 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       const reqSeq = ++fetchSeqRef.current;
 
       try {
-        // Ensure local embedded base64 catalog (451 animal images) is loaded in browser RAM
-        await ensureCustomCatalogLoaded().catch(() => {});
-
         // 1. Sync from server backend to get latest results, alerts, and custom animal videos/images
         let serverSyncedResults: Result[] = [];
         let serverSyncedTriples: TripleResult[] = tripleResultsRef.current;
@@ -1616,7 +1617,32 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       mediaLoadedRef.current = false;
       fetchAll();
     };
+    const onServerSyncPayload = (ev: Event) => {
+      const payload = (ev as CustomEvent<Record<string, unknown>>).detail;
+      if (payload && Array.isArray(payload["tripleResults"])) {
+        const todayDate = lotteryDate();
+        const deletedIds = Array.isArray(payload["deletedTripleIds"])
+          ? (payload["deletedTripleIds"] as string[])
+          : [];
+        const mergedTriples = mergeTripleResultsPreserveToday(
+          tripleResultsRef.current,
+          payload["tripleResults"] as TripleResult[],
+          todayDate,
+          deletedIds,
+        );
+        const tJson = JSON.stringify(mergedTriples);
+        if (lastTripleResultsJsonRef.current !== tJson) {
+          lastTripleResultsJsonRef.current = tJson;
+          tripleResultsRef.current = mergedTriples;
+          setTripleResults(mergedTriples);
+        }
+      }
+      if (payload && Array.isArray(payload["results"]) && payload["results"].length > 0) {
+        setResultsMap(getInitialResultsMap());
+      }
+    };
     window.addEventListener("pizarra:custom-images-loaded", onCustomImagesLoaded);
+    window.addEventListener("pizarra:server-sync-payload", onServerSyncPayload);
 
     const realtimeChannel = supabase
       .channel("board-animal-media-sync")
@@ -1638,6 +1664,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       bc?.close();
       window.removeEventListener("storage", onStorage);
       window.removeEventListener("pizarra:custom-images-loaded", onCustomImagesLoaded);
+      window.removeEventListener("pizarra:server-sync-payload", onServerSyncPayload);
       supabase.removeChannel(realtimeChannel);
     };
   }, [enqueueUniqueAlert, fetchAll, scheduleHardReload, refreshSettings, updateSettings]);

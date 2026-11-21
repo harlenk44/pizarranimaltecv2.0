@@ -18,12 +18,10 @@ import {
   stripInternalMasterNotes,
 } from "@/lib/types";
 import { useBoardSettings } from "@/context/BoardSettingsContext";
-import {
-  ensureCustomCatalogLoaded,
-  mockStore,
-  mergeGamesPreserveCustomLogos,
-  mergeResultsPreserveToday,
-} from "@/lib/mock-db";
+import { mockStore, mergeGamesPreserveCustomLogos, mergeResultsPreserveToday } from "@/lib/mock-db";
+import { mergeCustomGameLogosMap } from "@/lib/game-logos";
+import { mergeTripleResultsPreserveToday, type TripleResult } from "@/lib/triples";
+import { lotteryDate } from "@/lib/lottery-date";
 import { supabase } from "@/integrations/supabase/client";
 import {
   parseClientLicenseName,
@@ -34,6 +32,7 @@ import {
   LICENSE_CACHE_STORAGE_KEY,
   reconcileClientLicensesWithLocal,
   saveLocalLicensesSnapshot,
+  type CardsPerScreenOption,
 } from "@/lib/license-lotteries";
 import {
   LicenseContext,
@@ -180,12 +179,18 @@ export default function LicenseGate({
     }
     return [];
   });
-  const [initialLoaded, setInitialLoaded] = useState<boolean>(false);
+  const [initialLoaded, setInitialLoaded] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    const cleanPin = activatedPin.trim();
+    if (cleanPin === "291007") return true;
+    if (cleanPin && licenses.some((l) => l.pin_code === cleanPin)) return true;
+    return false;
+  });
   const [checking, setChecking] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string>("");
   const [adminBypass, setAdminBypass] = useState<boolean>(false);
   const [forceLicenseScreen, setForceLicenseScreen] = useState<boolean>(false);
-  const [logoClicks, setLogoClicks] = useState<number>(0);
+  const [, setLogoClicks] = useState<number>(0);
 
   const handleSecretAdminAccess = () => {
     setLogoClicks((prev) => {
@@ -199,6 +204,11 @@ export default function LicenseGate({
   };
 
   const lastLicensesJsonRef = useRef<string>("");
+  const syncVersionsRef = useRef<{ logos: number; games: number; images: number }>({
+    logos: 1,
+    games: 0,
+    images: 1,
+  });
 
   const syncLicenseState = useCallback(async () => {
     try {
@@ -208,21 +218,77 @@ export default function LicenseGate({
             .catch(() => null)
         : Promise.resolve(null);
 
+      const q = new URLSearchParams();
+      q.set("includeLicenses", "1");
+      if (syncVersionsRef.current.logos) {
+        q.set("logosVersion", String(syncVersionsRef.current.logos));
+      }
+      if (syncVersionsRef.current.games) {
+        q.set("gamesVersion", String(syncVersionsRef.current.games));
+      }
+      if (syncVersionsRef.current.images) {
+        q.set("imagesVersion", String(syncVersionsRef.current.images));
+      }
+
       const [res, sbRows] = await Promise.all([
-        fetch("/api/public/results/sync", { cache: "no-store" }).catch(() => null),
+        fetch(`/api/public/results/sync?${q.toString()}`, { cache: "no-store" }).catch(() => null),
         sbDirectPromise,
-        ensureCustomCatalogLoaded().catch(() => {}),
       ]);
 
       const data = res && res.ok ? await res.json() : null;
+      if (data) {
+        if (data.logosVersion) syncVersionsRef.current.logos = Number(data.logosVersion);
+        if (data.gamesVersion) syncVersionsRef.current.games = Number(data.gamesVersion);
+        if (data.imagesVersion) syncVersionsRef.current.images = Number(data.imagesVersion);
+      }
+      if (data?.customGameLogos && typeof data.customGameLogos === "object") {
+        mergeCustomGameLogosMap(data.customGameLogos as Record<string, string>);
+      }
       if (data && Array.isArray(data.games) && data.games.length > 0) {
         const serverGames = data.games as Game[];
         const serverIds = new Set(serverGames.map((g) => g.id));
         const prunedLocal = mockStore.games.filter((g) => serverIds.has(g.id));
         mockStore.games = mergeGamesPreserveCustomLogos(prunedLocal, serverGames);
+        try {
+          localStorage.setItem("pizarra_persisted_games", JSON.stringify(mockStore.games));
+        } catch {
+          // ignore
+        }
       }
+      const todayDate = lotteryDate();
       if (data && Array.isArray(data.results) && data.results.length > 0) {
-        mockStore.results = mergeResultsPreserveToday(mockStore.results, data.results as Result[]);
+        mockStore.results = mergeResultsPreserveToday(
+          mockStore.results,
+          data.results as Result[],
+          todayDate,
+        );
+        try {
+          localStorage.setItem("pizarra_mock_results", JSON.stringify(mockStore.results));
+        } catch {
+          // ignore
+        }
+      }
+      if (data && Array.isArray(data.tripleResults) && data.tripleResults.length > 0) {
+        try {
+          const existingRaw = localStorage.getItem("pizarra_triple_results");
+          const existingList = existingRaw ? (JSON.parse(existingRaw) as TripleResult[]) : [];
+          const deletedTripleIds = Array.isArray(data.deletedTripleIds)
+            ? (data.deletedTripleIds as string[])
+            : [];
+          const mergedTriples = mergeTripleResultsPreserveToday(
+            Array.isArray(existingList) ? existingList : [],
+            data.tripleResults as TripleResult[],
+            todayDate,
+            deletedTripleIds,
+          );
+          localStorage.setItem("pizarra_triple_results", JSON.stringify(mergedTriples));
+        } catch {
+          // ignore
+        }
+      }
+      if (data && typeof window !== "undefined") {
+        (window as unknown as Record<string, unknown>)["__PIZARRA_LAST_SYNC_DATA__"] = data;
+        window.dispatchEvent(new CustomEvent("pizarra:server-sync-payload", { detail: data }));
       }
 
       let nextRequire =
