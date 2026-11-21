@@ -92,4 +92,16 @@ describe("game-schedules helper", () => {
     };
     expect(getGameScheduleTimes(legacyRicachona)).toEqual(DEFAULT_GAME_SCHEDULES["la-ricachona"]);
   });
+
+  it("provides official draw times for Lotto Activo RDominicana (08:00 to 21:00) and Ruleta Activa (09:00 to 19:00)", () => {
+    const rdomTimes = getDefaultGameScheduleTimes("lotto-activo-rdominicana");
+    expect(rdomTimes).toHaveLength(14);
+    expect(rdomTimes[0]).toBe("08:00");
+    expect(rdomTimes[rdomTimes.length - 1]).toBe("21:00");
+
+    const ruletaTimes = getDefaultGameScheduleTimes("ruleta-activa");
+    expect(ruletaTimes).toHaveLength(11);
+    expect(ruletaTimes[0]).toBe("09:00");
+    expect(ruletaTimes[ruletaTimes.length - 1]).toBe("19:00");
+  });
 });

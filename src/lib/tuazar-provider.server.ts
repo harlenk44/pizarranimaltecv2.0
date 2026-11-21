@@ -17,6 +17,10 @@ import { normalizeGameSlug } from "@/lib/game-slugs";
 import { lotteryDate } from "@/lib/lottery-date";
 
 export const LOTERIADEHOY_PRIMARY_URL = "https://loteriadehoy.com/animalitos/resultados/";
+export const LOTERIADEHOY_RDOMINICANA_URL =
+  "https://loteriadehoy.com/animalito/lottoactivordominicana/resultados/";
+export const LOTERIADEHOY_RULETAACTIVA_URL =
+  "https://loteriadehoy.com/animalito/ruletaactiva/resultados/";
 export const TUAZAR_PRIMARY_URL = "https://tuazar.com/loteria/animalitos/resultados/";
 export const TUAZAR_FALLBACK_URL = "https://www.tuazar.com/loteria/animalitos/resultados/";
 
@@ -31,7 +35,7 @@ const BROWSER_HEADERS: Record<string, string> = {
   "Cache-Control": "no-cache",
 };
 
-// Game slug (canonical + legacy aliases) -> game name as printed by tuazar.com.
+// Game slug (canonical + legacy aliases) -> game name as printed by tuazar.com / loteriadehoy.com.
 export const TUAZAR_GAME_NAMES: Readonly<Record<string, string>> = {
   "lotto-activo": "LOTTO ACTIVO",
   "guacharo-activo": "GUACHARO ACTIVO",
@@ -45,6 +49,8 @@ export const TUAZAR_GAME_NAMES: Readonly<Record<string, string>> = {
   "monje-millonario": "MONJE MILLONARIO",
   "lotto-activo-internacional": "LOTTO ACTIVO RD INTERNACIONAL",
   "la-ricachona": "LA RICACHONA",
+  "lotto-activo-rdominicana": "LOTTO ACTIVO RDOMINICANA",
+  "ruleta-activa": "RULETA ACTIVA",
 };
 
 let ldhSnapshot: { at: number; page: Promise<LoteriaDeHoyPage> } | null = null;
@@ -67,8 +73,44 @@ async function fetchHtmlWithTimeout(url: string): Promise<string> {
 }
 
 async function downloadLoteriaDeHoyPage(): Promise<LoteriaDeHoyPage> {
-  const html = await fetchHtmlWithTimeout(LOTERIADEHOY_PRIMARY_URL);
-  return parseLoteriaDeHoyResults(html);
+  const [mainSettled, rdomSettled, ruletaSettled] = await Promise.allSettled([
+    fetchHtmlWithTimeout(LOTERIADEHOY_PRIMARY_URL).then((html) => parseLoteriaDeHoyResults(html)),
+    fetchHtmlWithTimeout(LOTERIADEHOY_RDOMINICANA_URL).then((html) =>
+      parseLoteriaDeHoyResults(html),
+    ),
+    fetchHtmlWithTimeout(LOTERIADEHOY_RULETAACTIVA_URL).then((html) =>
+      parseLoteriaDeHoyResults(html),
+    ),
+  ]);
+
+  const pages: LoteriaDeHoyPage[] = [];
+  if (mainSettled.status === "fulfilled") pages.push(mainSettled.value);
+  if (rdomSettled.status === "fulfilled") pages.push(rdomSettled.value);
+  if (ruletaSettled.status === "fulfilled") pages.push(ruletaSettled.value);
+
+  if (pages.length === 0) {
+    if (mainSettled.status === "rejected") throw mainSettled.reason;
+    throw new Error("No se pudo obtener resultados de LoteriaDeHoy");
+  }
+
+  const combinedDate = pages.find((p) => p.date)?.date ?? null;
+  const seenKeys = new Set<string>();
+  const combinedResults = [];
+
+  for (const p of pages) {
+    for (const r of p.results) {
+      const k = `${r.gameClass}|${r.drawTime}|${r.number}`;
+      if (!seenKeys.has(k)) {
+        seenKeys.add(k);
+        combinedResults.push(r);
+      }
+    }
+  }
+
+  return {
+    date: combinedDate,
+    results: combinedResults,
+  };
 }
 
 function getLoteriaDeHoyPage(): Promise<LoteriaDeHoyPage> {

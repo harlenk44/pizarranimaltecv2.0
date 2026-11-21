@@ -39,6 +39,11 @@ export const LOTERIADEHOY_GAME_MAPPINGS: Readonly<
     title: "LOTTO ACTIVO RD INTERNACIONAL",
   },
   "la-ricachona": { className: "laricachona", title: "LA RICACHONA" },
+  "lotto-activo-rdominicana": {
+    className: "lottoactivordominicana",
+    title: "LOTTO ACTIVO RDOMINICANA",
+  },
+  "ruleta-activa": { className: "ruletaactiva", title: "RULETA ACTIVA" },
 };
 
 export function classifyLoteriaDeHoyGame(identifier: string): string | null {
@@ -51,7 +56,11 @@ export function classifyLoteriaDeHoyGame(identifier: string): string | null {
   if (clean.includes("monje") || clean.includes("lottoactivo2")) {
     return "monje-millonario";
   }
-  // 2. Lotto Activo RD Internacional (must be checked before lottoactivo)
+  // 2. Lotto Activo RDominicana (must be checked before lottoactivord / lottoactivo)
+  if (clean.includes("rdominicana") || clean.includes("dominicana")) {
+    return "lotto-activo-rdominicana";
+  }
+  // 3. Lotto Activo RD Internacional (must be checked before lottoactivo)
   if (
     clean.includes("rdint") ||
     clean.includes("internacional") ||
@@ -59,31 +68,35 @@ export function classifyLoteriaDeHoyGame(identifier: string): string | null {
   ) {
     return "lotto-activo-internacional";
   }
-  // 3. Guacharito Millonario (must be checked before guacharo)
+  // 4. Ruleta Activa
+  if (clean.includes("ruletaactiva")) {
+    return "ruleta-activa";
+  }
+  // 5. Guacharito Millonario (must be checked before guacharo)
   if (clean.includes("guacharito")) {
     return "guacharito";
   }
-  // 4. Guacharo Activo
+  // 6. Guacharo Activo
   if (clean.includes("guacharo")) {
     return "guacharo";
   }
-  // 5. La Granjita
+  // 7. La Granjita
   if (clean.includes("granjita")) {
     return "granjita";
   }
-  // 6. Selva Plus
+  // 8. Selva Plus
   if (clean.includes("selva")) {
     return "selva-plus";
   }
-  // 7. Loto Chaima
+  // 9. Loto Chaima
   if (clean.includes("chaima")) {
     return "loto-chaim-a";
   }
-  // 8. La Ricachona
+  // 10. La Ricachona
   if (clean.includes("ricachona")) {
     return "la-ricachona";
   }
-  // 9. Standard Lotto Activo (only if not monje and not rd/internacional)
+  // 11. Standard Lotto Activo (only if not monje and not rd/internacional/rdominicana)
   if (clean === "lottoactivo" || clean === "lottoactivo1" || clean.startsWith("lottoactivo")) {
     return "lotto-activo";
   }
@@ -160,8 +173,8 @@ export function parseLoteriaDeHoyResults(html: string): LoteriaDeHoyPage {
     regex.lastIndex = 0;
     while ((match = regex.exec(html)) !== null) {
       const rawClass = match[1].trim();
+      if (!rawClass || /\bmt-3\b/i.test(rawClass)) continue;
       const rawTitle = match[2].replace(/<[^>]+>/g, "").trim();
-      if (!rawClass) continue;
 
       const pos = match.index;
       if (!gameSections.some((s) => Math.abs(s.start - pos) < 50)) {
@@ -173,6 +186,26 @@ export function parseLoteriaDeHoyResults(html: string): LoteriaDeHoyPage {
       }
     }
     if (gameSections.length > 0) break;
+  }
+
+  // Fallback for single-game pages (/animalito/<slug>/resultados/) where the top <h1> has no class attribute
+  let pageFallbackClass = "";
+  let pageFallbackTitle = "";
+  if (gameSections.length === 0) {
+    const singleTitleMatch =
+      /<div[^>]*class=["'][^"']*\btitle\b[^"']*["'][^>]*>\s*<h1[^>]*>([\s\S]*?)<\/h1>/i.exec(html);
+    if (singleTitleMatch) {
+      const h1HeadingOnly = singleTitleMatch[1]
+        .split(/<p\b/i)[0]
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      const classified = classifyLoteriaDeHoyGame(h1HeadingOnly);
+      if (classified && LOTERIADEHOY_GAME_MAPPINGS[classified]) {
+        pageFallbackClass = LOTERIADEHOY_GAME_MAPPINGS[classified].className;
+        pageFallbackTitle = LOTERIADEHOY_GAME_MAPPINGS[classified].title;
+      }
+    }
   }
 
   const results: LoteriaDeHoyResult[] = [];
@@ -193,18 +226,30 @@ export function parseLoteriaDeHoyResults(html: string): LoteriaDeHoyPage {
       .replace(/\s+/g, " ")
       .trim();
 
-    const rawHour = cardMatch[4]
+    const rawHourField = cardMatch[4]
       .replace(/<[^>]+>/g, "")
       .replace(/\s+/g, " ")
       .trim();
 
-    const normHour = normalizeHour(rawHour);
+    // On single-game pages (/animalito/lottoactivordominicana/resultados/), <h5> contains
+    // "Lotto Activo RDominicana 08:00 AM" or "Ruleta Activa 09:00 AM"
+    let hourPrefixGameText = "";
+    let normHour = normalizeHour(rawHourField);
+    if (!normHour) {
+      const trailingHourMatch = /^(.*?)\s*(\d{1,2}:\d{2}\s*[AaPp]\.?\s?[Mm]\.?)$/.exec(
+        rawHourField,
+      );
+      if (trailingHourMatch) {
+        hourPrefixGameText = (trailingHourMatch[1] || "").trim();
+        normHour = normalizeHour(trailingHourMatch[2] || "");
+      }
+    }
     if (!normHour) return;
 
     const drawTime = hourTo24h(normHour);
     if (!drawTime) return;
 
-    let effectiveClass = defaultClass;
+    let effectiveClass = defaultClass || pageFallbackClass;
     if (rawCircleClasses) {
       const classTokens = rawCircleClasses.split(/\s+/);
       for (const token of classTokens) {
@@ -222,7 +267,14 @@ export function parseLoteriaDeHoyResults(html: string): LoteriaDeHoyPage {
       }
     }
 
-    let effectiveTitle = defaultTitle;
+    if (!effectiveClass && hourPrefixGameText) {
+      const classifiedFromH5 = classifyLoteriaDeHoyGame(hourPrefixGameText);
+      if (classifiedFromH5 && LOTERIADEHOY_GAME_MAPPINGS[classifiedFromH5]) {
+        effectiveClass = LOTERIADEHOY_GAME_MAPPINGS[classifiedFromH5].className;
+      }
+    }
+
+    let effectiveTitle = defaultTitle || pageFallbackTitle;
     for (const meta of Object.values(LOTERIADEHOY_GAME_MAPPINGS)) {
       if (matchGameClass(effectiveClass, meta.className)) {
         effectiveTitle = meta.title;
@@ -275,7 +327,7 @@ export function parseLoteriaDeHoyResults(html: string): LoteriaDeHoyPage {
     cardRegex.lastIndex = 0;
     let globalCardMatch: RegExpExecArray | null;
     while ((globalCardMatch = cardRegex.exec(html)) !== null) {
-      parseCardMatch(globalCardMatch, "", "");
+      parseCardMatch(globalCardMatch, pageFallbackClass, pageFallbackTitle);
     }
   }
 

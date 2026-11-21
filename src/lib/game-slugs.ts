@@ -17,6 +17,8 @@ export const CANONICAL_GAME_SLUGS = [
   "lotoanimalito",
   "lottopantera",
   "la-ricachona",
+  "lotto-activo-rdominicana",
+  "ruleta-activa",
 ] as const;
 
 export type CanonicalGameSlug = (typeof CANONICAL_GAME_SLUGS)[number];
@@ -84,6 +86,21 @@ export const GAME_SLUG_ALIAS_MAP: Readonly<Record<string, CanonicalGameSlug>> = 
   "lotto activo rd internacional": "lotto-activo-internacional",
   "lotto activo internacional": "lotto-activo-internacional",
 
+  // Lotto Activo RDominicana
+  "lotto-activo-rdominicana": "lotto-activo-rdominicana",
+  "lotto-activo-rd-dominicana": "lotto-activo-rdominicana",
+  "lotto-activo-dominicana": "lotto-activo-rdominicana",
+  lottoactivordominicana: "lotto-activo-rdominicana",
+  "lotto activo rdominicana": "lotto-activo-rdominicana",
+  "lotto activo dominicana": "lotto-activo-rdominicana",
+  "lotto activo rd ( lotto activo rdominicana )": "lotto-activo-rdominicana",
+  "lotto activo rd (lotto activo rdominicana)": "lotto-activo-rdominicana",
+
+  // Ruleta Activa
+  "ruleta-activa": "ruleta-activa",
+  ruletaactiva: "ruleta-activa",
+  "ruleta activa": "ruleta-activa",
+
   // LotoAnimalito
   lotoanimalito: "lotoanimalito",
   "loto-animalito": "lotoanimalito",
@@ -118,6 +135,8 @@ export const LEGACY_GAME_UUID_TO_CANONICAL_SLUG: Readonly<Record<string, Canonic
   "d953f80c-4335-4bc9-9f78-9b56193286fe": "lotoanimalito",
   "61580ccf-5a2d-4d10-877e-4883515135e4": "lottopantera",
   "3b92f700-0000-4000-8000-000000000011": "la-ricachona",
+  "4c82e900-0000-4000-8000-000000000012": "lotto-activo-rdominicana",
+  "5d93fa00-0000-4000-8000-000000000013": "ruleta-activa",
 };
 
 export const CANONICAL_SLUG_TO_DEFAULT_UUID: Readonly<Record<CanonicalGameSlug, string>> = {
@@ -132,6 +151,8 @@ export const CANONICAL_SLUG_TO_DEFAULT_UUID: Readonly<Record<CanonicalGameSlug, 
   lotoanimalito: "d953f80c-4335-4bc9-9f78-9b56193286fe",
   lottopantera: "61580ccf-5a2d-4d10-877e-4883515135e4",
   "la-ricachona": "3b92f700-0000-4000-8000-000000000011",
+  "lotto-activo-rdominicana": "4c82e900-0000-4000-8000-000000000012",
+  "ruleta-activa": "5d93fa00-0000-4000-8000-000000000013",
 };
 
 export const CANONICAL_GAME_DISPLAY_NAMES: Readonly<Record<CanonicalGameSlug, string>> = {
@@ -146,6 +167,8 @@ export const CANONICAL_GAME_DISPLAY_NAMES: Readonly<Record<CanonicalGameSlug, st
   lotoanimalito: "LOTOANIMALITO",
   lottopantera: "LOTTOPANTERA",
   "la-ricachona": "LA RICACHONA",
+  "lotto-activo-rdominicana": "LOTTO ACTIVO RDOMINICANA",
+  "ruleta-activa": "RULETA ACTIVA",
 };
 
 const CANONICAL_TO_ALL_ALIASES: Record<string, string[]> = {};
@@ -174,12 +197,18 @@ function matchByCompactToken(raw: string): CanonicalGameSlug | null {
   if (clean.includes("monje") || clean.includes("lottoactivo2")) {
     return "monje-millonario";
   }
+  if (clean.includes("rdominicana") || clean.includes("dominicana")) {
+    return "lotto-activo-rdominicana";
+  }
   if (
     clean.includes("rdint") ||
     clean.includes("internacional") ||
     clean.includes("lottoactivord")
   ) {
     return "lotto-activo-internacional";
+  }
+  if (clean.includes("ruletaactiva")) {
+    return "ruleta-activa";
   }
   if (clean.includes("guacharito")) {
     return "el-guacharito-millonario";
@@ -215,6 +244,13 @@ function matchByCompactToken(raw: string): CanonicalGameSlug | null {
   return null;
 }
 
+const SPECIAL_NON_ANIMALITO_ALIASES: Readonly<Record<string, string>> = {
+  arrejuntao: "arrejuntao",
+  "el-arrejuntao": "arrejuntao",
+  elarrejuntao: "arrejuntao",
+  "el arrejuntao": "arrejuntao",
+};
+
 /**
  * Normaliza estrictamente cualquier slug, nombre de lotería o UUID histórico a una única clave canónica.
  * Ejemplos:
@@ -236,13 +272,22 @@ export function normalizeGameSlug(slugOrId?: string | null, fallbackName?: strin
     if (GAME_SLUG_ALIAS_MAP[stripped]) {
       return GAME_SLUG_ALIAS_MAP[stripped];
     }
+    if (SPECIAL_NON_ANIMALITO_ALIASES[stripped]) {
+      return SPECIAL_NON_ANIMALITO_ALIASES[stripped];
+    }
     const hyphenated = stripped.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
     if (GAME_SLUG_ALIAS_MAP[hyphenated]) {
       return GAME_SLUG_ALIAS_MAP[hyphenated];
     }
+    if (SPECIAL_NON_ANIMALITO_ALIASES[hyphenated]) {
+      return SPECIAL_NON_ANIMALITO_ALIASES[hyphenated];
+    }
     const tokenMatch = matchByCompactToken(stripped);
     if (tokenMatch) {
       return tokenMatch;
+    }
+    if (stripped.replace(/[^a-z0-9]/g, "").includes("arrejuntao")) {
+      return "arrejuntao";
     }
   }
 
@@ -268,6 +313,9 @@ export function isKnownCanonicalGameSlug(slug?: string | null): slug is Canonica
 export function getGameSlugAliases(slugOrNameOrId?: string | null): string[] {
   const canonical = normalizeGameSlug(slugOrNameOrId);
   if (!canonical) return [];
+  if (canonical === "arrejuntao") {
+    return ["arrejuntao", "el-arrejuntao", "elarrejuntao", "el arrejuntao"];
+  }
   const known = CANONICAL_TO_ALL_ALIASES[canonical];
   if (known) return [...known];
   const raw = typeof slugOrNameOrId === "string" ? slugOrNameOrId.trim().toLowerCase() : "";

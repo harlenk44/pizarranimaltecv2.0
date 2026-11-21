@@ -238,4 +238,137 @@ describe("triples-parser", () => {
     expect(afterDelete).toHaveLength(1);
     expect(afterDelete[0]?.game_id).toBe("triple-pantera");
   });
+
+  it("parses official El Arrejuntao JSON endpoint payload with normalized schedule times and results", async () => {
+    const {
+      ARREJUNTAO_API_BASE_URL,
+      ARREJUNTAO_BROWSER_HEADERS,
+      ARREJUNTAO_FETCH_TIMEOUT_MS,
+      buildArrejuntaoResultsUrl,
+      parseArrejuntaoResultsJson,
+    } = await import("@/lib/arrejuntao-provider.server");
+
+    expect(ARREJUNTAO_API_BASE_URL).toBe(
+      "https://backend.serviciosintegradostriple7.com/api/v1/products/el-arrejuntao/results/",
+    );
+    expect(buildArrejuntaoResultsUrl("2026-11-21")).toBe(
+      "https://backend.serviciosintegradostriple7.com/api/v1/products/el-arrejuntao/results/?date=2026-11-21",
+    );
+    expect(ARREJUNTAO_FETCH_TIMEOUT_MS).toBe(5_000);
+    expect(ARREJUNTAO_BROWSER_HEADERS.Accept).toBe("application/json");
+    expect(ARREJUNTAO_BROWSER_HEADERS["User-Agent"]).toContain("Mozilla/5.0");
+
+    const samplePayload = {
+      id: "e30ad531-3b25-40fb-bb07-b7ec46f98d54",
+      name: "El Arrejuntao",
+      slug: "el-arrejuntao",
+      logo: "https://nyc3.digitaloceanspaces.com/triple7-media/products/logos/el-arrejuntao-logo.png",
+      draws: [
+        {
+          id: "05a83214-23e5-4f09-bffe-61098ad83af4",
+          draw_date: "2026-11-21",
+          draw_time: "10:00 AM",
+          is_published: true,
+          results: [
+            {
+              game: { slug: "animalito", name: "Animalito" },
+              result_value: "65",
+              symbol: {
+                value: "65",
+                name: "Araña",
+                image:
+                  "https://nyc3.digitaloceanspaces.com/triple7-media/game_symbols/animalitos/el-arrejuntao/65.png",
+              },
+            },
+            {
+              game: { slug: "triple-a", name: "Triple A" },
+              result_value: "852",
+              symbol: null,
+            },
+            {
+              game: { slug: "triple-b", name: "Triple B" },
+              result_value: "028",
+              symbol: null,
+            },
+            {
+              game: { slug: "triple-signo", name: "Triple + Signo" },
+              result_value: "458 ARI",
+              symbol: null,
+            },
+          ],
+        },
+        {
+          id: "d32ab589-8ca9-49eb-af29-5687b59a7228",
+          draw_date: "2026-11-21",
+          draw_time: "01:00 PM",
+          is_published: true,
+          results: [
+            {
+              game: { slug: "animalito", name: "Animalito" },
+              result_value: "00",
+              symbol: {
+                value: "00",
+                name: "Ballena",
+                image:
+                  "https://nyc3.digitaloceanspaces.com/triple7-media/game_symbols/animalitos/el-arrejuntao/00.png",
+              },
+            },
+            {
+              game: { slug: "triple-a", name: "Triple A" },
+              result_value: "757",
+              symbol: null,
+            },
+            {
+              game: { slug: "triple-b", name: "Triple B" },
+              result_value: "339",
+              symbol: null,
+            },
+            {
+              game: { slug: "triple-signo", name: "Triple + Signo" },
+              result_value: "178 VIR",
+              symbol: null,
+            },
+          ],
+        },
+      ],
+    };
+
+    const parsed = parseArrejuntaoResultsJson(samplePayload, "2026-11-21");
+    expect(parsed.draws).toHaveLength(2);
+    expect(parsed.draws[0]).toMatchObject({
+      drawDate: "2026-11-21",
+      drawTime: "10:00:00",
+      drawTimeShort: "10:00",
+      animalNumber: 65,
+      animalName: "Araña",
+      tripleA: "852",
+      tripleB: "028",
+      tripleC: "458",
+      zodiacSign: "ARI",
+    });
+    expect(parsed.draws[1]).toMatchObject({
+      drawDate: "2026-11-21",
+      drawTime: "13:00:00",
+      drawTimeShort: "13:00",
+      animalNumber: 100,
+      animalLabel: "00",
+      animalName: "Ballena",
+      tripleA: "757",
+      tripleB: "339",
+      tripleC: "178",
+      zodiacSign: "VIR",
+    });
+
+    expect(parsed.tripleResults).toHaveLength(2);
+    expect(parsed.tripleResults[0]).toMatchObject({
+      game_id: "arrejuntao",
+      game_slug: "arrejuntao",
+      draw_date: "2026-11-21",
+      draw_time: "10:00",
+      triple_a: "852",
+      triple_b: "028",
+      triple_c: "458",
+      zodiac_sign: "ARI",
+    });
+  });
 });

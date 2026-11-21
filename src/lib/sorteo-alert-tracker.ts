@@ -9,7 +9,11 @@ const KNOWN_GAME_ALIASES: Record<string, string> = {
   "1efc5373-a547-4f7f-9955-845b5ede5ce2": "loto-chaim-a",
   "ca8a0400-0000-4000-8000-000000000006": "granjita",
   "0f766e00-0000-4000-8000-000000000007": "monje-millonario",
+  "1e40af00-0000-4000-8000-000000000008": "lotto-activo-internacional",
   "b84da000-0000-4000-8000-000000000008": "lotto-activo-internacional",
+  "3b92f700-0000-4000-8000-000000000011": "la-ricachona",
+  "4c82e900-0000-4000-8000-000000000012": "lotto-activo-rdominicana",
+  "5d93fa00-0000-4000-8000-000000000013": "ruleta-activa",
 };
 
 /** Normalize time string (whether "11:15", "11:15:00", "11:15 AM", "01:00 PM") to 24-hour "HH:MM" */
@@ -39,14 +43,18 @@ export function normalizeGameIdentifier(gameIdOrName?: string | null): string {
   }
   const simplified = trimmed.replace(/[^a-z0-9]/g, "");
   if (simplified.includes("selvaplus")) return "selva-plus";
+  if (simplified.includes("rdominicana") || simplified.includes("dominicana"))
+    return "lotto-activo-rdominicana";
   if (simplified.includes("lottoactivointer") || simplified.includes("internacional"))
     return "lotto-activo-internacional";
+  if (simplified.includes("ruletaactiva")) return "ruleta-activa";
   if (simplified.includes("lottoactivo")) return "lotto-activo";
   if (simplified.includes("guacharito")) return "guacharito";
   if (simplified.includes("guacharo")) return "guacharo";
   if (simplified.includes("granjita")) return "granjita";
   if (simplified.includes("monje")) return "monje-millonario";
   if (simplified.includes("chaima")) return "loto-chaim-a";
+  if (simplified.includes("ricachona")) return "la-ricachona";
   return simplified || trimmed;
 }
 

@@ -33,6 +33,8 @@ export const GAME_ID_TO_SLUG: Readonly<Record<string, string>> = {
   "d953f80c-4335-4bc9-9f78-9b56193286fe": "lotoanimalito",
   "61580ccf-5a2d-4d10-877e-4883515135e4": "lottopantera",
   "3b92f700-0000-4000-8000-000000000011": "la-ricachona",
+  "4c82e900-0000-4000-8000-000000000012": "lotto-activo-rdominicana",
+  "5d93fa00-0000-4000-8000-000000000013": "ruleta-activa",
 };
 
 export const SLUG_TO_GAME_ID: Readonly<Record<string, string>> = {
@@ -50,6 +52,8 @@ export const SLUG_TO_GAME_ID: Readonly<Record<string, string>> = {
   lotoanimalito: "d953f80c-4335-4bc9-9f78-9b56193286fe",
   lottopantera: "61580ccf-5a2d-4d10-877e-4883515135e4",
   "la-ricachona": "3b92f700-0000-4000-8000-000000000011",
+  "lotto-activo-rdominicana": "4c82e900-0000-4000-8000-000000000012",
+  "ruleta-activa": "5d93fa00-0000-4000-8000-000000000013",
 };
 
 export function resolveGameSlug(gameIdOrSlug?: string | null): string {
@@ -72,6 +76,8 @@ export function getBallenaInternalNumber(gameIdOrSlug?: string | null): number {
     case "el-guacharito-millonario":
     case "guacharito":
     case "selva-plus":
+    case "arrejuntao":
+    case "el-arrejuntao":
       return 100;
     default:
       return 37;
@@ -277,6 +283,10 @@ export const OFFICIAL_ANIMALS: Record<string, OfficialAnimal[]> = {
   lotoanimalito: LOTTO_ACTIVO_ANIMALS,
   lottopantera: LOTTOPANTERA_ANIMALS,
   "la-ricachona": LOTTO_ACTIVO_ANIMALS,
+  "lotto-activo-rdominicana": LOTTO_ACTIVO_ANIMALS,
+  "ruleta-activa": LOTTO_ACTIVO_ANIMALS,
+  arrejuntao: GUACHARITO_ANIMALS,
+  "el-arrejuntao": GUACHARITO_ANIMALS,
 };
 
 /**
@@ -333,6 +343,15 @@ export function getFixedAnimalImageUrl(
         ? "0"
         : String(canonicalNumber).padStart(2, "0");
     return `https://toteback.atilax.io/storage/bases/2/${code}.png`;
+  }
+
+  if (slug === "arrejuntao" || slug === "el-arrejuntao") {
+    const code = isBallena
+      ? "00"
+      : canonicalNumber === 0
+        ? "0"
+        : String(canonicalNumber).padStart(2, "0");
+    return `https://nyc3.digitaloceanspaces.com/triple7-media/game_symbols/animalitos/el-arrejuntao/${code}.png`;
   }
 
   const label = isBallena ? "00" : canonicalNumber === 0 ? "0" : canonicalLabel;

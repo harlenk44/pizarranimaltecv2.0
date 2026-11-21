@@ -2082,6 +2082,11 @@ let triplesFastSyncPromise: Promise<{ newlyAdded: TripleResult[]; newTripleCount
   null;
 const TRIPLES_SYNC_INTERVAL_MS = 15_000;
 
+function resolveOfficialGameIdBySlug(canonicalSlug: string): string | undefined {
+  const target = mockStore.games.find((g) => normalizeGameSlug(g.slug, g.name) === canonicalSlug);
+  return target?.id;
+}
+
 /**
  * Fast, isolated triples synchronization (LoteriaDeHoy + TuAzar + Multiloterias).
  * Never waits on animalitos Supabase RPCs, licenses, or animal images.
@@ -2110,18 +2115,15 @@ async function syncTriplesFast(
       loadServerTripleResults();
       const hadPriorTriples = serverTripleResults.some((r) => r.draw_date === today);
 
-      const [{ synchronizeAutomaticTriplesResults }, { synchronizeMultiloteriasData }] =
-        await Promise.all([
-          import("@/lib/triples-sync.server"),
-          import("@/lib/multiloterias-provider.server"),
-        ]);
-
-      const resolveOfficialGameIdBySlug = (canonicalSlug: string): string | undefined => {
-        const target = mockStore.games.find(
-          (g) => normalizeGameSlug(g.slug, g.name) === canonicalSlug,
-        );
-        return target?.id;
-      };
+      const [
+        { synchronizeAutomaticTriplesResults },
+        { synchronizeMultiloteriasData },
+        { synchronizeArrejuntaoOfficialData },
+      ] = await Promise.all([
+        import("@/lib/triples-sync.server"),
+        import("@/lib/multiloterias-provider.server"),
+        import("@/lib/arrejuntao-provider.server"),
+      ]);
 
       const ldhTuazarTask = synchronizeAutomaticTriplesResults(serverTripleResults, {
         forceRefresh,
@@ -2155,10 +2157,70 @@ async function syncTriplesFast(
         return mlRes;
       });
 
-      const [triplesSync, mlSync] = await Promise.all([ldhTuazarTask, multiloteriasTask]);
+      const arrejuntaoTask = synchronizeArrejuntaoOfficialData({
+        currentDate: today,
+        forceRefresh,
+        resolveGameId: resolveOfficialGameIdBySlug,
+        currentAnimalResults: mockStore.results,
+      }).then((arrRes) => {
+        if (arrRes.payload.tripleResults.length > 0) {
+          applyIncomingTriplesToServer(arrRes.payload.tripleResults, today);
+        }
+        if (arrRes.upsertedResults.length > 0) {
+          const mergedAnimals = mergeResultsPreserveToday(
+            mockStore.results,
+            arrRes.upsertedResults,
+          );
+          mockStore.results = sanitizeResultsList(mergedAnimals);
+          consolidateInMemoryGamesAndResults();
+          saveServerResults();
+        }
+        if (arrRes.officialGameId) {
+          for (const draw of arrRes.payload.draws) {
+            if (
+              draw.animalImageUrl &&
+              !mockStore.animal_images.some(
+                (img) =>
+                  (img.game_id === arrRes.officialGameId || img.game_id === "arrejuntao") &&
+                  img.animal_number === draw.animalNumber,
+              )
+            ) {
+              mockStore.animal_images.push({
+                id: `img-arrejuntao-${draw.animalNumber}`,
+                game_id: arrRes.officialGameId,
+                animal_number: draw.animalNumber,
+                image_url: draw.animalImageUrl,
+              });
+            }
+          }
+        }
+        return arrRes;
+      });
+
+      const [triplesSettled, mlSettled, arrejuntaoSettled] = await Promise.allSettled([
+        ldhTuazarTask,
+        multiloteriasTask,
+        arrejuntaoTask,
+      ]);
+
+      const triplesSync =
+        triplesSettled.status === "fulfilled"
+          ? triplesSettled.value
+          : { merged: [] as TripleResult[], newlyAdded: [] as TripleResult[] };
+      const mlSync =
+        mlSettled.status === "fulfilled"
+          ? mlSettled.value
+          : { newTripleCount: 0, newAnimalCount: 0 };
+      const arrSync =
+        arrejuntaoSettled.status === "fulfilled" ? arrejuntaoSettled.value : { supabaseWritten: 0 };
+
       lastTriplesSyncTimestamp = Date.now();
 
-      if ((hadPriorTriples && triplesSync.newlyAdded.length > 0) || mlSync.newTripleCount > 0) {
+      if (
+        (hadPriorTriples && triplesSync.newlyAdded.length > 0) ||
+        mlSync.newTripleCount > 0 ||
+        arrSync.supabaseWritten > 0
+      ) {
         const latestTriple =
           triplesSync.newlyAdded[triplesSync.newlyAdded.length - 1] ||
           serverTripleResults[serverTripleResults.length - 1];
@@ -2219,24 +2281,41 @@ async function triggerBackgroundSync(forceWait = false) {
     // Sincronizar juegos primero para asegurar que mockStore.games tenga los UUIDs oficiales de Supabase
     await syncGamesWithSupabase(false).catch(() => {});
 
-    const [{ synchronizeAutomaticResults }, { getCachedMultiloteriasItems }] = await Promise.all([
+    const [
+      { synchronizeAutomaticResults },
+      { getCachedMultiloteriasItems },
+      { synchronizeArrejuntaoOfficialData },
+    ] = await Promise.all([
       import("@/lib/result-sync.server"),
       import("@/lib/multiloterias-provider.server"),
+      import("@/lib/arrejuntao-provider.server"),
     ]);
 
-    const resolveOfficialGameIdBySlug = (canonicalSlug: string): string | undefined => {
-      const target = mockStore.games.find(
-        (g) => normalizeGameSlug(g.slug, g.name) === canonicalSlug,
-      );
-      return target?.id;
-    };
-
-    const [reports] = await Promise.all([
+    const [reportsSettled, arrejuntaoSettled] = await Promise.allSettled([
       synchronizeAutomaticResults(),
+      synchronizeArrejuntaoOfficialData({
+        currentDate: lotteryDate(),
+        forceRefresh: forceWait,
+        resolveGameId: resolveOfficialGameIdBySlug,
+        currentAnimalResults: mockStore.results,
+      }),
       triplesPromise,
       syncLicensesWithSupabase().catch(() => null),
       syncAnimalImagesWithSupabase().catch(() => null),
     ]);
+
+    const reports = reportsSettled.status === "fulfilled" ? reportsSettled.value : [];
+    if (arrejuntaoSettled.status === "fulfilled") {
+      const arrRes = arrejuntaoSettled.value;
+      if (arrRes.payload.tripleResults.length > 0) {
+        applyIncomingTriplesToServer(arrRes.payload.tripleResults, lotteryDate());
+      }
+      if (arrRes.upsertedResults.length > 0) {
+        mockStore.results = sanitizeResultsList(
+          mergeResultsPreserveToday(mockStore.results, arrRes.upsertedResults),
+        );
+      }
+    }
 
     consolidateInMemoryGamesAndResults();
     saveServerResults();
@@ -2657,11 +2736,33 @@ export const Route = createFileRoute("/api/public/results/sync")({
             }
           }
           await syncGamesWithSupabase(true);
-          const { synchronizeAutomaticResults } = await import("@/lib/result-sync.server");
-          const [reports] = await Promise.all([
+          const [{ synchronizeAutomaticResults }, { synchronizeArrejuntaoOfficialData }] =
+            await Promise.all([
+              import("@/lib/result-sync.server"),
+              import("@/lib/arrejuntao-provider.server"),
+            ]);
+          const [reportsSettled, , arrejuntaoSettled] = await Promise.allSettled([
             synchronizeAutomaticResults(),
             syncTriplesFast(true),
+            synchronizeArrejuntaoOfficialData({
+              currentDate: lotteryDate(),
+              forceRefresh: true,
+              resolveGameId: resolveOfficialGameIdBySlug,
+              currentAnimalResults: mockStore.results,
+            }),
           ]);
+          const reports = reportsSettled.status === "fulfilled" ? reportsSettled.value : [];
+          if (arrejuntaoSettled.status === "fulfilled") {
+            const arrRes = arrejuntaoSettled.value;
+            if (arrRes.payload.tripleResults.length > 0) {
+              applyIncomingTriplesToServer(arrRes.payload.tripleResults, lotteryDate());
+            }
+            if (arrRes.upsertedResults.length > 0) {
+              mockStore.results = sanitizeResultsList(
+                mergeResultsPreserveToday(mockStore.results, arrRes.upsertedResults),
+              );
+            }
+          }
           await syncResultsWithSupabase(true);
           consolidateInMemoryGamesAndResults();
           saveServerResults();

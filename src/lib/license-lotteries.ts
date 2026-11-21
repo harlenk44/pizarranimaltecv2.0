@@ -482,6 +482,13 @@ const LOTTERY_SLUG_ALIASES: Record<string, string[]> = {
   "selva-plus": ["selva_plus", "selvaplus"],
   "monje-millonario": ["monje_millonario", "monjemillonario"],
   "la-ricachona": ["la_ricachona", "laricachona", "ricachona"],
+  "lotto-activo-rdominicana": [
+    "lotto_activo_rdominicana",
+    "lottoactivordominicana",
+    "lotto-activo-rd-dominicana",
+    "lotto-activo-dominicana",
+  ],
+  "ruleta-activa": ["ruleta_activa", "ruletaactiva"],
 };
 
 function buildLotteryCandidateKeys(

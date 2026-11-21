@@ -70,6 +70,10 @@ const INITIAL_SEED_GAME_COLORS: Readonly<Record<string, string>> = {
   "61580ccf-5a2d-4d10-877e-4883515135e4": "#ea580c",
   "la-ricachona": "#eab308",
   "3b92f700-0000-4000-8000-000000000011": "#eab308",
+  "lotto-activo-rdominicana": "#dc2626",
+  "4c82e900-0000-4000-8000-000000000012": "#dc2626",
+  "ruleta-activa": "#0891b2",
+  "5d93fa00-0000-4000-8000-000000000013": "#0891b2",
 };
 
 export const NEON_PRODUCT_COLORS: Readonly<Record<string, string>> = {
@@ -150,6 +154,14 @@ export const NEON_PRODUCT_COLORS: Readonly<Record<string, string>> = {
   "trio-activo": "#00F0FF",
   "jungla-millonaria": "#00F0FF",
   "jungla millonaria": "#00F0FF",
+  "lotto-activo-rdominicana": "#FF1744",
+  lottoactivordominicana: "#FF1744",
+  "lotto activo rdominicana": "#FF1744",
+  "4c82e900-0000-4000-8000-000000000012": "#FF1744",
+  "ruleta-activa": "#00F0FF",
+  ruletaactiva: "#00F0FF",
+  "ruleta activa": "#00F0FF",
+  "5d93fa00-0000-4000-8000-000000000013": "#00F0FF",
 
   // Naranja Fluorescente (#FF6600 / #FF9100 / #FF7700): Cóndor Gana, Guacharito Millonario y Triple Centena
   "el-guacharito-millonario": "#FF6600",

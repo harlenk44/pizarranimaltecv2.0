@@ -150,8 +150,88 @@ describe("loteriadehoy parser", () => {
     expect(matchGameClass("lottoactivo", "lottoactivo2(monjemillonario)")).toBe(false);
     expect(matchGameClass("lottoactivordint", "lottoactivo")).toBe(false);
     expect(matchGameClass("lottoactivo", "lottoactivordint")).toBe(false);
+    expect(matchGameClass("lottoactivordominicana", "lottoactivo")).toBe(false);
+    expect(matchGameClass("lottoactivo", "lottoactivordominicana")).toBe(false);
+    expect(matchGameClass("lottoactivordominicana", "lottoactivordint")).toBe(false);
+    expect(matchGameClass("lottoactivordint", "lottoactivordominicana")).toBe(false);
+    expect(matchGameClass("lottoactivordominicana", "lottoactivordominicana")).toBe(true);
+    expect(matchGameClass("ruletaactiva", "ruletaactiva")).toBe(true);
     expect(matchGameClass("elguacharitomillonario", "guacharoactivo")).toBe(false);
     expect(matchGameClass("guacharoactivo", "elguacharitomillonario")).toBe(false);
+  });
+
+  it("parses dedicated single-game pages for Lotto Activo RDominicana and Ruleta Activa", () => {
+    const rdomHtml = `
+      <!DOCTYPE html>
+      <html>
+      <body>
+        <input type="text" name="fecha" id="datepicker" value="2026-11-21">
+        <div class="title-left">
+          <h1>Lotto Activo RD ( Lotto Activo RDominicana )</h1>
+        </div>
+        <div class="row text-center js-con">
+          <div class="col-sm-6 col-md-4 col-lg-16 pb-3">
+            <div class="circle">
+              <img src="/dist/animals_img/Toro_2.webp?v=1.0.5">
+            </div>
+            <div class="circle-legend">
+              <h4 class="mt-3 undefined">2 Toro</h4>
+              <h5>Lotto Activo RDominicana 08:00 AM</h5>
+            </div>
+          </div>
+          <div class="col-sm-6 col-md-4 col-lg-16 pb-3">
+            <div class="circle">
+              <img src="/dist/animals_img/Delfin_2.webp?v=1.0.5">
+            </div>
+            <div class="circle-legend">
+              <h4 class="mt-3 undefined">0 Delfin</h4>
+              <h5>Lotto Activo RDominicana 09:00 PM</h5>
+            </div>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+    const rdomPage = parseLoteriaDeHoyResults(rdomHtml);
+    expect(rdomPage.date).toBe("2026-11-21");
+    expect(rdomPage.results).toHaveLength(2);
+    expect(rdomPage.results[0]?.gameClass).toBe("lottoactivordominicana");
+    expect(rdomPage.results[0]?.number).toBe("2");
+    expect(rdomPage.results[0]?.animal).toBe("TORO");
+    expect(rdomPage.results[0]?.drawTime).toBe("08:00:00");
+    expect(rdomPage.results[1]?.gameClass).toBe("lottoactivordominicana");
+    expect(rdomPage.results[1]?.number).toBe("0");
+    expect(rdomPage.results[1]?.animal).toBe("DELFIN");
+    expect(rdomPage.results[1]?.drawTime).toBe("21:00:00");
+
+    const ruletaHtml = `
+      <!DOCTYPE html>
+      <html>
+      <body>
+        <input type="text" name="fecha" id="datepicker" value="2026-11-21">
+        <div class="title-left">
+          <h1>Ruleta Activa</h1>
+        </div>
+        <div class="row text-center js-con">
+          <div class="col-sm-6 col-md-4 col-lg-16 pb-3">
+            <div class="circle">
+              <img src="/dist/animals_img/Ballena_2.webp?v=1.0.5">
+            </div>
+            <div class="circle-legend">
+              <h4 class="mt-3">00 Ballena</h4>
+              <h5>Ruleta Activa 09:00 AM</h5>
+            </div>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+    const ruletaPage = parseLoteriaDeHoyResults(ruletaHtml);
+    expect(ruletaPage.results).toHaveLength(1);
+    expect(ruletaPage.results[0]?.gameClass).toBe("ruletaactiva");
+    expect(ruletaPage.results[0]?.number).toBe("00");
+    expect(ruletaPage.results[0]?.animal).toBe("BALLENA");
+    expect(ruletaPage.results[0]?.drawTime).toBe("09:00:00");
   });
 
   it("throws LoteriaDeHoyParseError on empty or invalid HTML", () => {

@@ -273,5 +273,56 @@
       "19:10"
     ],
     "created_at": "2026-11-15T02:32:13.700Z"
+  },
+  {
+    "id": "4c82e900-0000-4000-8000-000000000012",
+    "name": "LOTTO ACTIVO RDOMINICANA",
+    "slug": "lotto-activo-rdominicana",
+    "color": "#dc2626",
+    "logo_url": "https://loteriadehoy.com/dist/files_img/Lotto_Activo_RD.webp",
+    "display_order": 12,
+    "is_active": true,
+    "loading_mode": "automatic",
+    "schedule_times": [
+      "08:00",
+      "09:00",
+      "10:00",
+      "11:00",
+      "12:00",
+      "13:00",
+      "14:00",
+      "15:00",
+      "16:00",
+      "17:00",
+      "18:00",
+      "19:00",
+      "20:00",
+      "21:00"
+    ],
+    "created_at": "2026-11-21T12:00:00.000Z"
+  },
+  {
+    "id": "5d93fa00-0000-4000-8000-000000000013",
+    "name": "RULETA ACTIVA",
+    "slug": "ruleta-activa",
+    "color": "#0891b2",
+    "logo_url": "https://loteriadehoy.com/dist/files_img/Ruleta_Activa.webp",
+    "display_order": 13,
+    "is_active": true,
+    "loading_mode": "automatic",
+    "schedule_times": [
+      "09:00",
+      "10:00",
+      "11:00",
+      "12:00",
+      "13:00",
+      "14:00",
+      "15:00",
+      "16:00",
+      "17:00",
+      "18:00",
+      "19:00"
+    ],
+    "created_at": "2026-11-21T12:00:00.000Z"
   }
 ]

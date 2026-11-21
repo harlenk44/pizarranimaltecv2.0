@@ -1541,14 +1541,24 @@ function GamesManager({ games, onRefresh }: { games: Game[]; onRefresh: () => vo
                       (
                         {
                           "lotto-activo": "LoteriaDeHoy (Principal) / TuAzar (Respaldo)",
+                          "guacharo-activo": "LoteriaDeHoy (Principal) / TuAzar (Respaldo)",
                           guacharo: "LoteriaDeHoy (Principal) / TuAzar (Respaldo)",
+                          "el-guacharito-millonario":
+                            "LoteriaDeHoy (Principal) / TuAzar (Respaldo)",
                           guacharito: "LoteriaDeHoy (Principal) / TuAzar (Respaldo)",
                           "selva-plus": "LoteriaDeHoy (Principal) / TuAzar (Respaldo)",
                           "loto-chaim-a": "LoteriaDeHoy (Principal) / TuAzar (Respaldo)",
+                          "la-granjita": "LoteriaDeHoy (Principal) / TuAzar (Respaldo)",
                           granjita: "LoteriaDeHoy (Principal) / TuAzar (Respaldo)",
                           "monje-millonario": "LoteriaDeHoy (Principal) / TuAzar (Respaldo)",
                           "lotto-activo-internacional":
                             "LoteriaDeHoy (Principal) / TuAzar (Respaldo)",
+                          "la-ricachona": "LoteriaDeHoy (Principal) / TuAzar (Respaldo)",
+                          "lotto-activo-rdominicana":
+                            "LoteriaDeHoy (/animalito/lottoactivordominicana/)",
+                          "ruleta-activa": "LoteriaDeHoy (/animalito/ruletaactiva/)",
+                          lotoanimalito: "Multiloterias (Principal)",
+                          lottopantera: "Multiloterias (Principal)",
                         } as Record<string, string>
                       )[game.slug] ?? "Sin fuente configurada"
                     }
@@ -1556,13 +1566,21 @@ function GamesManager({ games, onRefresh }: { games: Game[]; onRefresh: () => vo
                     {(
                       {
                         "lotto-activo": "LoteriaDeHoy (LOTTO ACTIVO)",
+                        "guacharo-activo": "LoteriaDeHoy (GUACHARO)",
                         guacharo: "LoteriaDeHoy (GUACHARO)",
+                        "el-guacharito-millonario": "LoteriaDeHoy (GUACHARITO)",
                         guacharito: "LoteriaDeHoy (GUACHARITO)",
                         "selva-plus": "LoteriaDeHoy (SELVA PLUS)",
                         "loto-chaim-a": "LoteriaDeHoy (LOTO CHAIMA)",
+                        "la-granjita": "LoteriaDeHoy (GRANJITA)",
                         granjita: "LoteriaDeHoy (GRANJITA)",
                         "monje-millonario": "LoteriaDeHoy (MONJE MILL.)",
                         "lotto-activo-internacional": "LoteriaDeHoy (LOTTO INT.)",
+                        "la-ricachona": "LoteriaDeHoy (LA RICACHONA)",
+                        "lotto-activo-rdominicana": "LoteriaDeHoy (LOTTO RDOM.)",
+                        "ruleta-activa": "LoteriaDeHoy (RULETA ACTIVA)",
+                        lotoanimalito: "Multiloterias (LOTOANIMALITO)",
+                        lottopantera: "Multiloterias (LOTTOPANTERA)",
                       } as Record<string, string>
                     )[game.slug] ?? "Fuente pendiente"}
                   </p>

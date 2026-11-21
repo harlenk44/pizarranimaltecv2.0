@@ -3,6 +3,7 @@ import {
   parseTuazarTriplesHtml,
   mergeTriplesResults,
 } from "@/lib/triples-parser";
+import { fetchArrejuntaoDirectTriples } from "@/lib/arrejuntao-provider.server";
 import type { TripleResult } from "@/lib/triples";
 import { lotteryDate } from "@/lib/lottery-date";
 
@@ -55,6 +56,10 @@ function isTransientFetchError(err: unknown): boolean {
       code === "EPIPE" ||
       msg.includes("operation was aborted") ||
       msg.includes("connect timeout") ||
+      msg.includes("http 50") ||
+      msg.includes("http 52") ||
+      msg.includes("http 429") ||
+      msg.includes("http 403") ||
       msg === "fetch failed"
     ) {
       return true;
@@ -141,7 +146,7 @@ export async function fetchTuAzarTriples(
         if (parsed.length > 0) return parsed;
       } catch (fallbackErr) {
         if (!isTransientFetchError(primaryErr) && !isTransientFetchError(fallbackErr)) {
-          console.warn("[triples-sync] TuAzar fetch failed:", primaryErr, fallbackErr);
+          // Both primary and fallback failed with non-transient errors; silently fall back to LoteriaDeHoy & Multiloterias
         }
       }
     }
@@ -164,21 +169,43 @@ export async function synchronizeAutomaticTriplesResults(
   const todaysExisting = existingResults.filter((r) => r.draw_date === today);
   const forceRefresh = Boolean(options?.forceRefresh);
 
-  const ldhPromise = fetchLoteriaDeHoyTriples(today, forceRefresh).then((res) => {
+  // El Arrejuntao (arrejuntao) uses exclusively its official direct JSON API endpoint (never HTML scraping)
+  const arrejuntaoPromise = fetchArrejuntaoDirectTriples(today, forceRefresh).then((res) => {
     if (res.length > 0 && options?.onPartialResults) {
       options.onPartialResults(res);
     }
     return res;
+  });
+
+  const ldhPromise = fetchLoteriaDeHoyTriples(today, forceRefresh).then((res) => {
+    const withoutArrejuntao = res.filter(
+      (r) => r.game_id !== "arrejuntao" && r.game_slug !== "arrejuntao",
+    );
+    if (withoutArrejuntao.length > 0 && options?.onPartialResults) {
+      options.onPartialResults(withoutArrejuntao);
+    }
+    return withoutArrejuntao;
   });
 
   const tuazarPromise = fetchTuAzarTriples(today, forceRefresh).then((res) => {
-    if (res.length > 0 && options?.onPartialResults) {
-      options.onPartialResults(res);
+    const withoutArrejuntao = res.filter(
+      (r) => r.game_id !== "arrejuntao" && r.game_slug !== "arrejuntao",
+    );
+    if (withoutArrejuntao.length > 0 && options?.onPartialResults) {
+      options.onPartialResults(withoutArrejuntao);
     }
-    return res;
+    return withoutArrejuntao;
   });
 
-  const [fromLdh, fromTuAzar] = await Promise.all([ldhPromise, tuazarPromise]);
+  const [ldhSettled, tuazarSettled, arrejuntaoSettled] = await Promise.allSettled([
+    ldhPromise,
+    tuazarPromise,
+    arrejuntaoPromise,
+  ]);
 
-  return mergeTriplesResults(todaysExisting, fromLdh, fromTuAzar);
+  const fromLdh = ldhSettled.status === "fulfilled" ? ldhSettled.value : [];
+  const fromTuAzar = tuazarSettled.status === "fulfilled" ? tuazarSettled.value : [];
+  const fromArrejuntao = arrejuntaoSettled.status === "fulfilled" ? arrejuntaoSettled.value : [];
+
+  return mergeTriplesResults(todaysExisting, [...fromLdh, ...fromArrejuntao], fromTuAzar);
 }

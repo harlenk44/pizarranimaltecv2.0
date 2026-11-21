@@ -63,6 +63,23 @@ export const HOURLY_9_TO_7 = [
   "19:00:00",
 ];
 
+export const HOURLY_8_TO_9PM = [
+  "08:00:00",
+  "09:00:00",
+  "10:00:00",
+  "11:00:00",
+  "12:00:00",
+  "13:00:00",
+  "14:00:00",
+  "15:00:00",
+  "16:00:00",
+  "17:00:00",
+  "18:00:00",
+  "19:00:00",
+  "20:00:00",
+  "21:00:00",
+];
+
 export const RICACHONA_HOURLY = [
   "08:05:00",
   "09:05:00",
@@ -303,6 +320,36 @@ export const MASTER_PRODUCTS_CATALOG: MasterProduct[] = [
       loteriadehoy_class: "48-La_Ricachona",
     },
   },
+  {
+    id: "lotto-activo-rdominicana",
+    uuid: "4c82e900-0000-4000-8000-000000000012",
+    slug: "lotto-activo-rdominicana",
+    name: "Lotto Activo RDominicana",
+    category: "animalitos",
+    color: "#dc2626",
+    logo_url: "https://loteriadehoy.com/dist/files_img/Lotto_Activo_RD.webp",
+    schedule_times: HOURLY_8_TO_9PM,
+    display_order: 12,
+    extraction: {
+      tuazar_name: "LOTTO ACTIVO RDOMINICANA",
+      loteriadehoy_class: "lottoactivordominicana",
+    },
+  },
+  {
+    id: "ruleta-activa",
+    uuid: "5d93fa00-0000-4000-8000-000000000013",
+    slug: "ruleta-activa",
+    name: "Ruleta Activa",
+    category: "animalitos",
+    color: "#0891b2",
+    logo_url: "https://loteriadehoy.com/dist/files_img/Ruleta_Activa.webp",
+    schedule_times: HOURLY_9_TO_7,
+    display_order: 13,
+    extraction: {
+      tuazar_name: "RULETA ACTIVA",
+      loteriadehoy_class: "ruletaactiva",
+    },
+  },
 
   // ==========================================
   // 2. LOTERÍAS DE TRIPLES
@@ -418,14 +465,12 @@ export const MASTER_PRODUCTS_CATALOG: MasterProduct[] = [
     name: "Arrejuntao",
     category: "triples",
     color: "#06b6d4",
-    logo_url: "https://tuazar.com/in/loteria/logo_el_arrejuntao.png",
+    logo_url:
+      "https://nyc3.digitaloceanspaces.com/triple7-media/products/logos/el-arrejuntao-logo.png",
     columns: ["A", "B", "C", "SIGN"],
     columnLabels: { A: "Triple A", B: "Triple B", C: "Triple +", SIGN: "Signo" },
     schedule_times: ["10:00:00", "13:00:00", "16:00:00", "19:00:00", "23:00:00"],
     display_order: 16,
-    extraction: {
-      tuazar_name: "EL ARREJUNTAO",
-    },
   },
   {
     id: "triple-pantera",

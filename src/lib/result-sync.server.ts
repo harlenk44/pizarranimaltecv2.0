@@ -8,6 +8,7 @@ import {
 import { createRealSupabaseAdminClient } from "@/integrations/supabase/client.server";
 import { createMockSupabaseClient, mockStore } from "@/lib/mock-db";
 import { createTuazarProvider, TUAZAR_GAME_NAMES } from "@/lib/tuazar-provider.server";
+import { createArrejuntaoProvider } from "@/lib/arrejuntao-provider.server";
 import { deduplicateGamesList, normalizeGameSlug, type CanonicalGameSlug } from "@/lib/game-slugs";
 import { isCustomUploadedGameLogo } from "@/lib/game-logos";
 import { remapInMemoryStoreIds } from "@/lib/consolidate-games-results.server";
@@ -25,6 +26,9 @@ const providersByCanonicalSlug: Readonly<Record<string, ResultsProvider>> = (() 
       map[canonical] = createTuazarProvider(name, canonical);
     }
   }
+  const arrejuntaoProvider = createArrejuntaoProvider();
+  map["arrejuntao"] = arrejuntaoProvider;
+  map["el-arrejuntao"] = arrejuntaoProvider;
   return map;
 })();
 
@@ -286,8 +290,8 @@ export async function synchronizeAutomaticResults(
   const useCloudSkipCache = options?.supabaseClient === undefined;
   resetPersistedDrawCacheIfNewDay();
 
-  // Run all games concurrently (upstream HTML pages are already deduplicated/cached in tuazar-provider.server)
-  const reports: SyncReport[] = await Promise.all(
+  // Run all games concurrently with Promise.allSettled so one provider never blocks the rest
+  const settledReports = await Promise.allSettled(
     automaticGames.map(async (game): Promise<SyncReport> => {
       const canonicalSlug = normalizeGameSlug(game.slug, game.name) as CanonicalGameSlug;
       const provider = providerMap[canonicalSlug] ?? providerMap[game.slug];
@@ -345,6 +349,17 @@ export async function synchronizeAutomaticResults(
         return { game_id: game.id, status: "error", written: 0, preserved: 0 };
       }
     }),
+  );
+
+  const reports: SyncReport[] = settledReports.map((res, idx) =>
+    res.status === "fulfilled"
+      ? res.value
+      : {
+          game_id: automaticGames[idx]?.id ?? "unknown",
+          status: "error",
+          written: 0,
+          preserved: 0,
+        },
   );
 
   return reports;

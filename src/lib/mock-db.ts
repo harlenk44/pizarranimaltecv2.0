@@ -192,6 +192,30 @@ export const INITIAL_GAMES: Game[] = [
     schedule_times: [...DEFAULT_GAME_SCHEDULES["la-ricachona"]],
     created_at: new Date().toISOString(),
   },
+  {
+    id: "4c82e900-0000-4000-8000-000000000012",
+    name: "LOTTO ACTIVO RDOMINICANA",
+    slug: "lotto-activo-rdominicana",
+    color: "#dc2626",
+    logo_url: getGameLogo("lotto-activo-rdominicana", "#dc2626"),
+    display_order: 12,
+    is_active: true,
+    loading_mode: "automatic",
+    schedule_times: [...DEFAULT_GAME_SCHEDULES["lotto-activo-rdominicana"]],
+    created_at: new Date().toISOString(),
+  },
+  {
+    id: "5d93fa00-0000-4000-8000-000000000013",
+    name: "RULETA ACTIVA",
+    slug: "ruleta-activa",
+    color: "#0891b2",
+    logo_url: getGameLogo("ruleta-activa", "#0891b2"),
+    display_order: 13,
+    is_active: true,
+    loading_mode: "automatic",
+    schedule_times: [...DEFAULT_GAME_SCHEDULES["ruleta-activa"]],
+    created_at: new Date().toISOString(),
+  },
 ];
 
 function buildInitialEntries(): MockStore["animal_entries"] {
@@ -964,18 +988,43 @@ export async function syncTuazarDirectly(): Promise<number> {
         };
       };
 
-      // 1. Try PRIMARY source: LoteriaDeHoy
+      // 1. Try PRIMARY source: LoteriaDeHoy (including dedicated endpoints for RDominicana & Ruleta Activa)
       let ldhSuccess = false;
       try {
-        const ldhRes = await fetch("https://loteriadehoy.com/animalitos/resultados/", {
-          headers: {
-            "User-Agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
-          },
-        });
-        if (ldhRes.ok) {
-          const ldhHtml = await ldhRes.text();
+        const ldhHeaders = {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+        };
+        const [ldhRes, rdomRes, ruletaRes] = await Promise.allSettled([
+          fetch("https://loteriadehoy.com/animalitos/resultados/", { headers: ldhHeaders }),
+          fetch("https://loteriadehoy.com/animalito/lottoactivordominicana/resultados/", {
+            headers: ldhHeaders,
+          }),
+          fetch("https://loteriadehoy.com/animalito/ruletaactiva/resultados/", {
+            headers: ldhHeaders,
+          }),
+        ]);
+        if (ldhRes.status === "fulfilled" && ldhRes.value.ok) {
+          const ldhHtml = await ldhRes.value.text();
           const ldhPage = parseLoteriaDeHoyResults(ldhHtml);
+          for (const extraRes of [rdomRes, ruletaRes]) {
+            if (extraRes.status === "fulfilled" && extraRes.value.ok) {
+              try {
+                const extraHtml = await extraRes.value.text();
+                const extraPage = parseLoteriaDeHoyResults(extraHtml);
+                for (const item of extraPage.results) {
+                  const exists = ldhPage.results.some(
+                    (r) => r.gameClass === item.gameClass && r.drawTime === item.drawTime,
+                  );
+                  if (!exists) {
+                    ldhPage.results.push(item);
+                  }
+                }
+              } catch {
+                // Ignore if individual sub-page has 0 draws yet today
+              }
+            }
+          }
           const drawDate = ldhPage.date ?? todayCaracas;
 
           for (const [slug, meta] of Object.entries(LOTERIADEHOY_GAME_MAPPINGS)) {

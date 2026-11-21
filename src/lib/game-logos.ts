@@ -337,6 +337,59 @@ const LOGO_LA_RICACHONA = svgToDataUri(`
 </svg>
 `);
 
+// 11B. LOTTO ACTIVO RDOMINICANA (Rojo/Azul Bandera Dominicana + Ruleta)
+const LOGO_LOTTO_ACTIVO_RDOMINICANA = svgToDataUri(`
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+  <defs>
+    <radialGradient id="rddom_grad" cx="50%" cy="35%" r="65%">
+      <stop offset="0%" stop-color="#ef4444"/>
+      <stop offset="65%" stop-color="#b91c1c"/>
+      <stop offset="100%" stop-color="#1e1b4b"/>
+    </radialGradient>
+  </defs>
+  <circle cx="60" cy="60" r="57" fill="url(#rddom_grad)" stroke="#facc15" stroke-width="4"/>
+  <!-- Bandera dominicana estilizada superior -->
+  <rect x="30" y="18" width="26" height="14" rx="2" fill="#1d4ed8"/>
+  <rect x="64" y="18" width="26" height="14" rx="2" fill="#dc2626"/>
+  <rect x="30" y="38" width="26" height="14" rx="2" fill="#dc2626"/>
+  <rect x="64" y="38" width="26" height="14" rx="2" fill="#1d4ed8"/>
+  <rect x="56" y="18" width="8" height="34" fill="#ffffff"/>
+  <rect x="30" y="32" width="60" height="6" fill="#ffffff"/>
+  <circle cx="60" cy="35" r="5" fill="#22c55e" stroke="#facc15" stroke-width="1"/>
+  <!-- Banner -->
+  <rect x="6" y="65" width="108" height="23" rx="11.5" fill="#1e3a8a" stroke="#ffffff" stroke-width="2"/>
+  <text x="60" y="81" text-anchor="middle" font-family="Arial Black, Impact, sans-serif" font-size="9.5" font-weight="900" fill="#ffffff" letter-spacing="0.8">LOTTO ACTIVO</text>
+  <text x="60" y="102" text-anchor="middle" font-family="Arial Black, Impact, sans-serif" font-size="8.5" font-weight="900" fill="#facc15" letter-spacing="1.2">RDOMINICANA</text>
+</svg>
+`);
+
+// 11C. RULETA ACTIVA (Cian/Turquesa + Ruleta de Casino Dorada)
+const LOGO_RULETA_ACTIVA = svgToDataUri(`
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+  <defs>
+    <radialGradient id="ra_grad" cx="50%" cy="35%" r="65%">
+      <stop offset="0%" stop-color="#22d3ee"/>
+      <stop offset="65%" stop-color="#0891b2"/>
+      <stop offset="100%" stop-color="#083344"/>
+    </radialGradient>
+  </defs>
+  <circle cx="60" cy="60" r="57" fill="url(#ra_grad)" stroke="#facc15" stroke-width="4"/>
+  <!-- Ruleta superior -->
+  <circle cx="60" cy="39" r="20" fill="#0f172a" stroke="#facc15" stroke-width="2.5"/>
+  <g stroke="#facc15" stroke-width="1.5">
+    <line x1="60" y1="19" x2="60" y2="59"/>
+    <line x1="40" y1="39" x2="80" y2="39"/>
+    <line x1="46" y1="25" x2="74" y2="53"/>
+    <line x1="46" y1="53" x2="74" y2="25"/>
+  </g>
+  <circle cx="60" cy="39" r="6" fill="#ef4444" stroke="#ffffff" stroke-width="1.5"/>
+  <!-- Banner -->
+  <rect x="6" y="65" width="108" height="23" rx="11.5" fill="#0f172a" stroke="#22d3ee" stroke-width="2"/>
+  <text x="60" y="81" text-anchor="middle" font-family="Arial Black, Impact, sans-serif" font-size="10.5" font-weight="900" fill="#ffffff" letter-spacing="1">RULETA ACTIVA</text>
+  <text x="60" y="102" text-anchor="middle" font-family="Arial Black, Impact, sans-serif" font-size="9.5" font-weight="900" fill="#fde047" letter-spacing="2">OFICIAL</text>
+</svg>
+`);
+
 // 12. TRIPLE ZULIA (Verde + Puente de Maracaibo / Sol)
 const LOGO_TRIPLE_ZULIA = svgToDataUri(`
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
@@ -565,6 +618,19 @@ export const OFFICIAL_GAME_LOGOS: Readonly<Record<string, string>> = {
   "la-ricachona": LOGO_LA_RICACHONA,
   "la ricachona": LOGO_LA_RICACHONA,
   "3b92f700-0000-4000-8000-000000000011": LOGO_LA_RICACHONA,
+
+  // Lotto Activo RDominicana
+  "lotto-activo-rdominicana": LOGO_LOTTO_ACTIVO_RDOMINICANA,
+  lottoactivordominicana: LOGO_LOTTO_ACTIVO_RDOMINICANA,
+  "lotto activo rdominicana": LOGO_LOTTO_ACTIVO_RDOMINICANA,
+  "lotto activo rd ( lotto activo rdominicana )": LOGO_LOTTO_ACTIVO_RDOMINICANA,
+  "4c82e900-0000-4000-8000-000000000012": LOGO_LOTTO_ACTIVO_RDOMINICANA,
+
+  // Ruleta Activa
+  "ruleta-activa": LOGO_RULETA_ACTIVA,
+  ruletaactiva: LOGO_RULETA_ACTIVA,
+  "ruleta activa": LOGO_RULETA_ACTIVA,
+  "5d93fa00-0000-4000-8000-000000000013": LOGO_RULETA_ACTIVA,
 
   // Triples
   "triple-zulia": LOGO_TRIPLE_ZULIA,

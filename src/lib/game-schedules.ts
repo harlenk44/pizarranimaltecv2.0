@@ -198,6 +198,37 @@ export const DEFAULT_GAME_SCHEDULES: Readonly<Record<string, string[]>> = {
     "18:10",
     "19:10",
   ],
+  "lotto-activo-rdominicana": [
+    "08:00",
+    "09:00",
+    "10:00",
+    "11:00",
+    "12:00",
+    "13:00",
+    "14:00",
+    "15:00",
+    "16:00",
+    "17:00",
+    "18:00",
+    "19:00",
+    "20:00",
+    "21:00",
+  ],
+  "ruleta-activa": [
+    "09:00",
+    "10:00",
+    "11:00",
+    "12:00",
+    "13:00",
+    "14:00",
+    "15:00",
+    "16:00",
+    "17:00",
+    "18:00",
+    "19:00",
+  ],
+  arrejuntao: ["10:00", "13:00", "16:00", "19:00", "23:00"],
+  "el-arrejuntao": ["10:00", "13:00", "16:00", "19:00", "23:00"],
 };
 
 const STANDARD_HOURS = [
@@ -223,6 +254,15 @@ export function getDefaultGameScheduleTimes(slug: string): string[] {
   const canonical = normalizeGameSlug(slug);
   if (canonical && DEFAULT_GAME_SCHEDULES[canonical]) {
     return [...DEFAULT_GAME_SCHEDULES[canonical]];
+  }
+  if (norm.includes("arrejuntao")) {
+    return [...DEFAULT_GAME_SCHEDULES["arrejuntao"]];
+  }
+  if (norm.includes("rdominicana") || norm.includes("dominicana")) {
+    return [...DEFAULT_GAME_SCHEDULES["lotto-activo-rdominicana"]];
+  }
+  if (norm.includes("ruletaactiva") || norm.includes("ruleta-activa")) {
+    return [...DEFAULT_GAME_SCHEDULES["ruleta-activa"]];
   }
   if (norm.includes("ricachona")) {
     return [...DEFAULT_GAME_SCHEDULES["la-ricachona"]];
