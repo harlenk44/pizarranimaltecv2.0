@@ -112,6 +112,33 @@ function resetDeletedTriplesIfNewDay() {
   }
 }
 
+function persistTriplesToSupabaseAsync(items: TripleResult[]) {
+  if (!Array.isArray(items) || items.length === 0) return;
+  void (async () => {
+    try {
+      const realClient = createRealSupabaseAdminClient();
+      if (!realClient) return;
+      const rows = items.map((tr) => ({
+        id: tr.id || `triple-${tr.game_id}-${tr.draw_date}-${tr.draw_time}`,
+        game_id: tr.game_id,
+        game_slug: tr.game_slug || tr.game_id,
+        draw_date: tr.draw_date,
+        draw_time: tr.draw_time,
+        triple_a: tr.triple_a,
+        triple_b: tr.triple_b ?? null,
+        triple_c: tr.triple_c ?? null,
+        zodiac_sign: tr.zodiac_sign ?? null,
+        source: tr.source ?? "automatic",
+      }));
+      await realClient
+        .from("triple_results")
+        .upsert(rows, { onConflict: "game_id,draw_date,draw_time" });
+    } catch {
+      // ignore if table does not exist yet
+    }
+  })();
+}
+
 function applyIncomingTriplesToServer(incoming: TripleResult[], today = lotteryDate()): number {
   if (!Array.isArray(incoming) || incoming.length === 0) return 0;
   resetDeletedTriplesIfNewDay();
@@ -123,7 +150,11 @@ function applyIncomingTriplesToServer(incoming: TripleResult[], today = lotteryD
     serverDeletedTripleIds,
   );
   saveServerTripleResults();
-  const nextCount = serverTripleResults.filter((r) => r.draw_date === today).length;
+  const todaysTriples = serverTripleResults.filter((r) => r.draw_date === today);
+  const nextCount = todaysTriples.length;
+  if (nextCount > prevCount) {
+    persistTriplesToSupabaseAsync(todaysTriples);
+  }
   return Math.max(0, nextCount - prevCount);
 }
 
@@ -1751,6 +1782,46 @@ async function syncResultsWithSupabase(force = false): Promise<void> {
             onlyDate: today,
           }).catch(() => {});
         }
+      }
+
+      // Also sync today's triple_results from Supabase so cold Worker isolates recover triples immediately
+      try {
+        const { data: tripleData, error: tripleErr } = await realClient
+          .from("triple_results")
+          .select("*")
+          .eq("draw_date", today);
+        if (!tripleErr && Array.isArray(tripleData) && tripleData.length > 0) {
+          const cloudTriples: TripleResult[] = (tripleData as Array<Record<string, unknown>>).map(
+            (row) => ({
+              id: String(
+                row["id"] ||
+                  `triple-${String(row["game_id"] || "")}-${String(row["draw_date"] || "")}-${String(row["draw_time"] || "")}`,
+              ),
+              game_id: String(row["game_id"] || ""),
+              game_slug: String(row["game_slug"] || row["game_id"] || ""),
+              draw_date: String(row["draw_date"] || today),
+              draw_time: String(row["draw_time"] || ""),
+              triple_a: String(row["triple_a"] || ""),
+              ...(row["triple_b"] ? { triple_b: String(row["triple_b"]) } : {}),
+              ...(row["triple_c"] ? { triple_c: String(row["triple_c"]) } : {}),
+              ...(row["zodiac_sign"] ? { zodiac_sign: String(row["zodiac_sign"]) } : {}),
+              source: row["source"] === "manual" ? "manual" : "automatic",
+              created_at:
+                typeof row["created_at"] === "string"
+                  ? row["created_at"]
+                  : new Date().toISOString(),
+            }),
+          );
+          serverTripleResults = mergeTripleResultsPreserveToday(
+            serverTripleResults,
+            cloudTriples,
+            today,
+            serverDeletedTripleIds,
+          );
+          saveServerTripleResults();
+        }
+      } catch {
+        // ignore if triple_results table is not present
       }
     } catch {
       // ignore

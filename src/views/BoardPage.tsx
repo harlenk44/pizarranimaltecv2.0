@@ -1372,6 +1372,58 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         const today = lotteryDate();
 
         const serverRespondedOk = syncData !== null;
+        if (!serverRespondedOk) {
+          try {
+            const { data: sbTriples, error: sbTriplesErr } = await supabase
+              .from("triple_results")
+              .select("*")
+              .eq("draw_date", today)
+              .order("draw_time", { ascending: true });
+            if (!sbTriplesErr && Array.isArray(sbTriples) && sbTriples.length > 0) {
+              const mappedTriples: TripleResult[] = (
+                sbTriples as Array<Record<string, unknown>>
+              ).map((row) => ({
+                id: String(
+                  row["id"] ||
+                    `triple-${String(row["game_id"] || "")}-${String(row["draw_date"] || "")}-${String(row["draw_time"] || "")}`,
+                ),
+                game_id: String(row["game_id"] || ""),
+                game_slug: String(row["game_slug"] || row["game_id"] || ""),
+                draw_date: String(row["draw_date"] || today),
+                draw_time: String(row["draw_time"] || "").substring(0, 5),
+                triple_a: String(row["triple_a"] || ""),
+                ...(row["triple_b"] ? { triple_b: String(row["triple_b"]) } : {}),
+                ...(row["triple_c"] ? { triple_c: String(row["triple_c"]) } : {}),
+                ...(row["zodiac_sign"] ? { zodiac_sign: String(row["zodiac_sign"]) } : {}),
+                source: row["source"] === "manual" ? "manual" : "automatic",
+                created_at:
+                  typeof row["created_at"] === "string"
+                    ? row["created_at"]
+                    : new Date().toISOString(),
+              }));
+              const mergedTriples = mergeTripleResultsPreserveToday(
+                tripleResultsRef.current,
+                mappedTriples,
+                today,
+              );
+              serverSyncedTriples = mergedTriples;
+              const tJson = JSON.stringify(mergedTriples);
+              if (lastTripleResultsJsonRef.current !== tJson) {
+                lastTripleResultsJsonRef.current = tJson;
+                tripleResultsRef.current = mergedTriples;
+                setTripleResults(mergedTriples);
+                try {
+                  localStorage.setItem("pizarra_triple_results", tJson);
+                } catch {
+                  // ignore
+                }
+              }
+            }
+          } catch {
+            // ignore if triple_results is unavailable
+          }
+        }
+
         const resultsPromises = await Promise.all(
           loadedGames.map(async (g) => {
             const matching = matchResultsForGame(g, serverSyncedResults, today);
