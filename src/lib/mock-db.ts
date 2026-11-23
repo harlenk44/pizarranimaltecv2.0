@@ -514,6 +514,10 @@ export async function ensureCustomCatalogLoaded(): Promise<MockStore["animal_ima
   return _ensureCatalogPromise;
 }
 
+if (typeof window !== "undefined") {
+  void ensureCustomCatalogLoaded();
+}
+
 function buildInitialImages(): MockStore["animal_images"] {
   const defaultCatalogImages = buildDefaultCatalogImagesForAllGames();
   const loadedCustom = getLoadedCustomAnimalImages();

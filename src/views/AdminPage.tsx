@@ -1772,10 +1772,12 @@ function AnimalsManager({ games }: { games: Game[] }) {
 
     const {
       mockStore,
+      ensureCustomCatalogLoaded,
       recoverCustomAnimalImagesFromLocalStorage,
       mergeAnimalImagesPreserveCustom,
       filterAdminCustomAnimalImages,
     } = await import("@/lib/mock-db");
+    await ensureCustomCatalogLoaded();
     const { resolveCanonicalAnimal } = await import("@/lib/official-animals");
     const recoveredCustom = recoverCustomAnimalImagesFromLocalStorage();
     if (recoveredCustom.length > 0) {

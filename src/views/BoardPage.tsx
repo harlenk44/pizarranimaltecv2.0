@@ -691,11 +691,18 @@ const GameCard = memo(
       return false;
     }
 
+    if (
+      prev.animalImages !== next.animalImages ||
+      prev.animalNames !== next.animalNames ||
+      prev.animalLabels !== next.animalLabels
+    ) {
+      return false;
+    }
+
     const prevRes = prev.game.latest_results || [];
     const nextRes = next.game.latest_results || [];
     if (prevRes.length !== nextRes.length) return false;
 
-    const gameKey = next.game.slug || next.game.id;
     for (let i = 0; i < prevRes.length; i++) {
       const a = prevRes[i]!;
       const b = nextRes[i]!;
@@ -705,35 +712,6 @@ const GameCard = memo(
         a.animal_name !== b.animal_name
       ) {
         return false;
-      }
-      if (
-        prev.animalImages !== next.animalImages ||
-        prev.animalNames !== next.animalNames ||
-        prev.animalLabels !== next.animalLabels
-      ) {
-        const canA = resolveCanonicalAnimal(
-          gameKey,
-          a.animal_number,
-          a.animal_name,
-          prev.animalImages,
-          prev.animalNames,
-          prev.animalLabels,
-        );
-        const canB = resolveCanonicalAnimal(
-          gameKey,
-          b.animal_number,
-          b.animal_name,
-          next.animalImages,
-          next.animalNames,
-          next.animalLabels,
-        );
-        if (
-          canA.imageUrl !== canB.imageUrl ||
-          canA.label !== canB.label ||
-          canA.name !== canB.name
-        ) {
-          return false;
-        }
       }
     }
     return true;
@@ -1309,9 +1287,6 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
             // Fallback to mockStore below
           }
 
-          if (dbImages.length === 0) {
-            dbImages = mockStore.animal_images as AnimalImage[];
-          }
           if (dbEntries.length === 0) {
             dbEntries = mockStore.animal_entries as AnimalEntry[];
           }
@@ -1319,6 +1294,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           const nextImgMap: AnimalImageMap = { ...imgMap };
 
           const combinedImages: AnimalImage[] = mergeAnimalImagesPreserveCustom(
+            mockStore.animal_images as AnimalImage[],
             dbImages,
             localCachedImages,
             localRecoveredCustom,
@@ -1673,7 +1649,15 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     };
     const onCustomImagesLoaded = () => {
       mediaLoadedRef.current = false;
-      fetchAll();
+      const immediateMap: AnimalImageMap = {
+        ...getInitialCachedAnimalImages(),
+        ...cachedImgMapRef.current,
+      };
+      cachedImgMapRef.current = immediateMap;
+      animalImagesRef.current = immediateMap;
+      lastImgMapJsonRef.current = JSON.stringify(immediateMap);
+      setAnimalImages(immediateMap);
+      void fetchAll(true);
     };
     const onServerSyncPayload = (ev: Event) => {
       const payload = (ev as CustomEvent<Record<string, unknown>>).detail;
@@ -1707,9 +1691,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     window.addEventListener("pizarra:custom-images-loaded", onCustomImagesLoaded);
     window.addEventListener("pizarra:server-sync-payload", onServerSyncPayload);
 
-    const deferredCatalogTimer = window.setTimeout(() => {
-      void ensureCustomCatalogLoaded();
-    }, 1500);
+    void ensureCustomCatalogLoaded();
 
     const realtimeChannel = supabase
       .channel("board-animal-media-sync")
@@ -1732,7 +1714,6 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
 
     return () => {
       bc?.close();
-      window.clearTimeout(deferredCatalogTimer);
       window.removeEventListener("storage", onStorage);
       window.removeEventListener("pizarra:custom-images-loaded", onCustomImagesLoaded);
       window.removeEventListener("pizarra:server-sync-payload", onServerSyncPayload);
