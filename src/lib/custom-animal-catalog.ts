@@ -10,12 +10,53 @@ let _catalogImageUrlSet: Set<string> = new Set();
 let _catalogByKey: Map<string, string> = new Map();
 let _loadPromise: Promise<CustomAnimalEntry[]> | null = null;
 
+async function fetchRawCatalog(): Promise<unknown> {
+  if (typeof window !== "undefined") {
+    try {
+      const origin =
+        typeof window.location?.origin === "string" && window.location.origin.startsWith("http")
+          ? window.location.origin
+          : "";
+      const res = await fetch(`${origin}/custom-animal-catalog.json`, {
+        headers: { Accept: "application/json" },
+      });
+      if (res.ok) {
+        return await res.json();
+      }
+    } catch {
+      // In jsdom test environments, fall through to filesystem read below
+    }
+  }
+
+  // Server environment: try local filesystem first (Node.js dev/test/build),
+  // fallback to static CDN asset on Cloudflare Pages without bundling 7.5MB into _worker.js
+  try {
+    const fsMod = await import("node:fs/promises");
+    const pathMod = await import("node:path");
+    const filePath = pathMod.join(process.cwd(), "public", "custom-animal-catalog.json");
+    const content = await fsMod.readFile(filePath, "utf8");
+    return JSON.parse(content) as unknown;
+  } catch {
+    try {
+      const res = await fetch("https://pizarraanimal.servhm.com/custom-animal-catalog.json", {
+        headers: { Accept: "application/json" },
+      });
+      if (res.ok) {
+        return await res.json();
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return [];
+}
+
 /**
- * Carga diferida (lazy / dynamic import) del catálogo maestro de imágenes.
- * Al usar import() dinámico en lugar de una importación estática en la raíz,
- * Vite y Nitro generan un chunk separado para este archivo JSON de 7.5MB.
- * Esto evita saturar el paquete principal (index.js), reduce el tiempo de arranque
- * de la app a menos de un segundo y previene errores de timeout en la preview.
+ * Carga diferida del catálogo maestro de 451 imágenes desde el archivo estático
+ * `/custom-animal-catalog.json` en `public/`.
+ * Al servirse como archivo estático desde Cloudflare Pages CDN, no se empaqueta
+ * dentro de `dist/_worker.js` (manteniendo el Worker en ~2.5MB, muy por debajo
+ * del límite de Cloudflare Free) y no consume peticiones del Worker.
  */
 export async function loadCustomAnimalCatalog(): Promise<CustomAnimalEntry[]> {
   if (_cachedCatalog) return _cachedCatalog;
@@ -23,8 +64,7 @@ export async function loadCustomAnimalCatalog(): Promise<CustomAnimalEntry[]> {
 
   _loadPromise = (async () => {
     try {
-      const module = await import("./custom-animal-catalog.json");
-      const rawCatalog = (module && "default" in module ? module.default : module) as unknown;
+      const rawCatalog = await fetchRawCatalog();
       if (Array.isArray(rawCatalog)) {
         _cachedCatalog = (rawCatalog as CustomAnimalEntry[]).filter(
           (item) =>
@@ -57,8 +97,6 @@ export async function loadCustomAnimalCatalog(): Promise<CustomAnimalEntry[]> {
 
 /**
  * Retorna true si la URL pertenece al catálogo base de 451 animalitos (`custom-animal-catalog.json`).
- * Esto permite distinguir entre el catálogo base (que se carga por separado bajo demanda)
- * y las imágenes subidas/modificadas explícitamente por el administrador.
  */
 export function isEmbeddedCatalogImageUrl(url?: string | null): boolean {
   if (!url) return false;
