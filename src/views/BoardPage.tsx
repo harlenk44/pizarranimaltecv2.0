@@ -40,6 +40,8 @@ import {
   resolveCanonicalAnimal,
   preloadImageOnce,
   isRealAnimalMediaUrl,
+  GAME_ID_TO_SLUG,
+  SLUG_TO_GAME_ID,
 } from "@/lib/official-animals";
 import { getResponsiveBoardGridStyle, DEFAULT_CARDS_PER_SCREEN } from "@/lib/license-lotteries";
 import {
@@ -49,6 +51,7 @@ import {
   recoverCustomAnimalImagesFromLocalStorage,
   filterAdminCustomAnimalImages,
   mergeGamesPreserveCustomLogos,
+  ensureCustomCatalogLoaded,
   type AppSettings,
 } from "@/lib/mock-db";
 import {
@@ -57,7 +60,7 @@ import {
   mergeCustomGameLogosMap,
   isCustomUploadedGameLogo,
 } from "@/lib/game-logos";
-import { deduplicateGamesList, matchResultsForGame } from "@/lib/game-slugs";
+import { deduplicateGamesList, matchResultsForGame, normalizeGameSlug } from "@/lib/game-slugs";
 import { DEFAULT_APP_SETTINGS, parseAppSettingsFromSupabase } from "@/lib/types";
 import {
   getGameNeonColor,
@@ -288,13 +291,21 @@ function getInitialResultsMap(): Record<string, Result[]> {
 
 function getInitialCachedAnimalImages(): AnimalImageMap {
   const map: AnimalImageMap = {};
+  const registerImg = (gameId: string, animalNumber: number, imageUrl: string) => {
+    map[`${gameId}:${animalNumber}`] = imageUrl;
+    const canonicalSlug = GAME_ID_TO_SLUG[gameId] || normalizeGameSlug(gameId);
+    if (canonicalSlug) {
+      map[`${canonicalSlug}:${animalNumber}`] = imageUrl;
+      const catalogUuid = SLUG_TO_GAME_ID[canonicalSlug];
+      if (catalogUuid) {
+        map[`${catalogUuid}:${animalNumber}`] = imageUrl;
+      }
+    }
+  };
   try {
     for (const img of mockStore.animal_images as AnimalImage[]) {
       if (img?.image_url && img.animal_number != null && isRealAnimalMediaUrl(img.image_url)) {
-        map[`${img.game_id}:${img.animal_number}`] = img.image_url;
-        if (!map[`any:${img.animal_number}`]) {
-          map[`any:${img.animal_number}`] = img.image_url;
-        }
+        registerImg(img.game_id, img.animal_number, img.image_url);
       }
     }
   } catch {
@@ -310,8 +321,7 @@ function getInitialCachedAnimalImages(): AnimalImageMap {
       if (Array.isArray(parsed)) {
         for (const img of parsed) {
           if (img?.image_url && img.animal_number != null && isRealAnimalMediaUrl(img.image_url)) {
-            map[`${img.game_id}:${img.animal_number}`] = img.image_url;
-            map[`any:${img.animal_number}`] = img.image_url;
+            registerImg(img.game_id, img.animal_number, img.image_url);
           }
         }
       }
@@ -798,7 +808,11 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       : undefined;
   const lastLogosVersionRef = useRef<number>(Number(initialSyncSeed?.["logosVersion"]) || 1);
   const lastGamesVersionRef = useRef<number>(Number(initialSyncSeed?.["gamesVersion"]) || 0);
-  const lastImagesVersionRef = useRef<number>(Number(initialSyncSeed?.["imagesVersion"]) || 1);
+  const lastImagesVersionRef = useRef<number>(
+    Array.isArray(initialSyncSeed?.["animalImages"])
+      ? Number(initialSyncSeed?.["imagesVersion"]) || 1
+      : 0,
+  );
   const lastSettingsVersionRef = useRef<number>(Number(initialSyncSeed?.["settingsVersion"]) || 0);
   const lastGamesJsonRef = useRef<string>("");
   const lastImgMapJsonRef = useRef<string>("");
@@ -963,6 +977,9 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
 
   const fetchAll = useCallback(
     async (force = false) => {
+      if (!force && typeof document !== "undefined" && document.visibilityState === "hidden") {
+        return;
+      }
       if (fetchInFlightRef.current && !force) return;
       fetchInFlightRef.current = true;
       const reqSeq = ++fetchSeqRef.current;
@@ -976,6 +993,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         try {
           const q = new URLSearchParams();
           q.set("poll", "1");
+          q.set("includeLicenses", "1");
           if (lastLogosVersionRef.current)
             q.set("logosVersion", String(lastLogosVersionRef.current));
           if (lastGamesVersionRef.current)
@@ -985,15 +1003,26 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           if (lastSettingsVersionRef.current)
             q.set("settingsVersion", String(lastSettingsVersionRef.current));
 
-          const syncRes = await fetch(`/api/public/results/sync?${q.toString()}`, {
-            cache: "no-store",
-          });
+          const syncRes = await fetch(
+            `/api/public/results/sync?${q.toString()}`,
+            force ? { cache: "no-store" } : undefined,
+          );
           // Discard stale out-of-order response if a newer fetch already started
           if (reqSeq !== fetchSeqRef.current) return;
 
           if (syncRes.ok) {
             syncData = await syncRes.json();
             if (reqSeq !== fetchSeqRef.current) return;
+
+            if (syncData && typeof window !== "undefined") {
+              (window as unknown as Record<string, unknown>)["__PIZARRA_LAST_SYNC_DATA__"] =
+                syncData;
+              window.dispatchEvent(
+                new CustomEvent("pizarra:server-sync-payload", {
+                  detail: { ...syncData, __fromBoardPage: true },
+                }),
+              );
+            }
 
             if (syncData?.logosVersion) lastLogosVersionRef.current = Number(syncData.logosVersion);
             if (syncData?.gamesVersion) lastGamesVersionRef.current = Number(syncData.gamesVersion);
@@ -1298,11 +1327,19 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           for (const img of combinedImages) {
             if (!img?.image_url || !isRealAnimalMediaUrl(img.image_url)) continue;
             nextImgMap[`${img.game_id}:${img.animal_number}`] = img.image_url;
-            if (!nextImgMap[`any:${img.animal_number}`]) {
-              nextImgMap[`any:${img.animal_number}`] = img.image_url;
+            const canonicalSlug = GAME_ID_TO_SLUG[img.game_id] || normalizeGameSlug(img.game_id);
+            if (canonicalSlug) {
+              nextImgMap[`${canonicalSlug}:${img.animal_number}`] = img.image_url;
+              const catalogUuid = SLUG_TO_GAME_ID[canonicalSlug];
+              if (catalogUuid) {
+                nextImgMap[`${catalogUuid}:${img.animal_number}`] = img.image_url;
+              }
             }
             const matchedGame = loadedGames.find(
-              (g) => g.id === img.game_id || g.slug === img.game_id,
+              (g) =>
+                g.id === img.game_id ||
+                g.slug === img.game_id ||
+                (canonicalSlug && normalizeGameSlug(g.slug, g.name) === canonicalSlug),
             );
             if (matchedGame) {
               nextImgMap[`${matchedGame.id}:${img.animal_number}`] = img.image_url;
@@ -1640,7 +1677,8 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     };
     const onServerSyncPayload = (ev: Event) => {
       const payload = (ev as CustomEvent<Record<string, unknown>>).detail;
-      if (payload && Array.isArray(payload["tripleResults"])) {
+      if (!payload || payload["__fromBoardPage"] === true) return;
+      if (Array.isArray(payload["tripleResults"])) {
         const todayDate = lotteryDate();
         const deletedIds = Array.isArray(payload["deletedTripleIds"])
           ? (payload["deletedTripleIds"] as string[])
@@ -1658,7 +1696,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           setTripleResults(mergedTriples);
         }
       }
-      if (payload && Array.isArray(payload["results"]) && payload["results"].length > 0) {
+      if (Array.isArray(payload["results"]) && payload["results"].length > 0) {
         if (isInitialLoadRef.current) {
           setResultsMap(getInitialResultsMap());
         } else {
@@ -1669,8 +1707,15 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     window.addEventListener("pizarra:custom-images-loaded", onCustomImagesLoaded);
     window.addEventListener("pizarra:server-sync-payload", onServerSyncPayload);
 
+    const deferredCatalogTimer = window.setTimeout(() => {
+      void ensureCustomCatalogLoaded();
+    }, 1500);
+
     const realtimeChannel = supabase
       .channel("board-animal-media-sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "results" }, () => {
+        void fetchAll(false);
+      })
       .on("postgres_changes", { event: "*", schema: "public", table: "animal_images" }, () => {
         mediaLoadedRef.current = false;
         fetchAll();
@@ -1687,6 +1732,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
 
     return () => {
       bc?.close();
+      window.clearTimeout(deferredCatalogTimer);
       window.removeEventListener("storage", onStorage);
       window.removeEventListener("pizarra:custom-images-loaded", onCustomImagesLoaded);
       window.removeEventListener("pizarra:server-sync-payload", onServerSyncPayload);
@@ -1744,11 +1790,63 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
   }, [fetchAll]);
 
   useEffect(() => {
-    fetchAll(true);
-    const interval = setInterval(() => {
-      void fetchAll(false);
-    }, 6000);
-    return () => clearInterval(interval);
+    void fetchAll(true);
+
+    const getAdaptivePollIntervalMs = (): number => {
+      try {
+        const parts = new Intl.DateTimeFormat("en-US", {
+          timeZone: LOTTERY_TIMEZONE,
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        }).formatToParts(new Date());
+        const hour = Number(parts.find((p) => p.type === "hour")?.value ?? 12);
+        const minute = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
+
+        // Overnight off-hours in Venezuela (8:30 PM to 7:40 AM): no draws occur, poll every 3 minutes
+        const isOffHours =
+          hour >= 21 || hour < 7 || (hour === 20 && minute >= 30) || (hour === 7 && minute < 40);
+        if (isOffHours) {
+          return 180_000;
+        }
+
+        // Peak draw publication windows (:00-:10, :30-:40, :45-:53): poll every 20 seconds
+        const isPeakDrawWindow =
+          (minute >= 0 && minute <= 10) ||
+          (minute >= 30 && minute <= 40) ||
+          (minute >= 45 && minute <= 53);
+        return isPeakDrawWindow ? 20_000 : 35_000;
+      } catch {
+        return 25_000;
+      }
+    };
+
+    let timerId: number | undefined;
+    let cancelled = false;
+
+    const scheduleNext = () => {
+      if (cancelled) return;
+      timerId = window.setTimeout(async () => {
+        if (cancelled) return;
+        await fetchAll(false);
+        scheduleNext();
+      }, getAdaptivePollIntervalMs());
+    };
+
+    scheduleNext();
+
+    const onVisibilityChange = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        void fetchAll(false);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      cancelled = true;
+      if (timerId !== undefined) window.clearTimeout(timerId);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, [fetchAll]);
 
   const handleTestAlert = () => {

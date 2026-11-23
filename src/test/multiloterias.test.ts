@@ -97,14 +97,29 @@ describe("Multiloterias Integration and Catalog", () => {
     expect(parseCanonicalAnimalNumber("guacharito", "00")).toBe(100);
   });
 
-  it("prioritizes custom admin images first and then deterministic fixed catalog images per lottery", () => {
+  it("prioritizes custom admin images first and then deterministic fixed catalog images per lottery", async () => {
     const defaultImg = resolveCanonicalAnimal("granjita", 12, "Caballo");
     expect(defaultImg.name).toBe("Caballo");
     expect(defaultImg.label).toBe("12");
-    expect(defaultImg.imageUrl).toBe("/api/public/results/sync?animalImage=granjita:12&label=12");
+    expect(defaultImg.imageUrl).toBe(
+      "/api/public/results/sync?animalImage=la-granjita:12&label=12&cat=v2",
+    );
 
-    const customMap = { "granjita:12": "/custom/caballo.png" };
+    const customMap = {
+      "granjita:12": "/custom/caballo-granjita.png",
+      "any:12": "/custom/caballo-wrong.png",
+    };
     const customImg = resolveCanonicalAnimal("granjita", 12, "Caballo", customMap);
-    expect(customImg.imageUrl).toBe("/custom/caballo.png");
+    expect(customImg.imageUrl).toBe("/custom/caballo-granjita.png");
+
+    // Ensure Lotto Activo and Guácharo Activo never inherit La Granjita's or 'any:' custom images
+    const lottoImg = resolveCanonicalAnimal("lotto-activo", 12, "Caballo", customMap);
+    const guacharoImg = resolveCanonicalAnimal("guacharo-activo", 12, "Caballo", customMap);
+    expect(lottoImg.imageUrl).toBe(
+      "/api/public/results/sync?animalImage=lotto-activo:12&label=12&cat=v2",
+    );
+    expect(guacharoImg.imageUrl).toBe(
+      "/api/public/results/sync?animalImage=guacharo-activo:12&label=12&cat=v2",
+    );
   });
 });

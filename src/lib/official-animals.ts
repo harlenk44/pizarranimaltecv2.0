@@ -354,8 +354,9 @@ export function getFixedAnimalImageUrl(
     return `https://nyc3.digitaloceanspaces.com/triple7-media/game_symbols/animalitos/el-arrejuntao/${code}.png`;
   }
 
+  const canonicalSlug = normalizeGameSlug(slug) || slug;
   const label = isBallena ? "00" : canonicalNumber === 0 ? "0" : canonicalLabel;
-  return `/api/public/results/sync?animalImage=${encodeURIComponent(slug)}:${canonicalNumber}&label=${encodeURIComponent(label)}`;
+  return `/api/public/results/sync?animalImage=${encodeURIComponent(canonicalSlug)}:${canonicalNumber}&label=${encodeURIComponent(label)}&cat=v2`;
 }
 
 const preloadedImagesCache = new Map<string, HTMLImageElement>();
@@ -419,7 +420,7 @@ export function isRealAnimalMediaUrl(url?: string | null): boolean {
  * Guarantees:
  *  1. "0" is always DELFÍN and "00" is always BALLENA (never conflated via parseInt).
  *  2. Official animal name comes from the local immutable catalog for that lottery.
- *  3. Image priority is strictly: (1) Game-specific custom admin image -> (2) Local embedded catalog -> (3) Fixed local bank.
+ *  3. Image priority is strictly: (1) Game-specific custom admin image -> (2) Local embedded catalog for this game -> (3) On-demand server catalog for this game.
  */
 export function resolveCanonicalAnimal(
   gameIdOrSlug: string | null | undefined,
@@ -474,7 +475,7 @@ export function resolveCanonicalAnimal(
     return undefined;
   };
 
-  // 1. Direct match for this game (customImages or direct embedded catalog for this game UUID)
+  // 1. Direct match ONLY for this exact game (game-specific customImages or direct embedded catalog for this game UUID)
   let customImg = pickReal(
     customImages?.[`${gameKey}:${canonicalNum}`],
     customImages?.[`${gameUuid}:${canonicalNum}`],
@@ -483,50 +484,53 @@ export function resolveCanonicalAnimal(
     isBallena ? customImages?.[`${gameKey}:00`] : undefined,
     isBallena ? customImages?.[`${slug}:00`] : undefined,
     isBallena ? customImages?.[`${canonicalSlug}:00`] : undefined,
-    customImages && canonicalSlug !== "lotoanimalito" && canonicalSlug !== "lottopantera"
+    canonicalSlug !== "lotoanimalito" && canonicalSlug !== "lottopantera"
       ? getEmbeddedCatalogImageUrl(gameUuid, canonicalNum)
       : undefined,
   );
 
-  // 2. If this game delegates to or is missing an entry in the shared 38/77/101-animal local catalog,
-  // resolve directly from the in-memory embedded base64 catalog rather than making network requests
+  // 2. If this game delegates to a shared catalog (e.g. ruleta-activa, lotto-activo-rdominicana, monje-millonario)
+  //    AND the embedded catalog is loaded in memory, resolve from the embedded catalog (never from another game's customImages)
   if (
     !customImg &&
-    customImages &&
     canonicalSlug !== "lotoanimalito" &&
-    canonicalSlug !== "lottopantera"
+    canonicalSlug !== "lottopantera" &&
+    canonicalSlug !== "arrejuntao" &&
+    canonicalSlug !== "el-arrejuntao"
   ) {
     const granjitaLookupNum = isBallena ? 37 : canonicalNum;
     const guacharoLookupNum = isBallena ? 76 : canonicalNum;
     const guacharitoLookupNum = isBallena ? 100 : canonicalNum;
 
+    const isGuacharoFamily =
+      canonicalSlug === "guacharo-activo" ||
+      canonicalSlug === "guacharo" ||
+      canonicalSlug === "monje-millonario";
+
     customImg = pickReal(
-      granjitaLookupNum <= 37
-        ? (customImages[`la-granjita:${granjitaLookupNum}`] ??
-            customImages[`granjita:${granjitaLookupNum}`] ??
-            customImages[`ca8a0400-0000-4000-8000-000000000006:${granjitaLookupNum}`] ??
-            getEmbeddedCatalogImageUrl("ca8a0400-0000-4000-8000-000000000006", granjitaLookupNum) ??
-            customImages[`lotto-activo:${granjitaLookupNum}`] ??
-            customImages[`7d21a00b-0dfa-4bdc-9edf-8115802df1d6:${granjitaLookupNum}`] ??
-            getEmbeddedCatalogImageUrl("7d21a00b-0dfa-4bdc-9edf-8115802df1d6", granjitaLookupNum))
+      isGuacharoFamily && guacharoLookupNum <= 76
+        ? getEmbeddedCatalogImageUrl("01da9c54-392a-45e3-ab66-9a08befe7694", guacharoLookupNum)
+        : undefined,
+      !isGuacharoFamily && granjitaLookupNum <= 37
+        ? (getEmbeddedCatalogImageUrl("7d21a00b-0dfa-4bdc-9edf-8115802df1d6", granjitaLookupNum) ??
+            getEmbeddedCatalogImageUrl("1e40af00-0000-4000-8000-000000000008", granjitaLookupNum) ??
+            getEmbeddedCatalogImageUrl("ca8a0400-0000-4000-8000-000000000006", granjitaLookupNum))
         : undefined,
       guacharoLookupNum <= 76
-        ? (customImages[`guacharo-activo:${guacharoLookupNum}`] ??
-            customImages[`guacharo:${guacharoLookupNum}`] ??
-            customImages[`01da9c54-392a-45e3-ab66-9a08befe7694:${guacharoLookupNum}`] ??
-            getEmbeddedCatalogImageUrl("01da9c54-392a-45e3-ab66-9a08befe7694", guacharoLookupNum))
+        ? getEmbeddedCatalogImageUrl("01da9c54-392a-45e3-ab66-9a08befe7694", guacharoLookupNum)
         : undefined,
       guacharitoLookupNum <= 100
-        ? (customImages[`el-guacharito-millonario:${guacharitoLookupNum}`] ??
-            customImages[`guacharito:${guacharitoLookupNum}`] ??
-            customImages[`0519825d-e7ea-4e59-bf7d-cef2c832edd3:${guacharitoLookupNum}`] ??
-            getEmbeddedCatalogImageUrl("0519825d-e7ea-4e59-bf7d-cef2c832edd3", guacharitoLookupNum))
+        ? (getEmbeddedCatalogImageUrl(
+            "0519825d-e7ea-4e59-bf7d-cef2c832edd3",
+            guacharitoLookupNum,
+          ) ??
+            getEmbeddedCatalogImageUrl("8f3aa087-6a0c-41a1-9ed3-5f6d5ed6918e", guacharitoLookupNum))
         : undefined,
-      customImages[`any:${canonicalNum}`],
     );
   }
 
-  const rawFinalUrl = customImg || getFixedAnimalImageUrl(slug, canonicalNum, label);
+  const rawFinalUrl =
+    customImg || getFixedAnimalImageUrl(canonicalSlug || slug, canonicalNum, label);
   const imageUrl = preloadImageOnce(rawFinalUrl);
 
   return {

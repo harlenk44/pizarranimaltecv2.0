@@ -9,6 +9,10 @@ import { createRealSupabaseAdminClient } from "@/integrations/supabase/client.se
 import { createMockSupabaseClient, mockStore } from "@/lib/mock-db";
 import { createTuazarProvider, TUAZAR_GAME_NAMES } from "@/lib/tuazar-provider.server";
 import { createArrejuntaoProvider } from "@/lib/arrejuntao-provider.server";
+import { createGuacharoProvider } from "@/lib/guacharo-provider.server";
+import { createGuacharitoProvider } from "@/lib/guacharito-provider.server";
+import { createSelvaPlusProvider } from "@/lib/selva-plus-provider.server";
+import { createLottoActivoProvider } from "@/lib/lotto-activo-provider.server";
 import { deduplicateGamesList, normalizeGameSlug, type CanonicalGameSlug } from "@/lib/game-slugs";
 import { isCustomUploadedGameLogo } from "@/lib/game-logos";
 import { remapInMemoryStoreIds } from "@/lib/consolidate-games-results.server";
@@ -26,6 +30,22 @@ const providersByCanonicalSlug: Readonly<Record<string, ResultsProvider>> = (() 
       map[canonical] = createTuazarProvider(name, canonical);
     }
   }
+  const lottoActivoProvider = createLottoActivoProvider(map["lotto-activo"]);
+  map["lotto-activo"] = lottoActivoProvider;
+
+  const guacharoProvider = createGuacharoProvider(map["guacharo-activo"]);
+  map["guacharo-activo"] = guacharoProvider;
+  map["guacharo"] = guacharoProvider;
+
+  const guacharitoProvider = createGuacharitoProvider(map["el-guacharito-millonario"]);
+  map["el-guacharito-millonario"] = guacharitoProvider;
+  map["guacharito-millonario"] = guacharitoProvider;
+  map["guacharito"] = guacharitoProvider;
+
+  const selvaPlusProvider = createSelvaPlusProvider(map["selva-plus"]);
+  map["selva-plus"] = selvaPlusProvider;
+  map["selvaplus"] = selvaPlusProvider;
+
   const arrejuntaoProvider = createArrejuntaoProvider();
   map["arrejuntao"] = arrejuntaoProvider;
   map["el-arrejuntao"] = arrejuntaoProvider;

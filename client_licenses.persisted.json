@@ -47,7 +47,7 @@
     },
     {
       "id": "lic-master-admin",
-      "client_name": "Administrador Maestro",
+      "client_name": "Administrador Maestro||{\"loterias\":\"TODAS\",\"tarjetasPorPantalla\":3,\"tiempoTransicion\":25}",
       "pin_code": "291007",
       "status": "active",
       "expires_at": "2036-11-02T01:09:47.704Z",

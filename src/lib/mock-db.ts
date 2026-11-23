@@ -3,7 +3,9 @@ import {
   OFFICIAL_ANIMALS,
   resolveCanonicalAnimal,
   getFixedAnimalImageUrl,
+  GAME_ID_TO_SLUG,
 } from "@/lib/official-animals";
+import { normalizeGameSlug } from "@/lib/game-slugs";
 import {
   DEFAULT_APP_SETTINGS,
   type AppSettings,
@@ -244,6 +246,7 @@ export function isDefaultCatalogImageUrl(url?: string | null): boolean {
   return (
     url.includes("tuazar.com/in/animalitos/") ||
     url.includes("toteback.atilax.io/storage/bases/") ||
+    url.includes("nyc3.digitaloceanspaces.com/triple7-media/") ||
     url.includes("/api/media?file=") ||
     url.includes("/api/public/results/sync?animalImage=")
   );
@@ -472,12 +475,29 @@ export async function ensureCustomCatalogLoaded(): Promise<MockStore["animal_ima
     try {
       const items = await loadCustomAnimalCatalog();
       if (items.length > 0) {
-        const mapped: MockStore["animal_images"] = items.map((item) => ({
-          id: item.id ?? `img-${item.game_id}-${item.animal_number}`,
-          game_id: item.game_id,
-          animal_number: item.animal_number,
-          image_url: item.image_url,
-        }));
+        const mapped: MockStore["animal_images"] = [];
+        for (const item of items) {
+          mapped.push({
+            id: item.id ?? `img-${item.game_id}-${item.animal_number}`,
+            game_id: item.game_id,
+            animal_number: item.animal_number,
+            image_url: item.image_url,
+          });
+          const canonicalSlug = GAME_ID_TO_SLUG[item.game_id];
+          if (canonicalSlug && Array.isArray(mockStore?.games)) {
+            const activeGame = mockStore.games.find(
+              (g) => normalizeGameSlug(g.slug, g.name) === canonicalSlug,
+            );
+            if (activeGame && activeGame.id !== item.game_id) {
+              mapped.push({
+                id: `img-${activeGame.id}-${item.animal_number}`,
+                game_id: activeGame.id,
+                animal_number: item.animal_number,
+                image_url: item.image_url,
+              });
+            }
+          }
+        }
         const merged = mergeAnimalImagesPreserveCustom(mockStore.animal_images, mapped);
         mockStore.animal_images = merged;
         if (typeof window !== "undefined") {

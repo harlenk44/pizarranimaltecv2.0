@@ -39,7 +39,12 @@ import {
   formatClientLicenseName,
   ALL_AVAILABLE_LOTTERIES,
 } from "@/lib/license-lotteries";
-import { resolveCanonicalAnimal, parseCanonicalAnimalNumber } from "@/lib/official-animals";
+import {
+  resolveCanonicalAnimal,
+  parseCanonicalAnimalNumber,
+  SLUG_TO_GAME_ID,
+} from "@/lib/official-animals";
+import { getEmbeddedCatalogImageUrl } from "@/lib/custom-animal-catalog";
 import { getGameLogo, isBrokenExternalLogo, isCustomUploadedGameLogo } from "@/lib/game-logos";
 import {
   TRIPLE_GAMES,
@@ -312,6 +317,15 @@ function noStoreJson(payload: unknown, init?: ResponseInit): Response {
   headers.set("Pragma", "no-cache");
   headers.set("Expires", "0");
   return Response.json(payload, { ...init, headers });
+}
+
+function edgeCachedPollJson(payload: unknown, isPoll: boolean, forceCloudSync: boolean): Response {
+  if (!isPoll || forceCloudSync) {
+    return noStoreJson(payload);
+  }
+  const headers = new Headers();
+  headers.set("Cache-Control", "public, max-age=8, s-maxage=12, stale-while-revalidate=15");
+  return Response.json(payload, { headers });
 }
 
 function packMasterNotesWithRequire(requireLicense: boolean): string {
@@ -2073,12 +2087,12 @@ async function syncAppSettingsWithSupabase(force = false): Promise<void> {
 
 let lastAutoSyncTimestamp = 0;
 let autoSyncInFlightPromise: Promise<void> | null = null;
-const AUTO_SYNC_INTERVAL_MS = 15_000;
+const AUTO_SYNC_INTERVAL_MS = 25_000;
 
 let lastTriplesSyncTimestamp = 0;
 let triplesFastSyncPromise: Promise<{ newlyAdded: TripleResult[]; newTripleCount: number }> | null =
   null;
-const TRIPLES_SYNC_INTERVAL_MS = 15_000;
+const TRIPLES_SYNC_INTERVAL_MS = 25_000;
 
 const CORE_LDH_ANIMALITO_SLUGS = new Set([
   "guacharo-activo",
@@ -2366,22 +2380,65 @@ async function triggerBackgroundSync(forceWait = false): Promise<void> {
       await syncGamesWithSupabase(false).catch(() => {});
 
       const [
-        { synchronizeAutomaticResults },
+        { synchronizeAutomaticResults, markCloudDrawPersisted },
         { getCachedMultiloteriasItems },
         { synchronizeArrejuntaoOfficialData },
+        { synchronizeGuacharoOfficialData },
+        { synchronizeGuacharitoOfficialData },
+        { synchronizeSelvaPlusOfficialData },
+        { synchronizeLottoActivoOfficialData },
       ] = await Promise.all([
         import("@/lib/result-sync.server"),
         import("@/lib/multiloterias-provider.server"),
         import("@/lib/arrejuntao-provider.server"),
+        import("@/lib/guacharo-provider.server"),
+        import("@/lib/guacharito-provider.server"),
+        import("@/lib/selva-plus-provider.server"),
+        import("@/lib/lotto-activo-provider.server"),
       ]);
 
-      const [reportsSettled, arrejuntaoSettled] = await Promise.allSettled([
+      const [
+        reportsSettled,
+        arrejuntaoSettled,
+        guacharoSettled,
+        guacharitoSettled,
+        selvaPlusSettled,
+        lottoActivoSettled,
+      ] = await Promise.allSettled([
         synchronizeAutomaticResults(),
         synchronizeArrejuntaoOfficialData({
           currentDate: today,
           forceRefresh: forceWait,
           resolveGameId: resolveOfficialGameIdBySlug,
           currentAnimalResults: mockStore.results,
+        }),
+        synchronizeGuacharoOfficialData({
+          currentDate: today,
+          forceRefresh: forceWait,
+          resolveGameId: resolveOfficialGameIdBySlug,
+          currentAnimalResults: mockStore.results,
+          onPersistDraw: markCloudDrawPersisted,
+        }),
+        synchronizeGuacharitoOfficialData({
+          currentDate: today,
+          forceRefresh: forceWait,
+          resolveGameId: resolveOfficialGameIdBySlug,
+          currentAnimalResults: mockStore.results,
+          onPersistDraw: markCloudDrawPersisted,
+        }),
+        synchronizeSelvaPlusOfficialData({
+          currentDate: today,
+          forceRefresh: forceWait,
+          resolveGameId: resolveOfficialGameIdBySlug,
+          currentAnimalResults: mockStore.results,
+          onPersistDraw: markCloudDrawPersisted,
+        }),
+        synchronizeLottoActivoOfficialData({
+          currentDate: today,
+          forceRefresh: forceWait,
+          resolveGameId: resolveOfficialGameIdBySlug,
+          currentAnimalResults: mockStore.results,
+          onPersistDraw: markCloudDrawPersisted,
         }),
         triplesPromise,
         syncLicensesWithSupabase().catch(() => null),
@@ -2397,6 +2454,38 @@ async function triggerBackgroundSync(forceWait = false): Promise<void> {
         if (arrRes.upsertedResults.length > 0) {
           mockStore.results = sanitizeResultsList(
             mergeResultsPreserveToday(mockStore.results, arrRes.upsertedResults),
+          );
+        }
+      }
+      if (guacharoSettled.status === "fulfilled") {
+        const guaRes = guacharoSettled.value;
+        if (guaRes.upsertedResults.length > 0) {
+          mockStore.results = sanitizeResultsList(
+            mergeResultsPreserveToday(mockStore.results, guaRes.upsertedResults),
+          );
+        }
+      }
+      if (guacharitoSettled.status === "fulfilled") {
+        const gtoRes = guacharitoSettled.value;
+        if (gtoRes.upsertedResults.length > 0) {
+          mockStore.results = sanitizeResultsList(
+            mergeResultsPreserveToday(mockStore.results, gtoRes.upsertedResults),
+          );
+        }
+      }
+      if (selvaPlusSettled.status === "fulfilled") {
+        const spRes = selvaPlusSettled.value;
+        if (spRes.upsertedResults.length > 0) {
+          mockStore.results = sanitizeResultsList(
+            mergeResultsPreserveToday(mockStore.results, spRes.upsertedResults),
+          );
+        }
+      }
+      if (lottoActivoSettled.status === "fulfilled") {
+        const laRes = lottoActivoSettled.value;
+        if (laRes.upsertedResults.length > 0) {
+          mockStore.results = sanitizeResultsList(
+            mergeResultsPreserveToday(mockStore.results, laRes.upsertedResults),
           );
         }
       }
@@ -2522,12 +2611,27 @@ function serveOnDemandAnimalImage(animalImageParam: string, labelParam: string):
       (normalizedRawSlug && normalizeGameSlug(g.slug, g.name) === normalizedRawSlug),
   );
   const candidateGameIds = new Set<string>([rawGameKey]);
-  if (normalizedRawSlug) candidateGameIds.add(normalizedRawSlug);
+  if (normalizedRawSlug) {
+    candidateGameIds.add(normalizedRawSlug);
+    const canonicalCatalogUuid = SLUG_TO_GAME_ID[normalizedRawSlug];
+    if (canonicalCatalogUuid) candidateGameIds.add(canonicalCatalogUuid);
+    for (const alias of getGameSlugAliases(normalizedRawSlug)) {
+      candidateGameIds.add(alias);
+      const aliasUuid = SLUG_TO_GAME_ID[alias];
+      if (aliasUuid) candidateGameIds.add(aliasUuid);
+    }
+  }
+  const directCatalogUuid = SLUG_TO_GAME_ID[rawGameKey];
+  if (directCatalogUuid) candidateGameIds.add(directCatalogUuid);
   if (gameObj) {
     candidateGameIds.add(gameObj.id);
     candidateGameIds.add(gameObj.slug);
+    const gameCatalogUuid = SLUG_TO_GAME_ID[gameObj.slug];
+    if (gameCatalogUuid) candidateGameIds.add(gameCatalogUuid);
     for (const alias of getGameSlugAliases(gameObj.slug)) {
       candidateGameIds.add(alias);
+      const aliasUuid = SLUG_TO_GAME_ID[alias];
+      if (aliasUuid) candidateGameIds.add(aliasUuid);
     }
   }
 
@@ -2537,12 +2641,55 @@ function serveOnDemandAnimalImage(animalImageParam: string, labelParam: string):
     );
 
   const isBallena = canonical.label === "00";
+  const isGuacharoFamily =
+    normalizedRawSlug === "guacharo-activo" ||
+    normalizedRawSlug === "el-guacharo" ||
+    normalizedRawSlug === "cazaloton" ||
+    rawGameKey === "01da9c54-392a-45e3-ab66-9a08befe7694";
+
+  // 1a. Buscar primero cualquier imagen personalizada subida por el administrador para este juego
   let matched = mockStore.animal_images.find(
     (img) =>
       candidateGameIds.has(img.game_id) &&
       img.animal_number === canonical.number &&
-      isRealImagePayload(img.image_url),
+      isRealImagePayload(img.image_url) &&
+      !isBaseOrDefaultCatalogImageUrl(img.image_url),
   );
+
+  // 1b. Buscar en el catálogo oficial embebido específico de este juego (UUID canónico de catálogo)
+  const primaryCatalogUuid =
+    (normalizedRawSlug ? SLUG_TO_GAME_ID[normalizedRawSlug] : undefined) ||
+    SLUG_TO_GAME_ID[rawGameKey] ||
+    (gameObj ? SLUG_TO_GAME_ID[gameObj.slug] : undefined);
+
+  if (!matched && primaryCatalogUuid) {
+    const directEmbeddedUrl =
+      getEmbeddedCatalogImageUrl(primaryCatalogUuid, canonical.number) ||
+      (isBallena
+        ? getEmbeddedCatalogImageUrl(
+            primaryCatalogUuid,
+            primaryCatalogUuid === "01da9c54-392a-45e3-ab66-9a08befe7694" ? 76 : 37,
+          ) || getEmbeddedCatalogImageUrl(primaryCatalogUuid, 100)
+        : undefined);
+    if (isRealImagePayload(directEmbeddedUrl)) {
+      matched = {
+        id: `cat-${primaryCatalogUuid}-${canonical.number}`,
+        game_id: primaryCatalogUuid,
+        animal_number: canonical.number,
+        image_url: directEmbeddedUrl,
+      };
+    }
+  }
+
+  // 1c. Buscar en mockStore.animal_images por todos los candidateGameIds de este juego
+  if (!matched) {
+    matched = mockStore.animal_images.find(
+      (img) =>
+        candidateGameIds.has(img.game_id) &&
+        img.animal_number === canonical.number &&
+        isRealImagePayload(img.image_url),
+    );
+  }
 
   if (!matched && isBallena) {
     matched = mockStore.animal_images.find(
@@ -2555,7 +2702,7 @@ function serveOnDemandAnimalImage(animalImageParam: string, labelParam: string):
 
   // Fallback to shared reference catalogs in server RAM if this lottery delegates its animal art
   if (!matched) {
-    const targetNum = isBallena ? 37 : canonical.number;
+    const targetNum = isBallena ? (isGuacharoFamily ? 76 : 37) : canonical.number;
     const granjitaId =
       resolveOfficialGameIdBySlug("la-granjita") || "ca8a0400-0000-4000-8000-000000000006";
     const lottoActivoId =
@@ -2570,35 +2717,43 @@ function serveOnDemandAnimalImage(animalImageParam: string, labelParam: string):
     const lottoReyId =
       resolveOfficialGameIdBySlug("lotto-rey") || "8f3aa087-6a0c-41a1-9ed3-5f6d5ed6918e";
 
-    const fallbackGameIds =
-      targetNum <= 37
+    const fallbackGameIds = isGuacharoFamily
+      ? Array.from(
+          new Set([
+            "01da9c54-392a-45e3-ab66-9a08befe7694",
+            guacharoId,
+            "0519825d-e7ea-4e59-bf7d-cef2c832edd3",
+            guacharitoId,
+          ]),
+        )
+      : targetNum <= 37
         ? Array.from(
             new Set([
-              granjitaId,
-              "ca8a0400-0000-4000-8000-000000000006",
-              lottoActivoId,
               "7d21a00b-0dfa-4bdc-9edf-8115802df1d6",
-              lottoRdId,
+              lottoActivoId,
+              "ca8a0400-0000-4000-8000-000000000006",
+              granjitaId,
               "1e40af00-0000-4000-8000-000000000008",
+              lottoRdId,
             ]),
           )
         : targetNum <= 76
           ? Array.from(
               new Set([
-                guacharoId,
                 "01da9c54-392a-45e3-ab66-9a08befe7694",
-                guacharitoId,
+                guacharoId,
                 "0519825d-e7ea-4e59-bf7d-cef2c832edd3",
-                lottoReyId,
+                guacharitoId,
                 "8f3aa087-6a0c-41a1-9ed3-5f6d5ed6918e",
+                lottoReyId,
               ]),
             )
           : Array.from(
               new Set([
-                guacharitoId,
                 "0519825d-e7ea-4e59-bf7d-cef2c832edd3",
-                lottoReyId,
+                guacharitoId,
                 "8f3aa087-6a0c-41a1-9ed3-5f6d5ed6918e",
+                lottoReyId,
               ]),
             );
 
@@ -2614,6 +2769,16 @@ function serveOnDemandAnimalImage(animalImageParam: string, labelParam: string):
                 fbGameId === "8f3aa087-6a0c-41a1-9ed3-5f6d5ed6918e")
             ? 100
             : targetNum;
+      const embeddedFb = getEmbeddedCatalogImageUrl(fbGameId, fbNum);
+      if (isRealImagePayload(embeddedFb)) {
+        matched = {
+          id: `cat-fb-${fbGameId}-${fbNum}`,
+          game_id: fbGameId,
+          animal_number: fbNum,
+          image_url: embeddedFb,
+        };
+        break;
+      }
       matched = mockStore.animal_images.find(
         (img) =>
           img.game_id === fbGameId &&
@@ -2638,7 +2803,7 @@ function serveOnDemandAnimalImage(animalImageParam: string, labelParam: string):
         status: 200,
         headers: {
           "Content-Type": mimeType,
-          "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
+          "Cache-Control": "public, max-age=604800, s-maxage=604800, immutable",
         },
       });
     }
@@ -2778,40 +2943,44 @@ export const Route = createFileRoute("/api/public/results/sync")({
             : [];
 
         const cloudDiag = getSupabaseCloudDiagnostics();
-        return noStoreJson({
-          status: "ok",
-          serverLotteryDate: serverToday,
-          results: mockStore.results,
-          tripleResults: serverTripleResults,
-          deletedTripleIds: serverDeletedTripleIds,
-          latestAlert,
-          recentAlerts,
-          logosVersion: serverCustomGameLogosVersion,
-          gamesVersion: serverGamesVersion,
-          imagesVersion: serverAnimalImagesVersion,
-          settingsVersion: serverAppSettingsVersion,
-          animalImages: shouldSendImages
-            ? filterAdminCustomAnimalImages(mockStore.animal_images)
-            : null,
-          games: shouldSendGames ? mockStore.games : null,
-          customGameLogos: shouldSendLogos ? serverCustomGameLogos : null,
-          // Always return decoded global appSettings (~400 bytes) so multi-isolate Cloudflare Workers
-          // never skip pushing updated global design changes to Incognito or already-open TV screens.
-          appSettings: mockStore.app_settings[0]
-            ? normalizeAppSettingsRecord(
-                mockStore.app_settings[0] as unknown as Record<string, unknown>,
-              )
-            : null,
-          requireLicense: serverLicenseState.requireLicense,
-          clientLicenses: includeLicenses ? serverLicenseState.licenses : null,
-          deletedIds: includeLicenses ? serverLicenseState.deletedIds || [] : null,
-          deletedPins: includeLicenses ? serverLicenseState.deletedPins || [] : null,
-          cloudLicenseConfigured: cloudDiag.configured,
-          cloudLicenseStorageMode: cloudDiag.configured ? "supabase" : "local-memory",
-          workspaceLicenseFileActive: isWorkspaceLicensesFileActive(),
-          cloudLicenseError: lastCloudLicenseReadError,
-          supabaseError: lastCloudLicenseReadErrorDetails,
-        });
+        return edgeCachedPollJson(
+          {
+            status: "ok",
+            serverLotteryDate: serverToday,
+            results: mockStore.results,
+            tripleResults: serverTripleResults,
+            deletedTripleIds: serverDeletedTripleIds,
+            latestAlert,
+            recentAlerts,
+            logosVersion: serverCustomGameLogosVersion,
+            gamesVersion: serverGamesVersion,
+            imagesVersion: serverAnimalImagesVersion,
+            settingsVersion: serverAppSettingsVersion,
+            animalImages: shouldSendImages
+              ? filterAdminCustomAnimalImages(mockStore.animal_images)
+              : null,
+            games: shouldSendGames ? mockStore.games : null,
+            customGameLogos: shouldSendLogos ? serverCustomGameLogos : null,
+            // Always return decoded global appSettings (~400 bytes) so multi-isolate Cloudflare Workers
+            // never skip pushing updated global design changes to Incognito or already-open TV screens.
+            appSettings: mockStore.app_settings[0]
+              ? normalizeAppSettingsRecord(
+                  mockStore.app_settings[0] as unknown as Record<string, unknown>,
+                )
+              : null,
+            requireLicense: serverLicenseState.requireLicense,
+            clientLicenses: includeLicenses ? serverLicenseState.licenses : null,
+            deletedIds: includeLicenses ? serverLicenseState.deletedIds || [] : null,
+            deletedPins: includeLicenses ? serverLicenseState.deletedPins || [] : null,
+            cloudLicenseConfigured: cloudDiag.configured,
+            cloudLicenseStorageMode: cloudDiag.configured ? "supabase" : "local-memory",
+            workspaceLicenseFileActive: isWorkspaceLicensesFileActive(),
+            cloudLicenseError: lastCloudLicenseReadError,
+            supabaseError: lastCloudLicenseReadErrorDetails,
+          },
+          isPoll,
+          forceCloudSync,
+        );
       },
       POST: async ({ request }) => {
         await ensureCloudflareEnvFromRequest(request);
@@ -2832,12 +3001,30 @@ export const Route = createFileRoute("/api/public/results/sync")({
             }
           }
           await syncGamesWithSupabase(true);
-          const [{ synchronizeAutomaticResults }, { synchronizeArrejuntaoOfficialData }] =
-            await Promise.all([
-              import("@/lib/result-sync.server"),
-              import("@/lib/arrejuntao-provider.server"),
-            ]);
-          const [reportsSettled, , arrejuntaoSettled] = await Promise.allSettled([
+          const [
+            { synchronizeAutomaticResults, markCloudDrawPersisted },
+            { synchronizeArrejuntaoOfficialData },
+            { synchronizeGuacharoOfficialData },
+            { synchronizeGuacharitoOfficialData },
+            { synchronizeSelvaPlusOfficialData },
+            { synchronizeLottoActivoOfficialData },
+          ] = await Promise.all([
+            import("@/lib/result-sync.server"),
+            import("@/lib/arrejuntao-provider.server"),
+            import("@/lib/guacharo-provider.server"),
+            import("@/lib/guacharito-provider.server"),
+            import("@/lib/selva-plus-provider.server"),
+            import("@/lib/lotto-activo-provider.server"),
+          ]);
+          const [
+            reportsSettled,
+            ,
+            arrejuntaoSettled,
+            guacharoSettled,
+            guacharitoSettled,
+            selvaPlusSettled,
+            lottoActivoSettled,
+          ] = await Promise.allSettled([
             synchronizeAutomaticResults(),
             syncTriplesFast(true),
             synchronizeArrejuntaoOfficialData({
@@ -2845,6 +3032,34 @@ export const Route = createFileRoute("/api/public/results/sync")({
               forceRefresh: true,
               resolveGameId: resolveOfficialGameIdBySlug,
               currentAnimalResults: mockStore.results,
+            }),
+            synchronizeGuacharoOfficialData({
+              currentDate: lotteryDate(),
+              forceRefresh: true,
+              resolveGameId: resolveOfficialGameIdBySlug,
+              currentAnimalResults: mockStore.results,
+              onPersistDraw: markCloudDrawPersisted,
+            }),
+            synchronizeGuacharitoOfficialData({
+              currentDate: lotteryDate(),
+              forceRefresh: true,
+              resolveGameId: resolveOfficialGameIdBySlug,
+              currentAnimalResults: mockStore.results,
+              onPersistDraw: markCloudDrawPersisted,
+            }),
+            synchronizeSelvaPlusOfficialData({
+              currentDate: lotteryDate(),
+              forceRefresh: true,
+              resolveGameId: resolveOfficialGameIdBySlug,
+              currentAnimalResults: mockStore.results,
+              onPersistDraw: markCloudDrawPersisted,
+            }),
+            synchronizeLottoActivoOfficialData({
+              currentDate: lotteryDate(),
+              forceRefresh: true,
+              resolveGameId: resolveOfficialGameIdBySlug,
+              currentAnimalResults: mockStore.results,
+              onPersistDraw: markCloudDrawPersisted,
             }),
           ]);
           const reports = reportsSettled.status === "fulfilled" ? reportsSettled.value : [];
@@ -2856,6 +3071,38 @@ export const Route = createFileRoute("/api/public/results/sync")({
             if (arrRes.upsertedResults.length > 0) {
               mockStore.results = sanitizeResultsList(
                 mergeResultsPreserveToday(mockStore.results, arrRes.upsertedResults),
+              );
+            }
+          }
+          if (guacharoSettled.status === "fulfilled") {
+            const guaRes = guacharoSettled.value;
+            if (guaRes.upsertedResults.length > 0) {
+              mockStore.results = sanitizeResultsList(
+                mergeResultsPreserveToday(mockStore.results, guaRes.upsertedResults),
+              );
+            }
+          }
+          if (guacharitoSettled.status === "fulfilled") {
+            const gtoRes = guacharitoSettled.value;
+            if (gtoRes.upsertedResults.length > 0) {
+              mockStore.results = sanitizeResultsList(
+                mergeResultsPreserveToday(mockStore.results, gtoRes.upsertedResults),
+              );
+            }
+          }
+          if (selvaPlusSettled.status === "fulfilled") {
+            const spRes = selvaPlusSettled.value;
+            if (spRes.upsertedResults.length > 0) {
+              mockStore.results = sanitizeResultsList(
+                mergeResultsPreserveToday(mockStore.results, spRes.upsertedResults),
+              );
+            }
+          }
+          if (lottoActivoSettled.status === "fulfilled") {
+            const laRes = lottoActivoSettled.value;
+            if (laRes.upsertedResults.length > 0) {
+              mockStore.results = sanitizeResultsList(
+                mergeResultsPreserveToday(mockStore.results, laRes.upsertedResults),
               );
             }
           }

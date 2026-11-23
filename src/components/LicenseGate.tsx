@@ -204,100 +204,32 @@ export default function LicenseGate({
   };
 
   const lastLicensesJsonRef = useRef<string>("");
+  const lastBoardPayloadAtRef = useRef<number>(0);
   const syncVersionsRef = useRef<{ logos: number; games: number; images: number }>({
     logos: 1,
     games: 0,
-    images: 1,
+    images: 0,
   });
 
-  const syncLicenseState = useCallback(async () => {
-    try {
-      const sbDirectPromise = hasExternalSupabaseConfigured()
-        ? Promise.resolve(supabase.from("licenses").select("*"))
-            .then((r) => (!r.error && Array.isArray(r.data) ? r.data : null))
-            .catch(() => null)
-        : Promise.resolve(null);
-
-      const q = new URLSearchParams();
-      q.set("includeLicenses", "1");
-      if (syncVersionsRef.current.logos) {
-        q.set("logosVersion", String(syncVersionsRef.current.logos));
-      }
-      if (syncVersionsRef.current.games) {
-        q.set("gamesVersion", String(syncVersionsRef.current.games));
-      }
-      if (syncVersionsRef.current.images) {
-        q.set("imagesVersion", String(syncVersionsRef.current.images));
-      }
-
-      const [res, sbRows] = await Promise.all([
-        fetch(`/api/public/results/sync?${q.toString()}`, { cache: "no-store" }).catch(() => null),
-        sbDirectPromise,
-      ]);
-
-      const data = res && res.ok ? await res.json() : null;
+  const applyIncomingLicensePayload = useCallback(
+    (data: Record<string, unknown> | null, sbRows: unknown[] | null) => {
       if (data) {
-        if (data.logosVersion) syncVersionsRef.current.logos = Number(data.logosVersion);
-        if (data.gamesVersion) syncVersionsRef.current.games = Number(data.gamesVersion);
-        if (data.imagesVersion) syncVersionsRef.current.images = Number(data.imagesVersion);
-      }
-      if (data?.customGameLogos && typeof data.customGameLogos === "object") {
-        mergeCustomGameLogosMap(data.customGameLogos as Record<string, string>);
-      }
-      if (data && Array.isArray(data.games) && data.games.length > 0) {
-        const serverGames = data.games as Game[];
-        const serverIds = new Set(serverGames.map((g) => g.id));
-        const prunedLocal = mockStore.games.filter((g) => serverIds.has(g.id));
-        mockStore.games = mergeGamesPreserveCustomLogos(prunedLocal, serverGames);
-        try {
-          localStorage.setItem("pizarra_persisted_games", JSON.stringify(mockStore.games));
-        } catch {
-          // ignore
-        }
-      }
-      const todayDate = lotteryDate();
-      if (data && Array.isArray(data.results) && data.results.length > 0) {
-        mockStore.results = mergeResultsPreserveToday(
-          mockStore.results,
-          data.results as Result[],
-          todayDate,
-        );
-        try {
-          localStorage.setItem("pizarra_mock_results", JSON.stringify(mockStore.results));
-        } catch {
-          // ignore
-        }
-      }
-      if (data && Array.isArray(data.tripleResults) && data.tripleResults.length > 0) {
-        try {
-          const existingRaw = localStorage.getItem("pizarra_triple_results");
-          const existingList = existingRaw ? (JSON.parse(existingRaw) as TripleResult[]) : [];
-          const deletedTripleIds = Array.isArray(data.deletedTripleIds)
-            ? (data.deletedTripleIds as string[])
-            : [];
-          const mergedTriples = mergeTripleResultsPreserveToday(
-            Array.isArray(existingList) ? existingList : [],
-            data.tripleResults as TripleResult[],
-            todayDate,
-            deletedTripleIds,
-          );
-          localStorage.setItem("pizarra_triple_results", JSON.stringify(mergedTriples));
-        } catch {
-          // ignore
-        }
-      }
-      if (data && typeof window !== "undefined") {
-        (window as unknown as Record<string, unknown>)["__PIZARRA_LAST_SYNC_DATA__"] = data;
-        window.dispatchEvent(new CustomEvent("pizarra:server-sync-payload", { detail: data }));
+        if (data["logosVersion"]) syncVersionsRef.current.logos = Number(data["logosVersion"]);
+        if (data["gamesVersion"]) syncVersionsRef.current.games = Number(data["gamesVersion"]);
+        if (data["imagesVersion"]) syncVersionsRef.current.images = Number(data["imagesVersion"]);
       }
 
       let nextRequire =
-        data && typeof data.requireLicense === "boolean" ? data.requireLicense : true;
+        data && typeof data["requireLicense"] === "boolean"
+          ? (data["requireLicense"] as boolean)
+          : true;
       let serverList: ClientLicense[] =
-        data && Array.isArray(data.clientLicenses) ? [...data.clientLicenses] : [];
+        data && Array.isArray(data["clientLicenses"])
+          ? [...(data["clientLicenses"] as ClientLicense[])]
+          : [];
       let latestGlobalSettings: Partial<AppSettings> | null =
-        data?.appSettings && typeof data.appSettings === "object"
-          ? (data.appSettings as Partial<AppSettings>)
+        data?.["appSettings"] && typeof data["appSettings"] === "object"
+          ? (data["appSettings"] as Partial<AppSettings>)
           : null;
 
       if (Array.isArray(sbRows) && sbRows.length > 0) {
@@ -340,15 +272,18 @@ export default function LicenseGate({
         updateSettings(latestGlobalSettings);
       }
 
-      if (data || (Array.isArray(sbRows) && sbRows.length > 0)) {
+      const hasLicenseData =
+        (data && Array.isArray(data["clientLicenses"])) ||
+        (Array.isArray(sbRows) && sbRows.length > 0);
+      if (hasLicenseData) {
         setRequireLicense((prev) => (prev === nextRequire ? prev : nextRequire));
         const reconciled = reconcileClientLicensesWithLocal(
           serverList,
-          data?.deletedIds,
-          data?.deletedPins,
+          Array.isArray(data?.["deletedIds"]) ? (data?.["deletedIds"] as string[]) : undefined,
+          Array.isArray(data?.["deletedPins"]) ? (data?.["deletedPins"] as string[]) : undefined,
           {
             allowOverrideServer: false,
-            preserveLocalOnEphemeralServer: data?.cloudLicenseConfigured === false,
+            preserveLocalOnEphemeralServer: data?.["cloudLicenseConfigured"] === false,
           },
         );
         const nextJson = JSON.stringify(reconciled.licenses);
@@ -358,36 +293,146 @@ export default function LicenseGate({
         }
         saveLocalLicensesSnapshot(nextRequire, reconciled.licenses);
       }
-    } catch {
-      try {
-        const raw = localStorage.getItem(LICENSE_CACHE_STORAGE_KEY);
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (typeof parsed.requireLicense === "boolean") {
-            setRequireLicense((prev) =>
-              prev === parsed.requireLicense ? prev : parsed.requireLicense,
-            );
-          }
-          if (Array.isArray(parsed.licenses)) {
-            const nextList = reconcileClientLicensesWithLocal(parsed.licenses).licenses;
-            const nextJson = JSON.stringify(nextList);
-            if (lastLicensesJsonRef.current !== nextJson) {
-              lastLicensesJsonRef.current = nextJson;
-              setLicenses(nextList);
+    },
+    [updateSettings],
+  );
+
+  const syncLicenseState = useCallback(
+    async (force = false) => {
+      if (!force && typeof document !== "undefined" && document.visibilityState === "hidden") {
+        return;
+      }
+      // If BoardPage already synced within the last 45s, avoid redundant Cloudflare Worker invocation
+      if (!force && Date.now() - lastBoardPayloadAtRef.current < 45_000) {
+        if (hasExternalSupabaseConfigured()) {
+          try {
+            const r = await supabase.from("licenses").select("*");
+            if (!r.error && Array.isArray(r.data) && r.data.length > 0) {
+              applyIncomingLicensePayload(null, r.data);
             }
+          } catch {
+            // ignore
           }
         }
-      } catch {
-        // ignore
+        return;
       }
-    } finally {
-      setInitialLoaded((prev) => (prev ? prev : true));
-    }
-  }, [updateSettings]);
+
+      try {
+        const sbDirectPromise = hasExternalSupabaseConfigured()
+          ? Promise.resolve(supabase.from("licenses").select("*"))
+              .then((r) => (!r.error && Array.isArray(r.data) ? r.data : null))
+              .catch(() => null)
+          : Promise.resolve(null);
+
+        const q = new URLSearchParams();
+        q.set("includeLicenses", "1");
+        if (!force) {
+          q.set("poll", "1");
+        }
+        if (syncVersionsRef.current.logos) {
+          q.set("logosVersion", String(syncVersionsRef.current.logos));
+        }
+        if (syncVersionsRef.current.games) {
+          q.set("gamesVersion", String(syncVersionsRef.current.games));
+        }
+        if (syncVersionsRef.current.images) {
+          q.set("imagesVersion", String(syncVersionsRef.current.images));
+        }
+
+        const [res, sbRows] = await Promise.all([
+          fetch(
+            `/api/public/results/sync?${q.toString()}`,
+            force ? { cache: "no-store" } : undefined,
+          ).catch(() => null),
+          sbDirectPromise,
+        ]);
+
+        const data = res && res.ok ? await res.json() : null;
+        if (data?.customGameLogos && typeof data.customGameLogos === "object") {
+          mergeCustomGameLogosMap(data.customGameLogos as Record<string, string>);
+        }
+        if (data && Array.isArray(data.games) && data.games.length > 0) {
+          const serverGames = data.games as Game[];
+          const serverIds = new Set(serverGames.map((g) => g.id));
+          const prunedLocal = mockStore.games.filter((g) => serverIds.has(g.id));
+          mockStore.games = mergeGamesPreserveCustomLogos(prunedLocal, serverGames);
+          try {
+            localStorage.setItem("pizarra_persisted_games", JSON.stringify(mockStore.games));
+          } catch {
+            // ignore
+          }
+        }
+        const todayDate = lotteryDate();
+        if (data && Array.isArray(data.results) && data.results.length > 0) {
+          mockStore.results = mergeResultsPreserveToday(
+            mockStore.results,
+            data.results as Result[],
+            todayDate,
+          );
+          try {
+            localStorage.setItem("pizarra_mock_results", JSON.stringify(mockStore.results));
+          } catch {
+            // ignore
+          }
+        }
+        if (data && Array.isArray(data.tripleResults) && data.tripleResults.length > 0) {
+          try {
+            const existingRaw = localStorage.getItem("pizarra_triple_results");
+            const existingList = existingRaw ? (JSON.parse(existingRaw) as TripleResult[]) : [];
+            const deletedTripleIds = Array.isArray(data.deletedTripleIds)
+              ? (data.deletedTripleIds as string[])
+              : [];
+            const mergedTriples = mergeTripleResultsPreserveToday(
+              Array.isArray(existingList) ? existingList : [],
+              data.tripleResults as TripleResult[],
+              todayDate,
+              deletedTripleIds,
+            );
+            localStorage.setItem("pizarra_triple_results", JSON.stringify(mergedTriples));
+          } catch {
+            // ignore
+          }
+        }
+        if (data && typeof window !== "undefined") {
+          (window as unknown as Record<string, unknown>)["__PIZARRA_LAST_SYNC_DATA__"] = data;
+          window.dispatchEvent(new CustomEvent("pizarra:server-sync-payload", { detail: data }));
+        }
+
+        applyIncomingLicensePayload(data, sbRows);
+      } catch {
+        try {
+          const raw = localStorage.getItem(LICENSE_CACHE_STORAGE_KEY);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (typeof parsed.requireLicense === "boolean") {
+              setRequireLicense((prev) =>
+                prev === parsed.requireLicense ? prev : parsed.requireLicense,
+              );
+            }
+            if (Array.isArray(parsed.licenses)) {
+              const nextList = reconcileClientLicensesWithLocal(parsed.licenses).licenses;
+              const nextJson = JSON.stringify(nextList);
+              if (lastLicensesJsonRef.current !== nextJson) {
+                lastLicensesJsonRef.current = nextJson;
+                setLicenses(nextList);
+              }
+            }
+          }
+        } catch {
+          // ignore
+        }
+      } finally {
+        setInitialLoaded((prev) => (prev ? prev : true));
+      }
+    },
+    [applyIncomingLicensePayload],
+  );
 
   useEffect(() => {
-    syncLicenseState();
-    const timer = setInterval(syncLicenseState, 10000);
+    void syncLicenseState(true);
+    const timer = setInterval(() => {
+      void syncLicenseState(false);
+    }, 60_000);
     let bc: BroadcastChannel | null = null;
     try {
       bc = new BroadcastChannel("pizarra_lottery_channel");
@@ -396,14 +441,26 @@ export default function LicenseGate({
           event.data?.type === "LICENSES_UPDATED" ||
           event.data?.type === "APP_SETTINGS_UPDATED"
         ) {
-          syncLicenseState();
+          void syncLicenseState(true);
         }
       };
     } catch {
       // ignore
     }
     const handleLocalLicenseEvent = () => {
-      syncLicenseState();
+      void syncLicenseState(true);
+    };
+    const handleServerSyncFromBoard = (ev: Event) => {
+      const payload = (ev as CustomEvent<Record<string, unknown>>).detail;
+      if (payload && payload["__fromBoardPage"] === true) {
+        lastBoardPayloadAtRef.current = Date.now();
+        applyIncomingLicensePayload(payload, null);
+      }
+    };
+    const handleVisibilityChange = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        void syncLicenseState(false);
+      }
     };
     const handleStorage = (e: StorageEvent) => {
       if (
@@ -411,18 +468,22 @@ export default function LicenseGate({
         e.key === "pizarra_license_overrides_v3" ||
         e.key === "pizarra_client_licenses_cache_v2"
       ) {
-        syncLicenseState();
+        void syncLicenseState(true);
       }
     };
     window.addEventListener("pizarra:licenses-updated", handleLocalLicenseEvent);
+    window.addEventListener("pizarra:server-sync-payload", handleServerSyncFromBoard);
     window.addEventListener("storage", handleStorage);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       clearInterval(timer);
       bc?.close();
       window.removeEventListener("pizarra:licenses-updated", handleLocalLicenseEvent);
+      window.removeEventListener("pizarra:server-sync-payload", handleServerSyncFromBoard);
       window.removeEventListener("storage", handleStorage);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [syncLicenseState]);
+  }, [applyIncomingLicensePayload, syncLicenseState]);
 
   // Listen for custom event when user clicks "Licencia" button on the board header to open PIN screen
   useEffect(() => {
