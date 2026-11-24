@@ -416,9 +416,9 @@ const ScheduleCell = memo(function ScheduleCell({
 }) {
   return (
     <div
-      className={`fluid-schedule-cell h-full w-full min-h-0 min-w-0 overflow-hidden ${
-        hasResult ? "shadow-sm" : "opacity-85"
-      }`}
+      className={`fluid-schedule-cell ${
+        isExpandedCard ? "fluid-schedule-cell--expanded" : "fluid-schedule-cell--compact"
+      } h-full w-full min-h-0 min-w-0 overflow-hidden ${hasResult ? "shadow-sm" : "opacity-85"}`}
       style={{
         backgroundColor: hasResult
           ? resultRowColor || "rgba(10, 10, 10, 0.9)"
@@ -466,13 +466,7 @@ const ScheduleCell = memo(function ScheduleCell({
               >
                 {displayNum}
               </span>
-              <span
-                className="text-slate-300 font-bold uppercase truncate max-w-full mt-0.5"
-                style={{
-                  fontSize:
-                    "calc(clamp(0.42rem, min(0.95vh, 0.65vw), 0.7rem) * var(--display-font-scale, 1) * var(--card-cell-scale, 1))",
-                }}
-              >
+              <span className="fluid-cell-animal-name text-slate-300 font-bold uppercase truncate max-w-full mt-0.5">
                 {cellName}
               </span>
             </div>

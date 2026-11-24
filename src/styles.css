@@ -495,6 +495,47 @@
   line-height: 1.05;
   margin-top: 1px;
 }
+
+/* Animalito schedule cell typography scales (keeps exact box dimensions & aspect ratio) */
+.fluid-schedule-cell--compact .fluid-cell-time {
+  font-size: calc(
+    clamp(0.5rem, min(1.25vh, 0.75vw), 0.85rem) * var(--display-font-scale, 1) *
+      var(--card-cell-scale, 1) * 1.25
+  );
+  line-height: 1.02;
+}
+
+.fluid-schedule-cell--compact .fluid-cell-result {
+  font-size: calc(
+    clamp(0.65rem, min(1.65vh, 1vw), 1.15rem) * var(--display-font-scale, 1) *
+      var(--card-cell-scale, 1) * 1.55
+  );
+  line-height: 1;
+}
+
+.fluid-schedule-cell--expanded .fluid-cell-time {
+  font-size: calc(
+    clamp(0.5rem, min(1.25vh, 0.75vw), 0.85rem) * var(--display-font-scale, 1) *
+      var(--card-cell-scale, 1) * 1.15
+  );
+  line-height: 1.02;
+}
+
+.fluid-schedule-cell--expanded .fluid-cell-result {
+  font-size: calc(
+    clamp(0.65rem, min(1.65vh, 1vw), 1.15rem) * var(--display-font-scale, 1) *
+      var(--card-cell-scale, 1) * 1.2
+  );
+  line-height: 1;
+}
+
+.fluid-schedule-cell--expanded .fluid-cell-animal-name {
+  font-size: calc(
+    clamp(0.42rem, min(0.95vh, 0.65vw), 0.7rem) * var(--display-font-scale, 1) *
+      var(--card-cell-scale, 1) * 1.15
+  );
+  line-height: 1.05;
+}
 .display-week-table {
   min-width: max(100%, calc(170px + var(--display-logo) + 7 * 190px * var(--display-scale)));
 }

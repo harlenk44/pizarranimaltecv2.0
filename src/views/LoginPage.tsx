@@ -3,7 +3,7 @@ import { useAuth } from "@/context/AuthContext";
 import { ShieldCheck, Lock, Loader2, ArrowRight, AlertCircle } from "lucide-react";
 
 export default function LoginPage() {
-  const { signIn } = useAuth();
+  const { signInWithAdminPin } = useAuth();
   const [pin, setPin] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -13,14 +13,9 @@ export default function LoginPage() {
     setError(null);
     setBusy(true);
 
-    const clean = pin.trim();
-    const customPin = typeof window !== "undefined" ? localStorage.getItem("admin_pin") : null;
-    const isAuthorized = clean === (customPin || "291007") || clean === "291007";
-
-    if (isAuthorized) {
-      await signIn("m4rl0nh3rn4nd3z@gmail.com", "admin123");
-    } else {
-      setError("PIN de Administrador incorrecto.");
+    const { error: loginError } = await signInWithAdminPin(pin);
+    if (loginError) {
+      setError(loginError);
     }
     setBusy(false);
   }
