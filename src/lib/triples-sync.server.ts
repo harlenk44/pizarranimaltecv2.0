@@ -5,7 +5,24 @@ import {
 } from "@/lib/triples-parser";
 import { fetchArrejuntaoDirectTriples } from "@/lib/arrejuntao-provider.server";
 import type { TripleResult } from "@/lib/triples";
-import { lotteryDate } from "@/lib/lottery-date";
+import { isFutureLotteryDrawTime, lotteryDate } from "@/lib/lottery-date";
+
+function filterStaleTripleResults(items: TripleResult[], drawDate: string): TripleResult[] {
+  const todayVe = lotteryDate();
+  if (drawDate !== todayVe || items.length === 0) return items;
+  const now = new Date();
+  const staleGames = new Set<string>();
+  for (const item of items) {
+    if (isFutureLotteryDrawTime(item.draw_date, item.draw_time, now, 15)) {
+      staleGames.add((item.game_slug || item.game_id || "").toLowerCase());
+    }
+  }
+  return items.filter((item) => {
+    const key = (item.game_slug || item.game_id || "").toLowerCase();
+    if (staleGames.has(key)) return false;
+    return !isFutureLotteryDrawTime(item.draw_date, item.draw_time, now);
+  });
+}
 
 export const LOTERIADEHOY_TRIPLES_URL = "https://loteriadehoy.com/loterias/resultados/";
 export const TUAZAR_TRIPLES_PRIMARY_URL = "https://tuazar.com/loteria/resultados/";
@@ -102,7 +119,10 @@ export async function fetchLoteriaDeHoyTriples(
   const run = (async () => {
     try {
       const html = await fetchHtmlOnce(LOTERIADEHOY_TRIPLES_URL, FETCH_TIMEOUT_MS);
-      const parsed = parseLoteriaDeHoyTriplesHtml(html, drawDate);
+      const parsed = filterStaleTripleResults(
+        parseLoteriaDeHoyTriplesHtml(html, drawDate),
+        drawDate,
+      );
       if (parsed.length === 0 && ldhTriplesCache?.promise === run) {
         ldhTriplesCache = null;
       }
@@ -137,12 +157,15 @@ export async function fetchTuAzarTriples(
   const run = (async () => {
     try {
       const html = await fetchHtmlOnce(TUAZAR_TRIPLES_PRIMARY_URL, FETCH_TIMEOUT_MS);
-      const parsed = parseTuazarTriplesHtml(html, drawDate);
+      const parsed = filterStaleTripleResults(parseTuazarTriplesHtml(html, drawDate), drawDate);
       if (parsed.length > 0) return parsed;
     } catch (primaryErr) {
       try {
         const fallbackHtml = await fetchHtmlOnce(TUAZAR_TRIPLES_FALLBACK_URL, FALLBACK_TIMEOUT_MS);
-        const parsed = parseTuazarTriplesHtml(fallbackHtml, drawDate);
+        const parsed = filterStaleTripleResults(
+          parseTuazarTriplesHtml(fallbackHtml, drawDate),
+          drawDate,
+        );
         if (parsed.length > 0) return parsed;
       } catch (fallbackErr) {
         if (!isTransientFetchError(primaryErr) && !isTransientFetchError(fallbackErr)) {

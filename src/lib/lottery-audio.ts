@@ -271,42 +271,53 @@ export function playLotteryChime(): Promise<void> {
       return;
     }
 
-    try {
-      const ctx = getSharedAudioContext();
-      if (!ctx) {
+    (async () => {
+      try {
+        const ctx = getSharedAudioContext();
+        if (!ctx) {
+          resolve();
+          return;
+        }
+
+        if (ctx.state === "suspended") {
+          await Promise.race([
+            ctx.resume().catch(() => {}),
+            new Promise<void>((r) => setTimeout(r, 150)),
+          ]);
+        }
+
+        // If browser autoplay policy keeps AudioContext suspended, don't stall silently for 450ms
+        if (ctx.state !== "running") {
+          resolve();
+          return;
+        }
+
+        const notas = [523.25, 659.25, 783.99, 1046.5]; // Acorde Do Mayor (C5, E5, G5, C6)
+
+        notas.forEach((frecuencia, idx) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+
+          osc.type = "triangle";
+          osc.frequency.setValueAtTime(frecuencia, ctx.currentTime + idx * 0.11);
+
+          gain.gain.setValueAtTime(0.18, ctx.currentTime + idx * 0.11);
+          gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + idx * 0.11 + 0.35);
+
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+
+          osc.start(ctx.currentTime + idx * 0.11);
+          osc.stop(ctx.currentTime + idx * 0.11 + 0.35);
+        });
+
+        setTimeout(() => {
+          resolve();
+        }, 450);
+      } catch {
         resolve();
-        return;
       }
-
-      if (ctx.state === "suspended") {
-        ctx.resume().catch(() => {});
-      }
-
-      const notas = [523.25, 659.25, 783.99, 1046.5]; // Acorde Do Mayor (C5, E5, G5, C6)
-
-      notas.forEach((frecuencia, idx) => {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-
-        osc.type = "triangle";
-        osc.frequency.setValueAtTime(frecuencia, ctx.currentTime + idx * 0.11);
-
-        gain.gain.setValueAtTime(0.18, ctx.currentTime + idx * 0.11);
-        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + idx * 0.11 + 0.35);
-
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-
-        osc.start(ctx.currentTime + idx * 0.11);
-        osc.stop(ctx.currentTime + idx * 0.11 + 0.35);
-      });
-
-      setTimeout(() => {
-        resolve();
-      }, 450);
-    } catch {
-      resolve();
-    }
+    })();
   });
 }
 
@@ -802,51 +813,66 @@ export function playNaturalSpanishAudio(
         return;
       }
 
-      // 1. Primary Playback: Unified Web Audio API (same AudioContext used by the 4-note chime)
+      // 1. Primary Playback: Unified Web Audio API (ONLY when AudioContext is actively running)
       const ctx = getSharedAudioContext();
       if (ctx && typeof ctx.decodeAudioData === "function") {
         try {
           if (ctx.state === "suspended") {
-            await ctx.resume().catch(() => {});
+            await Promise.race([
+              ctx.resume().catch(() => {}),
+              new Promise<void>((r) => setTimeout(r, 250)),
+            ]);
           }
-          // Clone buffer with .slice(0) so cached ArrayBuffer is never detached by decodeAudioData
-          const decodedAudio = await ctx.decodeAudioData(rawBuffer.slice(0));
-          if (myToken !== activeSpeechToken) {
-            resolve(false);
+          if (ctx.state === "running") {
+            // Clone buffer with .slice(0) so cached ArrayBuffer is never detached by decodeAudioData
+            const decodedAudio = await ctx.decodeAudioData(rawBuffer.slice(0));
+            if (myToken !== activeSpeechToken) {
+              resolve(false);
+              return;
+            }
+
+            const source = ctx.createBufferSource();
+            source.buffer = decodedAudio;
+            source.playbackRate.value = clampedRate;
+
+            const gainNode = ctx.createGain();
+            gainNode.gain.value = 1.0;
+            source.connect(gainNode);
+            gainNode.connect(ctx.destination);
+
+            currentBufferSource = source;
+            let settled = false;
+            const safetyMs = Math.max(
+              4000,
+              Math.ceil((decodedAudio.duration / clampedRate) * 1000) + 2500,
+            );
+            const safetyTimer = setTimeout(() => {
+              finish(true);
+            }, safetyMs);
+
+            const finish = (ok: boolean) => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(safetyTimer);
+              if (currentBufferSource === source) {
+                currentBufferSource = null;
+              }
+              if (myToken === activeSpeechToken) {
+                onEnd?.();
+              }
+              resolve(ok);
+            };
+
+            source.onended = () => finish(true);
+
+            if (myToken === activeSpeechToken) {
+              onStart?.();
+            }
+            source.start(0);
             return;
           }
-
-          const source = ctx.createBufferSource();
-          source.buffer = decodedAudio;
-          source.playbackRate.value = clampedRate;
-
-          const gainNode = ctx.createGain();
-          gainNode.gain.value = 1.0;
-          source.connect(gainNode);
-          gainNode.connect(ctx.destination);
-
-          currentBufferSource = source;
-          let settled = false;
-
-          source.onended = () => {
-            if (settled) return;
-            settled = true;
-            if (currentBufferSource === source) {
-              currentBufferSource = null;
-            }
-            if (myToken === activeSpeechToken) {
-              onEnd?.();
-            }
-            resolve(true);
-          };
-
-          if (myToken === activeSpeechToken) {
-            onStart?.();
-          }
-          source.start(0);
-          return;
         } catch {
-          // If decodeAudioData fails on a specific platform, fall through to Blob Audio fallback
+          // If decodeAudioData fails or AudioContext stays suspended, fall through to HTMLAudioElement
         }
       }
 

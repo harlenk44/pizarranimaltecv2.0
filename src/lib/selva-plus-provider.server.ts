@@ -8,7 +8,7 @@ import {
 } from "@/lib/official-animals";
 import type { AutomaticDraw, ResultsProvider, SyncGame } from "@/lib/result-sync";
 import { createRealSupabaseAdminClient } from "@/integrations/supabase/client.server";
-import { lotteryDate } from "@/lib/lottery-date";
+import { isFutureLotteryDrawTime, lotteryDate } from "@/lib/lottery-date";
 
 export const SELVA_PLUS_API_BASE_URL = "https://api.lotterly.co/v1/results/selva-plus/";
 
@@ -327,6 +327,9 @@ export async function synchronizeSelvaPlusOfficialData(options?: {
   let supabaseWritten = 0;
 
   for (const draw of payload.draws) {
+    if (isFutureLotteryDrawTime(draw.drawDate, draw.drawTime)) {
+      continue;
+    }
     const existingManual = options?.currentAnimalResults?.find(
       (r) =>
         r.game_id === officialGameId &&

@@ -22,7 +22,7 @@ import { mockStore, mergeGamesPreserveCustomLogos, mergeResultsPreserveToday } f
 import { mergeCustomGameLogosMap } from "@/lib/game-logos";
 import { mergeTripleResultsPreserveToday, type TripleResult } from "@/lib/triples";
 import { lotteryDate } from "@/lib/lottery-date";
-import { supabase } from "@/integrations/supabase/client";
+import { isExternalSupabaseActive, supabase } from "@/integrations/supabase/client";
 import {
   parseClientLicenseName,
   isLotteryPermitted,
@@ -42,14 +42,7 @@ import {
 } from "@/context/LicenseContext";
 
 function hasExternalSupabaseConfigured(): boolean {
-  const sbUrl = import.meta.env["VITE_SUPABASE_URL"];
-  return (
-    typeof sbUrl === "string" &&
-    sbUrl.includes(".supabase.co") &&
-    !sbUrl.includes("ebpunrzbagmcdtammjqn.supabase.co") &&
-    !sbUrl.includes("dqpomustswauzejggfui.supabase.co") &&
-    !sbUrl.includes(".lovable.cloud")
-  );
+  return isExternalSupabaseActive();
 }
 
 function mapSupabaseRowToClientLicense(d: Record<string, unknown>): ClientLicense {
@@ -318,11 +311,17 @@ export default function LicenseGate({
       }
 
       try {
-        const sbDirectPromise = hasExternalSupabaseConfigured()
-          ? Promise.resolve(supabase.from("licenses").select("*"))
+        const sbRows = hasExternalSupabaseConfigured()
+          ? await Promise.resolve(supabase.from("licenses").select("*"))
               .then((r) => (!r.error && Array.isArray(r.data) ? r.data : null))
               .catch(() => null)
-          : Promise.resolve(null);
+          : null;
+
+        // When direct Supabase returned licenses cleanly, skip calling Cloudflare Worker (0 Worker invocations!)
+        if (sbRows && sbRows.length > 0) {
+          applyIncomingLicensePayload(null, sbRows);
+          return;
+        }
 
         const q = new URLSearchParams();
         q.set("includeLicenses", "1");
@@ -339,13 +338,10 @@ export default function LicenseGate({
           q.set("imagesVersion", String(syncVersionsRef.current.images));
         }
 
-        const [res, sbRows] = await Promise.all([
-          fetch(
-            `/api/public/results/sync?${q.toString()}`,
-            force ? { cache: "no-store" } : undefined,
-          ).catch(() => null),
-          sbDirectPromise,
-        ]);
+        const res = await fetch(
+          `/api/public/results/sync?${q.toString()}`,
+          force ? { cache: "no-store" } : undefined,
+        ).catch(() => null);
 
         const data = res && res.ok ? await res.json() : null;
         if (data?.customGameLogos && typeof data.customGameLogos === "object") {
@@ -432,7 +428,7 @@ export default function LicenseGate({
     void syncLicenseState(true);
     const timer = setInterval(() => {
       void syncLicenseState(false);
-    }, 60_000);
+    }, 120_000);
     let bc: BroadcastChannel | null = null;
     try {
       bc = new BroadcastChannel("pizarra_lottery_channel");

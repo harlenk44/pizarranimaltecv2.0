@@ -14,7 +14,7 @@ import {
 import { getGameScheduleTimes, normalizeScheduleTime } from "@/lib/game-schedules";
 import { resolveCanonicalAnimal, SLUG_TO_GAME_ID } from "@/lib/official-animals";
 import { normalizeGameSlug } from "@/lib/game-slugs";
-import { lotteryDate } from "@/lib/lottery-date";
+import { isFutureLotteryDrawTime, lotteryDate } from "@/lib/lottery-date";
 
 export const LOTERIADEHOY_PRIMARY_URL = "https://loteriadehoy.com/animalitos/resultados/";
 export const LOTERIADEHOY_RDOMINICANA_URL =
@@ -201,7 +201,8 @@ export function createTuazarProvider(tuazarGameName: string, gameSlug?: string):
       if (ldhMeta) {
         try {
           const ldhPage = await getLoteriaDeHoyPage();
-          const drawDate = ldhPage.date ?? todayInCaracas();
+          const todayVe = todayInCaracas();
+          const drawDate = ldhPage.date ?? todayVe;
 
           const ldhDraws = ldhPage.results.filter(
             (r) =>
@@ -209,7 +210,20 @@ export function createTuazarProvider(tuazarGameName: string, gameSlug?: string):
               r.gameClass === ldhMeta.className.toLowerCase(),
           );
 
-          if (ldhDraws.length > 0) {
+          // If LoteriaDeHoy flipped its date header to today at midnight but still renders
+          // yesterday's full schedule (draws >15 min in the future), discard the ENTIRE stale block.
+          const hasStaleFutureDrawInBlock =
+            drawDate === todayVe &&
+            ldhDraws.some((item) => {
+              const normTime = normalizeScheduleTime(item.drawTime) ?? item.drawTime;
+              return (
+                Boolean(item.drawTime) &&
+                validScheduleSet.has(normTime) &&
+                isFutureLotteryDrawTime(drawDate, item.drawTime, new Date(), 15)
+              );
+            });
+
+          if (ldhDraws.length > 0 && !hasStaleFutureDrawInBlock) {
             const draws: unknown[] = [];
             for (const item of ldhDraws) {
               const drawTime = item.drawTime;
@@ -217,6 +231,7 @@ export function createTuazarProvider(tuazarGameName: string, gameSlug?: string):
 
               const normTime = normalizeScheduleTime(drawTime) ?? drawTime;
               if (!validScheduleSet.has(normTime)) continue;
+              if (isFutureLotteryDrawTime(drawDate, drawTime)) continue;
 
               const canonical = resolveCanonicalAnimal(
                 targetSlug ?? game.slug,
@@ -265,19 +280,40 @@ export function createTuazarProvider(tuazarGameName: string, gameSlug?: string):
       // 3. Fallback Source: TuAzar
       try {
         const page = await getTuazarPage();
-        const drawDate = page.date ?? todayInCaracas();
+        const todayVe = todayInCaracas();
+        const drawDate = page.date ?? todayVe;
+
+        const matchingTuazar = page.results.filter(
+          (result) =>
+            normalizeName(result.game) === wantedTuazar ||
+            Boolean(effectiveSlug && normalizeGameSlug(result.game) === effectiveSlug),
+        );
+
+        const hasStaleFutureTuazarBlock =
+          drawDate === todayVe &&
+          matchingTuazar.some((result) => {
+            const dt = hourTo24h(result.hour);
+            if (!dt) return false;
+            const normTime = normalizeScheduleTime(dt) ?? dt;
+            return (
+              validScheduleSet.has(normTime) &&
+              isFutureLotteryDrawTime(drawDate, dt, new Date(), 15)
+            );
+          });
+
+        if (hasStaleFutureTuazarBlock) {
+          return [];
+        }
+
         const draws: unknown[] = [];
 
-        for (const result of page.results) {
-          const matchesGame =
-            normalizeName(result.game) === wantedTuazar ||
-            Boolean(effectiveSlug && normalizeGameSlug(result.game) === effectiveSlug);
-          if (!matchesGame) continue;
+        for (const result of matchingTuazar) {
           const drawTime = hourTo24h(result.hour);
           if (!drawTime) continue;
 
           const normTime = normalizeScheduleTime(drawTime) ?? drawTime;
           if (!validScheduleSet.has(normTime)) continue;
+          if (isFutureLotteryDrawTime(drawDate, drawTime)) continue;
 
           const canonical = resolveCanonicalAnimal(
             targetSlug ?? game.slug,

@@ -2,52 +2,34 @@
   "requireLicense": true,
   "licenses": [
     {
-      "id": "688a214f-fd47-4076-a53d-21d4b949ad61",
-      "client_name": "taller||{\"loterias\":[\"lotto-activo\",\"granjita\",\"guacharo\",\"guacharito\",\"selva-plus\",\"monje-millonario\",\"loto-chaim-a\",\"lotto-activo-internacional\",\"la-ricachona\",\"triple-facil\",\"trio-activo\",\"triple-chance\",\"triple-zulia\",\"triple-caliente\",\"triple-caracas\",\"triple-ricachona\"],\"tarjetasPorPantalla\":4,\"tiempoTransicion\":25,\"voz\":{\"enabled\":true,\"engine\":\"agency_voice\",\"rate\":0.98,\"playChime\":true}}",
-      "pin_code": "694354",
-      "status": "active",
-      "expires_at": "2026-12-19T23:22:09.690Z",
-      "max_devices": 1,
-      "bound_device_ids": [],
-      "notes": "",
-      "created_at": "2026-11-19T23:22:09.690Z"
-    },
-    {
-      "id": "lic-exito-carupano-310148",
-      "client_name": "EXITO CARUPANO",
+      "id": "00000000-0000-4000-8000-000000310148",
+      "client_name": "EXITO CARUPANO||{\"loterias\":[\"lotto-activo\",\"granjita\",\"guacharo\",\"guacharito\",\"selva-plus\",\"monje-millonario\",\"loto-chaim-a\",\"lotto-activo-internacional\",\"la-ricachona\",\"triple-facil\",\"trio-activo\",\"triple-chance\",\"triple-zulia\",\"triple-caliente\",\"triple-caracas\",\"triple-ricachona\",\"ruleta-activa\",\"lotto-activo-rdominicana\"],\"tarjetasPorPantalla\":8,\"tiempoTransicion\":25,\"voz\":{\"enabled\":true,\"engine\":\"agency_voice\",\"rate\":0.98,\"playChime\":true},\"pantallaCompleta\":true}",
       "pin_code": "310148",
       "status": "active",
       "expires_at": "2026-12-05T01:38:00.000Z",
       "max_devices": 1,
-      "bound_device_ids": [],
+      "bound_device_ids": [
+        "TV-V31G-7998"
+      ],
       "notes": "",
       "created_at": "2026-11-05T01:38:00.000Z"
     },
     {
-      "id": "lic-mariana-108271",
-      "client_name": "Mariana",
-      "pin_code": "108271",
+      "id": "354d2d29-4c2e-4c0f-b0dc-614c99c55474",
+      "client_name": "Rugo fpm||{\"loterias\":[\"lotto-activo\",\"granjita\",\"guacharo\",\"guacharito\",\"selva-plus\",\"monje-millonario\",\"loto-chaim-a\",\"lotto-activo-internacional\",\"la-ricachona\",\"triple-facil\",\"trio-activo\",\"triple-chance\",\"triple-zulia\",\"triple-caliente\",\"triple-caracas\",\"triple-ricachona\",\"arrejuntao\"],\"tarjetasPorPantalla\":8,\"tiempoTransicion\":25,\"voz\":{\"enabled\":true,\"engine\":\"agency_voice\",\"rate\":0.98,\"playChime\":true}}",
+      "pin_code": "739708",
       "status": "active",
-      "expires_at": "2026-12-05T01:38:00.000Z",
+      "expires_at": "2026-12-01T17:11:41.909Z",
       "max_devices": 1,
-      "bound_device_ids": [],
+      "bound_device_ids": [
+        "TV-6GZU-1806"
+      ],
       "notes": "",
-      "created_at": "2026-11-05T01:38:00.000Z"
+      "created_at": "2026-11-21T17:11:41.909Z"
     },
     {
-      "id": "lic-jose-barreto-770595",
-      "client_name": "José barreto",
-      "pin_code": "770595",
-      "status": "active",
-      "expires_at": "2026-12-05T01:38:00.000Z",
-      "max_devices": 1,
-      "bound_device_ids": [],
-      "notes": "",
-      "created_at": "2026-11-05T01:38:00.000Z"
-    },
-    {
-      "id": "lic-master-admin",
-      "client_name": "Administrador Maestro||{\"loterias\":\"TODAS\",\"tarjetasPorPantalla\":3,\"tiempoTransicion\":25}",
+      "id": "00000000-0000-4000-8000-000000291007",
+      "client_name": "Administrador Maestro",
       "pin_code": "291007",
       "status": "active",
       "expires_at": "2036-11-02T01:09:47.704Z",
@@ -55,6 +37,69 @@
       "bound_device_ids": [],
       "notes": "PIN Maestro: 291007",
       "created_at": "2026-11-05T01:09:47.704Z"
+    },
+    {
+      "id": "b82e55bf-4388-4d7f-91ae-331c54af590b",
+      "client_name": "EL PRINCIPE||{\"loterias\":\"TODAS\",\"tarjetasPorPantalla\":8,\"tiempoTransicion\":25,\"voz\":{\"enabled\":true,\"engine\":\"agency_voice\",\"rate\":0.98,\"playChime\":true},\"pantallaCompleta\":true}",
+      "pin_code": "836203",
+      "status": "active",
+      "expires_at": "2026-12-21T14:45:55.363Z",
+      "max_devices": 1,
+      "bound_device_ids": [],
+      "notes": "",
+      "created_at": "2026-11-21T14:45:55.363Z"
+    },
+    {
+      "id": "2a4ab721-fb8d-4caa-ac5a-4d1f0a2dfd93",
+      "client_name": "Rugo plaza||{\"loterias\":[\"lotto-activo\",\"granjita\",\"guacharo\",\"guacharito\",\"selva-plus\",\"monje-millonario\",\"loto-chaim-a\",\"lotto-activo-internacional\",\"triple-facil\",\"trio-activo\",\"triple-chance\",\"triple-zulia\",\"triple-caliente\",\"triple-caracas\",\"triple-ricachona\",\"arrejuntao\",\"la-ricachona\"],\"tarjetasPorPantalla\":8,\"tiempoTransicion\":25,\"voz\":{\"enabled\":true,\"engine\":\"agency_voice\",\"rate\":0.98,\"playChime\":true},\"pantallaCompleta\":true}",
+      "pin_code": "587555",
+      "status": "active",
+      "expires_at": "2026-12-21T14:14:21.904Z",
+      "max_devices": 1,
+      "bound_device_ids": [
+        "TV-59Z0-9500"
+      ],
+      "notes": "",
+      "created_at": "2026-11-21T14:14:21.904Z"
+    },
+    {
+      "id": "e7dcc7f5-6af9-4752-8b3e-b869a0ab4ee1",
+      "client_name": "JEILIMAR||{\"loterias\":[\"lotto-activo\",\"granjita\",\"guacharo\",\"guacharito\",\"selva-plus\",\"monje-millonario\",\"loto-chaim-a\",\"lotto-activo-internacional\",\"la-ricachona\",\"triple-facil\",\"trio-activo\",\"triple-chance\",\"triple-zulia\",\"triple-caliente\",\"triple-caracas\",\"terminal-pantera\",\"triple-pantera\",\"lottopantera\",\"lotoanimalito\",\"ruleta-activa\"],\"tarjetasPorPantalla\":8,\"tiempoTransicion\":25,\"voz\":{\"enabled\":true,\"engine\":\"agency_voice\",\"rate\":0.98,\"playChime\":true},\"pantallaCompleta\":true}",
+      "pin_code": "425293",
+      "status": "active",
+      "expires_at": "2026-12-21T14:42:33.588Z",
+      "max_devices": 1,
+      "bound_device_ids": [
+        "TV-S04K-1341"
+      ],
+      "notes": "",
+      "created_at": "2026-11-21T14:42:33.588Z"
+    },
+    {
+      "id": "0c9b1e2f-f35d-46a4-a78f-cd505a1f7641",
+      "client_name": "RUGO PLAZA PIAR||{\"loterias\":[\"lotto-activo\",\"granjita\",\"guacharo\",\"guacharito\",\"selva-plus\",\"monje-millonario\",\"loto-chaim-a\",\"lotto-activo-internacional\",\"la-ricachona\",\"triple-facil\",\"trio-activo\",\"triple-chance\",\"triple-zulia\",\"triple-caliente\",\"triple-caracas\",\"triple-ricachona\",\"arrejuntao\"],\"tarjetasPorPantalla\":8,\"tiempoTransicion\":25,\"voz\":{\"enabled\":true,\"engine\":\"agency_voice\",\"rate\":0.98,\"playChime\":true}}",
+      "pin_code": "722024",
+      "status": "active",
+      "expires_at": "2026-12-23T12:17:26.436Z",
+      "max_devices": 1,
+      "bound_device_ids": [
+        "TV-RRYS-4659"
+      ],
+      "notes": "",
+      "created_at": "2026-11-23T12:17:26.436Z"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000108271",
+      "client_name": "Mariana",
+      "pin_code": "108271",
+      "status": "active",
+      "expires_at": "2026-12-05T01:38:00.000Z",
+      "max_devices": 1,
+      "bound_device_ids": [
+        "TV-1Z7D-7486"
+      ],
+      "notes": "",
+      "created_at": "2026-11-05T01:38:00.000Z"
     }
   ],
   "deletedIds": [],

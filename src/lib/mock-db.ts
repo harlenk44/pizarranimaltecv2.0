@@ -34,6 +34,7 @@ import {
   EMBEDDED_CUSTOM_ANIMAL_IMAGES,
 } from "@/lib/custom-animal-catalog";
 import { getGameLogo, isCustomUploadedGameLogo, saveCustomGameLogo } from "@/lib/game-logos";
+import { isFutureLotteryDrawTime } from "@/lib/lottery-date";
 
 export interface MockStore {
   games: Game[];
@@ -514,10 +515,6 @@ export async function ensureCustomCatalogLoaded(): Promise<MockStore["animal_ima
   return _ensureCatalogPromise;
 }
 
-if (typeof window !== "undefined") {
-  void ensureCustomCatalogLoaded();
-}
-
 function buildInitialImages(): MockStore["animal_images"] {
   const defaultCatalogImages = buildDefaultCatalogImagesForAllGames();
   const loadedCustom = getLoadedCustomAnimalImages();
@@ -897,12 +894,14 @@ export function mergeResultsPreserveToday(
   for (const r of existingResults) {
     if (!r || !r.game_id || !r.draw_date || !r.draw_time) continue;
     if (todayDate && r.draw_date !== todayDate) continue;
+    if (r.source !== "manual" && isFutureLotteryDrawTime(r.draw_date, r.draw_time)) continue;
     byKey.set(getKey(r), r);
   }
 
   for (const inc of incomingResults) {
     if (!inc || !inc.game_id || !inc.draw_date || !inc.draw_time) continue;
     if (todayDate && inc.draw_date !== todayDate) continue;
+    if (inc.source !== "manual" && isFutureLotteryDrawTime(inc.draw_date, inc.draw_time)) continue;
     const key = getKey(inc);
     const prev = byKey.get(key);
     if (!prev) {
@@ -912,6 +911,12 @@ export function mergeResultsPreserveToday(
     } else if (
       inc.source === "manual" &&
       prev.source === "manual" &&
+      (inc.animal_number !== prev.animal_number || inc.animal_name !== prev.animal_name)
+    ) {
+      byKey.set(key, inc);
+    } else if (
+      inc.source !== "manual" &&
+      prev.source !== "manual" &&
       (inc.animal_number !== prev.animal_number || inc.animal_name !== prev.animal_name)
     ) {
       byKey.set(key, inc);

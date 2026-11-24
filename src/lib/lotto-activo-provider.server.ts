@@ -8,7 +8,7 @@ import {
 } from "@/lib/official-animals";
 import type { AutomaticDraw, ResultsProvider, SyncGame } from "@/lib/result-sync";
 import { createRealSupabaseAdminClient } from "@/integrations/supabase/client.server";
-import { lotteryDate } from "@/lib/lottery-date";
+import { isFutureLotteryDrawTime, lotteryDate } from "@/lib/lottery-date";
 
 export const LOTTO_ACTIVO_PROCESS_URL = "https://www.lottoactivo.com/core/process.php";
 export const LOTTO_ACTIVO_RESULTS_PAGE_URL = "https://www.lottoactivo.com/resultados/lotto_activo/";
@@ -443,6 +443,9 @@ export async function synchronizeLottoActivoOfficialData(options?: {
   let supabaseWritten = 0;
 
   for (const draw of payload.draws) {
+    if (isFutureLotteryDrawTime(draw.drawDate, draw.drawTime)) {
+      continue;
+    }
     const existingManual = options?.currentAnimalResults?.find(
       (r) =>
         r.game_id === officialGameId &&

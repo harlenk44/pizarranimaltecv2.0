@@ -16,7 +16,7 @@ import { createLottoActivoProvider } from "@/lib/lotto-activo-provider.server";
 import { deduplicateGamesList, normalizeGameSlug, type CanonicalGameSlug } from "@/lib/game-slugs";
 import { isCustomUploadedGameLogo } from "@/lib/game-logos";
 import { remapInMemoryStoreIds } from "@/lib/consolidate-games-results.server";
-import { lotteryDate } from "@/lib/lottery-date";
+import { isFutureLotteryDrawTime, lotteryDate } from "@/lib/lottery-date";
 import type { Game } from "@/lib/types";
 
 // Trusted, fixed-origin adapters indexed by canonical slug.
@@ -316,6 +316,9 @@ export async function synchronizeAutomaticResults(
         };
 
         return await synchronizeGame(syncGame, provider, async (draw) => {
+          if (isFutureLotteryDrawTime(draw.draw_date, draw.draw_time)) {
+            return false;
+          }
           const localPayload = {
             p_game_id: game.id,
             p_game_slug: canonicalSlug || game.slug,

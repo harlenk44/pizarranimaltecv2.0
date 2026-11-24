@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, useCallback, type ReactNode } from "react";
 import { supabase } from "@/lib/supabase";
+import { isExternalSupabaseActive } from "@/integrations/supabase/client";
 import {
   DEFAULT_APP_SETTINGS,
   type AppSettings,
@@ -9,14 +10,7 @@ import {
 } from "@/lib/types";
 
 function hasExternalSupabaseConfigured(): boolean {
-  const sbUrl = import.meta.env["VITE_SUPABASE_URL"];
-  return (
-    typeof sbUrl === "string" &&
-    sbUrl.includes(".supabase.co") &&
-    !sbUrl.includes("ebpunrzbagmcdtammjqn.supabase.co") &&
-    !sbUrl.includes("dqpomustswauzejggfui.supabase.co") &&
-    !sbUrl.includes(".lovable.cloud")
-  );
+  return isExternalSupabaseActive();
 }
 
 interface BoardSettingsContextType {
@@ -104,25 +98,27 @@ export function BoardSettingsProvider({ children }: { children: ReactNode }) {
       }
     }
 
-    // 2. Fetch authoritative global settings from server sync endpoint (backed by Supabase SUPABASE_URL/SUPABASE_KEY)
-    try {
-      const res = await fetch(
-        "/api/public/results/sync?poll=1&logosVersion=1&gamesVersion=1&imagesVersion=1",
-        { cache: "no-store" },
-      );
-      if (res.ok) {
-        const syncJson = await res.json();
-        if (syncJson?.appSettings && typeof syncJson.appSettings === "object") {
-          const rawServer = syncJson.appSettings as Record<string, unknown>;
-          const parsedServer = parseAppSettingsFromSupabase(rawServer);
-          serverData = {
-            ...(rawServer as Partial<AppSettings>),
-            ...(parsedServer || {}),
-          };
+    // 2. Fallback to server sync endpoint ONLY when direct Supabase settings were unavailable (0 Worker calls in normal operation)
+    if (!cloudData) {
+      try {
+        const res = await fetch(
+          "/api/public/results/sync?poll=1&logosVersion=1&gamesVersion=1&imagesVersion=1",
+          { cache: "no-store" },
+        );
+        if (res.ok) {
+          const syncJson = await res.json();
+          if (syncJson?.appSettings && typeof syncJson.appSettings === "object") {
+            const rawServer = syncJson.appSettings as Record<string, unknown>;
+            const parsedServer = parseAppSettingsFromSupabase(rawServer);
+            serverData = {
+              ...(rawServer as Partial<AppSettings>),
+              ...(parsedServer || {}),
+            };
+          }
         }
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
     }
 
     let localData: AppSettings | null = null;

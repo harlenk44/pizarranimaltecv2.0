@@ -60,7 +60,7 @@ import {
   getGameSlugAliases,
   normalizeGameSlug,
 } from "@/lib/game-slugs";
-import { lotteryDate } from "@/lib/lottery-date";
+import { isFutureLotteryDrawTime, lotteryDate } from "@/lib/lottery-date";
 import {
   consolidateGamesAndOrphanResultsInSupabase,
   consolidateInMemoryGamesAndResults,
@@ -112,49 +112,24 @@ function resetDeletedTriplesIfNewDay() {
   }
 }
 
-function persistTriplesToSupabaseAsync(items: TripleResult[]) {
-  if (!Array.isArray(items) || items.length === 0) return;
-  void (async () => {
-    try {
-      const realClient = createRealSupabaseAdminClient();
-      if (!realClient) return;
-      const rows = items.map((tr) => ({
-        id: tr.id || `triple-${tr.game_id}-${tr.draw_date}-${tr.draw_time}`,
-        game_id: tr.game_id,
-        game_slug: tr.game_slug || tr.game_id,
-        draw_date: tr.draw_date,
-        draw_time: tr.draw_time,
-        triple_a: tr.triple_a,
-        triple_b: tr.triple_b ?? null,
-        triple_c: tr.triple_c ?? null,
-        zodiac_sign: tr.zodiac_sign ?? null,
-        source: tr.source ?? "automatic",
-      }));
-      await realClient
-        .from("triple_results")
-        .upsert(rows, { onConflict: "game_id,draw_date,draw_time" });
-    } catch {
-      // ignore if table does not exist yet
-    }
-  })();
-}
-
 function applyIncomingTriplesToServer(incoming: TripleResult[], today = lotteryDate()): number {
   if (!Array.isArray(incoming) || incoming.length === 0) return 0;
   resetDeletedTriplesIfNewDay();
+  const safeIncoming = incoming.filter(
+    (tr) => tr && (tr.source === "manual" || !isFutureLotteryDrawTime(tr.draw_date, tr.draw_time)),
+  );
+  if (safeIncoming.length === 0) return 0;
   const prevCount = serverTripleResults.filter((r) => r.draw_date === today).length;
   serverTripleResults = mergeTripleResultsPreserveToday(
-    serverTripleResults,
-    incoming,
+    serverTripleResults.filter(
+      (tr) => tr.source === "manual" || !isFutureLotteryDrawTime(tr.draw_date, tr.draw_time),
+    ),
+    safeIncoming,
     today,
     serverDeletedTripleIds,
   );
   saveServerTripleResults();
-  const todaysTriples = serverTripleResults.filter((r) => r.draw_date === today);
-  const nextCount = todaysTriples.length;
-  if (nextCount > prevCount) {
-    persistTriplesToSupabaseAsync(todaysTriples);
-  }
+  const nextCount = serverTripleResults.filter((r) => r.draw_date === today).length;
   return Math.max(0, nextCount - prevCount);
 }
 
@@ -491,7 +466,9 @@ async function uploadAnimalImageToSupabaseStorage(
       });
 
     if (uploadError) {
-      console.warn("[supabase-storage-animal-image-warn]", uploadError.message);
+      if (!uploadError.message.toLowerCase().includes("fetch failed")) {
+        console.warn("[supabase-storage-animal-image-warn]", uploadError.message);
+      }
       return {
         url: trimmed,
         uploadedToStorage: false,
@@ -513,7 +490,9 @@ async function uploadAnimalImageToSupabaseStorage(
     return { url: trimmed, uploadedToStorage: false };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.warn("[supabase-storage-animal-image-warn]", message);
+    if (!message.toLowerCase().includes("fetch failed")) {
+      console.warn("[supabase-storage-animal-image-warn]", message);
+    }
     return { url: trimmed, uploadedToStorage: false, error: message };
   }
 }
@@ -1074,8 +1053,15 @@ function sanitizeResultsList(results: unknown[]): typeof mockStore.results {
   if (!Array.isArray(results)) return [];
   return results.filter((r) => {
     if (!r || typeof r !== "object") return false;
-    const res = r as { game_id?: string; draw_time?: string };
+    const res = r as { game_id?: string; draw_date?: string; draw_time?: string; source?: string };
     if (!res.game_id || !res.draw_time) return false;
+    if (
+      res.draw_date &&
+      res.source !== "manual" &&
+      isFutureLotteryDrawTime(res.draw_date, res.draw_time)
+    ) {
+      return false;
+    }
     const game = mockStore.games.find((g) => g.id === res.game_id);
     if (!game) return true;
     const validSchedule = new Set(
@@ -1717,7 +1703,9 @@ async function syncResultsWithSupabase(force = false): Promise<void> {
           const drawTime = String(row["draw_time"] || "").trim();
           const animalNumber = Number(row["animal_number"]);
           const animalName = String(row["animal_name"] || "").trim();
+          const source = row["source"] === "manual" ? "manual" : "automatic";
           if (!rawGameId || !drawDate || !drawTime || !Number.isFinite(animalNumber)) continue;
+          if (source !== "manual" && isFutureLotteryDrawTime(drawDate, drawTime)) continue;
 
           const rawSlug =
             typeof row["game_slug"] === "string" && row["game_slug"].trim()
@@ -1745,7 +1733,7 @@ async function syncResultsWithSupabase(force = false): Promise<void> {
             draw_time: drawTime,
             animal_number: animalNumber,
             animal_name: animalName,
-            source: row["source"] === "manual" ? "manual" : "automatic",
+            source,
             created_at:
               typeof row["created_at"] === "string" ? row["created_at"] : new Date().toISOString(),
           });
@@ -1784,44 +1772,47 @@ async function syncResultsWithSupabase(force = false): Promise<void> {
         }
       }
 
-      // Also sync today's triple_results from Supabase so cold Worker isolates recover triples immediately
+      // Also pull today's triple_results from Supabase so cold Workers show triples immediately
       try {
-        const { data: tripleData, error: tripleErr } = await realClient
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const { data: tripleRows, error: tripleErr } = await (realClient as any)
           .from("triple_results")
           .select("*")
           .eq("draw_date", today);
-        if (!tripleErr && Array.isArray(tripleData) && tripleData.length > 0) {
-          const cloudTriples: TripleResult[] = (tripleData as Array<Record<string, unknown>>).map(
-            (row) => ({
-              id: String(
-                row["id"] ||
-                  `triple-${String(row["game_id"] || "")}-${String(row["draw_date"] || "")}-${String(row["draw_time"] || "")}`,
-              ),
-              game_id: String(row["game_id"] || ""),
-              game_slug: String(row["game_slug"] || row["game_id"] || ""),
-              draw_date: String(row["draw_date"] || today),
-              draw_time: String(row["draw_time"] || ""),
-              triple_a: String(row["triple_a"] || ""),
-              ...(row["triple_b"] ? { triple_b: String(row["triple_b"]) } : {}),
-              ...(row["triple_c"] ? { triple_c: String(row["triple_c"]) } : {}),
-              ...(row["zodiac_sign"] ? { zodiac_sign: String(row["zodiac_sign"]) } : {}),
-              source: row["source"] === "manual" ? "manual" : "automatic",
+        if (!tripleErr && Array.isArray(tripleRows) && tripleRows.length > 0) {
+          const mappedTriples: TripleResult[] = [];
+          for (const row of tripleRows as Array<Record<string, unknown>>) {
+            const gameId = String(row["game_id"] || row["game_slug"] || "").trim();
+            const gameSlug = String(row["game_slug"] || row["game_id"] || "").trim();
+            const drawDate = String(row["draw_date"] || "").trim();
+            const drawTime = String(row["draw_time"] || "").trim();
+            const tripleA = String(row["triple_a"] || "").trim();
+            const source = row["source"] === "manual" ? "manual" : "automatic";
+            if (!gameId || !drawDate || !drawTime || !tripleA) continue;
+            if (source !== "manual" && isFutureLotteryDrawTime(drawDate, drawTime)) continue;
+            mappedTriples.push({
+              id: String(row["id"] || `triple-${gameSlug}-${drawDate}-${drawTime}`),
+              game_id: gameId,
+              game_slug: gameSlug,
+              draw_date: drawDate,
+              draw_time: normalizeTripleDrawTime(drawTime),
+              triple_a: tripleA,
+              triple_b: typeof row["triple_b"] === "string" ? row["triple_b"] : null,
+              triple_c: typeof row["triple_c"] === "string" ? row["triple_c"] : null,
+              zodiac_sign: typeof row["zodiac_sign"] === "string" ? row["zodiac_sign"] : null,
+              source,
               created_at:
                 typeof row["created_at"] === "string"
                   ? row["created_at"]
                   : new Date().toISOString(),
-            }),
-          );
-          serverTripleResults = mergeTripleResultsPreserveToday(
-            serverTripleResults,
-            cloudTriples,
-            today,
-            serverDeletedTripleIds,
-          );
-          saveServerTripleResults();
+            });
+          }
+          if (mappedTriples.length > 0) {
+            applyIncomingTriplesToServer(mappedTriples, today);
+          }
         }
       } catch {
-        // ignore if triple_results table is not present
+        // triple_results table may not exist in older Supabase schemas
       }
     } catch {
       // ignore
@@ -2416,6 +2407,79 @@ async function syncTriplesFast(
   return run;
 }
 
+let rpcPushCacheDate = "";
+const pushedAnimalRpcKeys = new Set<string>();
+const pushedTripleRpcKeys = new Set<string>();
+
+async function pushTodaysResultsToSupabaseRpc(today: string): Promise<void> {
+  const realClient = createRealSupabaseAdminClient();
+  if (!realClient) return;
+
+  if (rpcPushCacheDate !== today) {
+    rpcPushCacheDate = today;
+    pushedAnimalRpcKeys.clear();
+    pushedTripleRpcKeys.clear();
+  }
+
+  const animalCandidates = mockStore.results.filter((r) => {
+    if (!r || r.draw_date !== today || !r.game_id || !r.draw_time) return false;
+    if (r.source !== "manual" && isFutureLotteryDrawTime(r.draw_date, r.draw_time)) return false;
+    const key = `${r.game_id}|${r.draw_date}|${r.draw_time.slice(0, 5)}|${r.animal_number}|${r.animal_name.trim().toLowerCase()}`;
+    return !pushedAnimalRpcKeys.has(key);
+  });
+
+  const BATCH_SIZE = 8;
+  for (let i = 0; i < animalCandidates.length; i += BATCH_SIZE) {
+    const batch = animalCandidates.slice(i, i + BATCH_SIZE);
+    await Promise.allSettled(
+      batch.map(async (r) => {
+        const key = `${r.game_id}|${r.draw_date}|${r.draw_time.slice(0, 5)}|${r.animal_number}|${r.animal_name.trim().toLowerCase()}`;
+        const { error } = await realClient.rpc("sync_automatic_result", {
+          p_game_id: r.game_id,
+          p_draw_date: r.draw_date,
+          p_draw_time: r.draw_time,
+          p_animal_number: r.animal_number,
+          p_animal_name: r.animal_name,
+        });
+        if (!error) {
+          pushedAnimalRpcKeys.add(key);
+        }
+      }),
+    );
+  }
+
+  const tripleCandidates = serverTripleResults.filter((tr) => {
+    if (!tr || tr.draw_date !== today || !tr.game_id || !tr.draw_time || !tr.triple_a) return false;
+    if (tr.source !== "manual" && isFutureLotteryDrawTime(tr.draw_date, tr.draw_time)) return false;
+    const key = `${tr.game_slug || tr.game_id}|${tr.draw_date}|${tr.draw_time.slice(0, 5)}|${tr.triple_a}|${tr.triple_b ?? ""}|${tr.triple_c ?? ""}|${tr.zodiac_sign ?? ""}`;
+    return !pushedTripleRpcKeys.has(key);
+  });
+
+  for (let i = 0; i < tripleCandidates.length; i += BATCH_SIZE) {
+    const batch = tripleCandidates.slice(i, i + BATCH_SIZE);
+    await Promise.allSettled(
+      batch.map(async (tr) => {
+        const key = `${tr.game_slug || tr.game_id}|${tr.draw_date}|${tr.draw_time.slice(0, 5)}|${tr.triple_a}|${tr.triple_b ?? ""}|${tr.triple_c ?? ""}|${tr.zodiac_sign ?? ""}`;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const { error } = await (realClient as any).rpc("sync_triple_result", {
+          p_game_id: tr.game_id,
+          p_game_slug: tr.game_slug || tr.game_id,
+          p_draw_date: tr.draw_date,
+          p_draw_time: normalizeTripleDrawTime(tr.draw_time),
+          p_triple_a: tr.triple_a,
+          p_triple_b: tr.triple_b ?? null,
+          p_triple_c: tr.triple_c ?? null,
+          p_zodiac_sign: tr.zodiac_sign ?? null,
+          p_source: tr.source === "manual" ? "manual" : "automatic",
+        });
+        if (!error) {
+          pushedTripleRpcKeys.add(key);
+        }
+      }),
+    );
+  }
+}
+
 async function triggerBackgroundSync(forceWait = false): Promise<void> {
   const now = Date.now();
   if (autoSyncInFlightPromise) {
@@ -2563,6 +2627,7 @@ async function triggerBackgroundSync(forceWait = false): Promise<void> {
 
       consolidateInMemoryGamesAndResults();
       saveServerResults();
+      await pushTodaysResultsToSupabaseRpc(today).catch(() => {});
 
       if (!areCoreAnimalitosMissingForDate(today)) {
         lastAutoSyncTimestamp = Date.now();

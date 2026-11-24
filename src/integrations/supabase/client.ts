@@ -55,6 +55,9 @@ function createSupabaseFetch(supabaseUrl: string, supabaseKey: string): typeof f
   };
 }
 
+const DEFAULT_ACTIVE_SUPABASE_URL = "https://ebpunrzbagmcdtammiqn.supabase.co";
+const DEFAULT_ACTIVE_SUPABASE_PUBLISHABLE_KEY = "sb_publishable_G3GU7Cvc1CPP5KYcdV_9sg_uxZA10d8";
+
 const INACTIVE_SUPABASE_HOSTS = [
   "ebpunrzbagmcdtammjqn.supabase.co",
   "dqpomustswauzejggfui.supabase.co",
@@ -69,20 +72,26 @@ function isInactiveSupabaseUrl(url?: string): boolean {
 
 function createSupabaseClient() {
   const serverProcessEnv = typeof process !== "undefined" && process.env ? process.env : undefined;
-  const rawUrl = import.meta.env["VITE_SUPABASE_URL"] || serverProcessEnv?.["SUPABASE_URL"];
-  const SUPABASE_URL =
-    typeof rawUrl === "string" && rawUrl.trim()
-      ? /^https?:\/\//i.test(rawUrl.trim())
-        ? rawUrl.trim().replace(/\/+$/, "")
-        : `https://${rawUrl.trim().replace(/\/+$/, "")}`
+  const isVitest = Boolean(serverProcessEnv?.["VITEST"]);
+  const envRawUrl = import.meta.env["VITE_SUPABASE_URL"] || serverProcessEnv?.["SUPABASE_URL"];
+  const normalizedEnvUrl =
+    typeof envRawUrl === "string" && envRawUrl.trim()
+      ? /^https?:\/\//i.test(envRawUrl.trim())
+        ? envRawUrl.trim().replace(/\/+$/, "")
+        : `https://${envRawUrl.trim().replace(/\/+$/, "")}`
       : undefined;
-  const SUPABASE_PUBLISHABLE_KEY =
-    import.meta.env["VITE_SUPABASE_PUBLISHABLE_KEY"] ||
-    import.meta.env["VITE_SUPABASE_KEY"] ||
-    serverProcessEnv?.["SUPABASE_PUBLISHABLE_KEY"] ||
-    serverProcessEnv?.["SUPABASE_KEY"];
-  const SUPABASE_SERVICE_ROLE_KEY =
-    serverProcessEnv?.["SUPABASE_SERVICE_ROLE_KEY"] || serverProcessEnv?.["SUPABASE_KEY"];
+  const useFallback = !isVitest && (!normalizedEnvUrl || isInactiveSupabaseUrl(normalizedEnvUrl));
+  const SUPABASE_URL = useFallback ? DEFAULT_ACTIVE_SUPABASE_URL : normalizedEnvUrl;
+  const SUPABASE_PUBLISHABLE_KEY = useFallback
+    ? DEFAULT_ACTIVE_SUPABASE_PUBLISHABLE_KEY
+    : import.meta.env["VITE_SUPABASE_PUBLISHABLE_KEY"] ||
+      import.meta.env["VITE_SUPABASE_KEY"] ||
+      serverProcessEnv?.["SUPABASE_PUBLISHABLE_KEY"] ||
+      serverProcessEnv?.["SUPABASE_KEY"] ||
+      (!isVitest ? DEFAULT_ACTIVE_SUPABASE_PUBLISHABLE_KEY : undefined);
+  const SUPABASE_SERVICE_ROLE_KEY = useFallback
+    ? undefined
+    : serverProcessEnv?.["SUPABASE_SERVICE_ROLE_KEY"] || serverProcessEnv?.["SUPABASE_KEY"];
 
   // Connect to external Supabase when an active .supabase.co URL or server key is configured;
   // otherwise use the self-contained mock database so the board always renders reliably.
@@ -123,6 +132,22 @@ function createSupabaseClient() {
 }
 
 let _supabase: ReturnType<typeof createSupabaseClient> | undefined;
+
+export function isExternalSupabaseActive(): boolean {
+  if (_supabaseOffline) return false;
+  const serverProcessEnv = typeof process !== "undefined" && process.env ? process.env : undefined;
+  const isVitest = Boolean(serverProcessEnv?.["VITEST"]);
+  const envRawUrl = import.meta.env["VITE_SUPABASE_URL"] || serverProcessEnv?.["SUPABASE_URL"];
+  const normalizedEnvUrl =
+    typeof envRawUrl === "string" && envRawUrl.trim()
+      ? /^https?:\/\//i.test(envRawUrl.trim())
+        ? envRawUrl.trim().replace(/\/+$/, "")
+        : `https://${envRawUrl.trim().replace(/\/+$/, "")}`
+      : undefined;
+  const useFallback = !isVitest && (!normalizedEnvUrl || isInactiveSupabaseUrl(normalizedEnvUrl));
+  const url = useFallback ? DEFAULT_ACTIVE_SUPABASE_URL : normalizedEnvUrl;
+  return Boolean(url && !isInactiveSupabaseUrl(url) && url.includes(".supabase.co"));
+}
 
 // Import the supabase client like this:
 // import { supabase } from "@/integrations/supabase/client";

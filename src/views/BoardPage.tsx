@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useRef, useMemo, memo } from "react";
 import { supabase } from "@/lib/supabase";
+import { isExternalSupabaseActive } from "@/integrations/supabase/client";
 import { getEmojiForNumber } from "@/lib/animals";
 import type { Game, Result, GameWithResults, AnimalImage, AnimalEntry } from "@/lib/types";
 import {
@@ -32,7 +33,7 @@ import AdBanner, { AdTickerBar } from "@/components/AdBanner";
 import ResultAlertModal, { type ResultAlertItem } from "@/components/ResultAlertModal";
 import VoiceSettingsModal from "@/components/VoiceSettingsModal";
 import AnimalMedia from "@/components/AnimalMedia";
-import { lotteryDate, LOTTERY_TIMEZONE } from "@/lib/lottery-date";
+import { isFutureLotteryDrawTime, lotteryDate, LOTTERY_TIMEZONE } from "@/lib/lottery-date";
 import { useDisplay } from "@/context/DisplayContext";
 import { sorteoAlertTracker, getSorteoAlertKey } from "@/lib/sorteo-alert-tracker";
 import { getGameScheduleTimes } from "@/lib/game-schedules";
@@ -691,18 +692,11 @@ const GameCard = memo(
       return false;
     }
 
-    if (
-      prev.animalImages !== next.animalImages ||
-      prev.animalNames !== next.animalNames ||
-      prev.animalLabels !== next.animalLabels
-    ) {
-      return false;
-    }
-
     const prevRes = prev.game.latest_results || [];
     const nextRes = next.game.latest_results || [];
     if (prevRes.length !== nextRes.length) return false;
 
+    const gameKey = next.game.slug || next.game.id;
     for (let i = 0; i < prevRes.length; i++) {
       const a = prevRes[i]!;
       const b = nextRes[i]!;
@@ -712,6 +706,35 @@ const GameCard = memo(
         a.animal_name !== b.animal_name
       ) {
         return false;
+      }
+      if (
+        prev.animalImages !== next.animalImages ||
+        prev.animalNames !== next.animalNames ||
+        prev.animalLabels !== next.animalLabels
+      ) {
+        const canA = resolveCanonicalAnimal(
+          gameKey,
+          a.animal_number,
+          a.animal_name,
+          prev.animalImages,
+          prev.animalNames,
+          prev.animalLabels,
+        );
+        const canB = resolveCanonicalAnimal(
+          gameKey,
+          b.animal_number,
+          b.animal_name,
+          next.animalImages,
+          next.animalNames,
+          next.animalLabels,
+        );
+        if (
+          canA.imageUrl !== canB.imageUrl ||
+          canA.label !== canB.label ||
+          canA.name !== canB.name
+        ) {
+          return false;
+        }
       }
     }
     return true;
@@ -826,6 +849,8 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
   tripleResultsRef.current = tripleResults;
   const fetchInFlightRef = useRef<boolean>(false);
   const fetchSeqRef = useRef<number>(0);
+  const lastWorkerSyncAtRef = useRef<number>(0);
+  const workerJitterMsRef = useRef<number>(Math.floor(Math.random() * 25_000));
   const [autoRotate, setAutoRotate] = useState<boolean>(() => {
     if (typeof window !== "undefined") {
       const saved = localStorage.getItem("pizarra_auto_rotate_views");
@@ -963,213 +988,258 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       const reqSeq = ++fetchSeqRef.current;
 
       try {
-        // 1. Sync from server backend to get latest results, alerts, and custom animal videos/images
+        // 1. Supabase-First architecture to cut Cloudflare Worker usage by >95%:
+        //    - Only invoke /api/public/results/sync on force refresh, initial boot if needed,
+        //      or on an adaptive scraper heartbeat (150s peak / 360s normal / 900s overnight).
+        //    - All intermediate 20s/35s polls and Supabase Realtime pushes read directly from Supabase (0 Worker calls!).
         let serverSyncedResults: Result[] = [];
         let serverSyncedTriples: TripleResult[] = tripleResultsRef.current;
         let syncData: Record<string, unknown> | null = null;
         const todayDate = lotteryDate();
-        try {
-          const q = new URLSearchParams();
-          q.set("poll", "1");
-          q.set("includeLicenses", "1");
-          if (lastLogosVersionRef.current)
-            q.set("logosVersion", String(lastLogosVersionRef.current));
-          if (lastGamesVersionRef.current)
-            q.set("gamesVersion", String(lastGamesVersionRef.current));
-          if (lastImagesVersionRef.current)
-            q.set("imagesVersion", String(lastImagesVersionRef.current));
-          if (lastSettingsVersionRef.current)
-            q.set("settingsVersion", String(lastSettingsVersionRef.current));
 
-          const syncRes = await fetch(
-            `/api/public/results/sync?${q.toString()}`,
-            force ? { cache: "no-store" } : undefined,
-          );
-          // Discard stale out-of-order response if a newer fetch already started
-          if (reqSeq !== fetchSeqRef.current) return;
+        const getWorkerHeartbeatIntervalMs = (): number => {
+          try {
+            const parts = new Intl.DateTimeFormat("en-US", {
+              timeZone: LOTTERY_TIMEZONE,
+              hour: "2-digit",
+              minute: "2-digit",
+              hour12: false,
+            }).formatToParts(new Date());
+            const hour = Number(parts.find((p) => p.type === "hour")?.value ?? 12);
+            const minute = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
+            const isOffHours =
+              hour >= 21 ||
+              hour < 7 ||
+              (hour === 20 && minute >= 30) ||
+              (hour === 7 && minute < 40);
+            if (isOffHours) return 900_000; // 15 min overnight
+            const isPeakDrawWindow =
+              (minute >= 0 && minute <= 10) ||
+              (minute >= 15 && minute <= 22) ||
+              (minute >= 30 && minute <= 40) ||
+              (minute >= 45 && minute <= 53);
+            return isPeakDrawWindow ? 150_000 : 360_000; // 2.5 min peak, 6 min off-peak
+          } catch {
+            return 240_000;
+          }
+        };
 
-          if (syncRes.ok) {
-            syncData = await syncRes.json();
+        const directSupabaseEnabled = isExternalSupabaseActive();
+        const heartbeatDue =
+          lastWorkerSyncAtRef.current === 0 ||
+          Date.now() - lastWorkerSyncAtRef.current >=
+            getWorkerHeartbeatIntervalMs() + workerJitterMsRef.current;
+        const shouldInvokeWorker = force || !directSupabaseEnabled || heartbeatDue;
+
+        if (shouldInvokeWorker) {
+          try {
+            const q = new URLSearchParams();
+            q.set("poll", "1");
+            q.set("includeLicenses", "1");
+            if (lastLogosVersionRef.current)
+              q.set("logosVersion", String(lastLogosVersionRef.current));
+            if (lastGamesVersionRef.current)
+              q.set("gamesVersion", String(lastGamesVersionRef.current));
+            if (lastImagesVersionRef.current)
+              q.set("imagesVersion", String(lastImagesVersionRef.current));
+            if (lastSettingsVersionRef.current)
+              q.set("settingsVersion", String(lastSettingsVersionRef.current));
+
+            const syncRes = await fetch(
+              `/api/public/results/sync?${q.toString()}`,
+              force ? { cache: "no-store" } : undefined,
+            );
+            // Discard stale out-of-order response if a newer fetch already started
             if (reqSeq !== fetchSeqRef.current) return;
 
-            if (syncData && typeof window !== "undefined") {
-              (window as unknown as Record<string, unknown>)["__PIZARRA_LAST_SYNC_DATA__"] =
-                syncData;
-              window.dispatchEvent(
-                new CustomEvent("pizarra:server-sync-payload", {
-                  detail: { ...syncData, __fromBoardPage: true },
-                }),
-              );
-            }
+            if (syncRes.ok) {
+              lastWorkerSyncAtRef.current = Date.now();
+              syncData = await syncRes.json();
+              if (reqSeq !== fetchSeqRef.current) return;
 
-            if (syncData?.logosVersion) lastLogosVersionRef.current = Number(syncData.logosVersion);
-            if (syncData?.gamesVersion) lastGamesVersionRef.current = Number(syncData.gamesVersion);
-            if (syncData?.imagesVersion)
-              lastImagesVersionRef.current = Number(syncData.imagesVersion);
-            if (syncData?.settingsVersion)
-              lastSettingsVersionRef.current = Number(syncData.settingsVersion);
-
-            // Sync all latest results from server into client mockStore & storage without erasing today's existing slots
-            if (Array.isArray(syncData?.results) && syncData.results.length > 0) {
-              const mergedResults = mergeResultsPreserveToday(
-                mockStore.results as Result[],
-                syncData.results as Result[],
-                todayDate,
-              );
-              serverSyncedResults = mergedResults;
-              mockStore.results = mergedResults;
-              try {
-                localStorage.setItem("pizarra_mock_results", JSON.stringify(mergedResults));
-              } catch {
-                // ignore
-              }
-            }
-
-            // Merge triples results preserving today's already-loaded slots (never blank out on empty cold-isolate responses!)
-            if (Array.isArray(syncData?.tripleResults)) {
-              const deletedTripleIds = Array.isArray(syncData?.deletedTripleIds)
-                ? (syncData.deletedTripleIds as string[])
-                : [];
-              const mergedTriples = mergeTripleResultsPreserveToday(
-                tripleResultsRef.current,
-                syncData.tripleResults as TripleResult[],
-                todayDate,
-                deletedTripleIds,
-              );
-              serverSyncedTriples = mergedTriples;
-              const tJson = JSON.stringify(mergedTriples);
-              if (lastTripleResultsJsonRef.current !== tJson) {
-                lastTripleResultsJsonRef.current = tJson;
-                tripleResultsRef.current = mergedTriples;
-                setTripleResults(mergedTriples);
-                try {
-                  localStorage.setItem("pizarra_triple_results", tJson);
-                } catch {
-                  // ignore
-                }
-              }
-            }
-
-            // Sync custom admin animal images into mockStore & localStorage ONLY if server sent them
-            if (Array.isArray(syncData?.animalImages)) {
-              const localCustom = recoverCustomAnimalImagesFromLocalStorage();
-              const serverImages = syncData.animalImages as AnimalImage[];
-              if (serverImages.length > 0 || localCustom.length > 0) {
-                const merged = mergeAnimalImagesPreserveCustom(
-                  mockStore.animal_images,
-                  serverImages,
-                  localCustom,
+              if (syncData && typeof window !== "undefined") {
+                (window as unknown as Record<string, unknown>)["__PIZARRA_LAST_SYNC_DATA__"] =
+                  syncData;
+                window.dispatchEvent(
+                  new CustomEvent("pizarra:server-sync-payload", {
+                    detail: { ...syncData, __fromBoardPage: true },
+                  }),
                 );
-                mockStore.animal_images = merged;
-                const customOnly = filterAdminCustomAnimalImages(merged);
+              }
+
+              if (syncData?.logosVersion)
+                lastLogosVersionRef.current = Number(syncData.logosVersion);
+              if (syncData?.gamesVersion)
+                lastGamesVersionRef.current = Number(syncData.gamesVersion);
+              if (syncData?.imagesVersion)
+                lastImagesVersionRef.current = Number(syncData.imagesVersion);
+              if (syncData?.settingsVersion)
+                lastSettingsVersionRef.current = Number(syncData.settingsVersion);
+
+              // Sync all latest results from server into client mockStore & storage without erasing today's existing slots
+              if (Array.isArray(syncData?.results) && syncData.results.length > 0) {
+                const mergedResults = mergeResultsPreserveToday(
+                  mockStore.results as Result[],
+                  syncData.results as Result[],
+                  todayDate,
+                );
+                serverSyncedResults = mergedResults;
+                mockStore.results = mergedResults;
                 try {
-                  const serialized = JSON.stringify(customOnly);
-                  if (localStorage.getItem("pizarra_user_custom_animal_images_v2") !== serialized) {
-                    localStorage.setItem("pizarra_user_custom_animal_images_v2", serialized);
-                    localStorage.setItem("pizarra_custom_animal_images", serialized);
-                  }
+                  localStorage.setItem("pizarra_mock_results", JSON.stringify(mergedResults));
                 } catch {
                   // ignore
                 }
               }
-            }
 
-            // Sync custom game logos ONLY if server sent them
-            if (syncData?.customGameLogos && typeof syncData.customGameLogos === "object") {
-              const serverLogosMap = syncData.customGameLogos as Record<string, string>;
-              mergeCustomGameLogosMap(serverLogosMap);
-            }
-
-            // Sync games configuration (active state, display_order, additions/deletions) whenever sent by server
-            if (Array.isArray(syncData?.games) && syncData.games.length > 0) {
-              const serverGames = syncData.games as Game[];
-              const serverIds = new Set(serverGames.map((g) => g.id));
-              const prunedLocal = mockStore.games.filter((g) => serverIds.has(g.id));
-              mockStore.games = mergeGamesPreserveCustomLogos(prunedLocal, serverGames);
-              try {
-                localStorage.setItem("pizarra_persisted_games", JSON.stringify(mockStore.games));
-              } catch {
-                // ignore
-              }
-            }
-
-            // Sync appSettings from cloud/server into BoardSettingsContext and localStorage
-            if (syncData?.appSettings && typeof syncData.appSettings === "object") {
-              const rawIncoming = syncData.appSettings as Record<string, unknown>;
-              const parsedIncoming = parseAppSettingsFromSupabase(rawIncoming);
-              const incoming: AppSettings = {
-                ...DEFAULT_APP_SETTINGS,
-                ...(rawIncoming as Partial<AppSettings>),
-                ...(parsedIncoming || {}),
-                id: "global",
-              };
-              const incomingTime = incoming.updated_at
-                ? new Date(incoming.updated_at).getTime()
-                : 0;
-              let localParsed: AppSettings | null = null;
-              let localTime = 0;
-              try {
-                const raw = localStorage.getItem("pizarra_app_settings");
-                if (raw) {
-                  localParsed = JSON.parse(raw) as AppSettings;
-                  if (localParsed?.updated_at) {
-                    localTime = new Date(localParsed.updated_at).getTime();
+              // Merge triples results preserving today's already-loaded slots (never blank out on empty cold-isolate responses!)
+              if (Array.isArray(syncData?.tripleResults)) {
+                const deletedTripleIds = Array.isArray(syncData?.deletedTripleIds)
+                  ? (syncData.deletedTripleIds as string[])
+                  : [];
+                const mergedTriples = mergeTripleResultsPreserveToday(
+                  tripleResultsRef.current,
+                  syncData.tripleResults as TripleResult[],
+                  todayDate,
+                  deletedTripleIds,
+                );
+                serverSyncedTriples = mergedTriples;
+                const tJson = JSON.stringify(mergedTriples);
+                if (lastTripleResultsJsonRef.current !== tJson) {
+                  lastTripleResultsJsonRef.current = tJson;
+                  tripleResultsRef.current = mergedTriples;
+                  setTripleResults(mergedTriples);
+                  try {
+                    localStorage.setItem("pizarra_triple_results", tJson);
+                  } catch {
+                    // ignore
                   }
                 }
-              } catch {
-                // ignore
               }
-              const visualChanged =
-                !localParsed ||
-                localParsed.background_color !== incoming.background_color ||
-                localParsed.surface_color !== incoming.surface_color ||
-                localParsed.primary_color !== incoming.primary_color ||
-                localParsed.text_color !== incoming.text_color ||
-                localParsed.card_color !== incoming.card_color ||
-                localParsed.result_row_color !== incoming.result_row_color ||
-                localParsed.font_family !== incoming.font_family ||
-                localParsed.base_font_size !== incoming.base_font_size ||
-                localParsed.card_style !== incoming.card_style ||
-                localParsed.logo_size !== incoming.logo_size ||
-                localParsed.font_size_scale !== incoming.font_size_scale ||
-                localParsed.hero_card_scale !== incoming.hero_card_scale ||
-                localParsed.animal_scale !== incoming.animal_scale ||
-                JSON.stringify(localParsed.game_colors || {}) !==
-                  JSON.stringify(incoming.game_colors || {});
 
-              if (visualChanged && (incomingTime >= localTime || localTime === 0)) {
-                updateSettings(incoming);
+              // Sync custom admin animal images into mockStore & localStorage ONLY if server sent them
+              if (Array.isArray(syncData?.animalImages)) {
+                const localCustom = recoverCustomAnimalImagesFromLocalStorage();
+                const serverImages = syncData.animalImages as AnimalImage[];
+                if (serverImages.length > 0 || localCustom.length > 0) {
+                  const merged = mergeAnimalImagesPreserveCustom(
+                    mockStore.animal_images,
+                    serverImages,
+                    localCustom,
+                  );
+                  mockStore.animal_images = merged;
+                  const customOnly = filterAdminCustomAnimalImages(merged);
+                  try {
+                    const serialized = JSON.stringify(customOnly);
+                    if (
+                      localStorage.getItem("pizarra_user_custom_animal_images_v2") !== serialized
+                    ) {
+                      localStorage.setItem("pizarra_user_custom_animal_images_v2", serialized);
+                      localStorage.setItem("pizarra_custom_animal_images", serialized);
+                    }
+                  } catch {
+                    // ignore
+                  }
+                }
               }
-            }
 
-            // Enqueue any recentAlerts / latestAlert broadcasted by server (only after initial load)
-            if (!isInitialLoadRef.current) {
-              if (Array.isArray(syncData?.recentAlerts) && syncData.recentAlerts.length > 0) {
-                for (const rawAlert of syncData.recentAlerts) {
-                  if (
-                    rawAlert &&
-                    typeof rawAlert === "object" &&
-                    (rawAlert as Record<string, unknown>).id
-                  ) {
-                    const alert = rawAlert as ResultAlertItem;
-                    const enqueued = enqueueUniqueAlert(alert);
-                    if (enqueued) {
-                      scheduleHardReload(alert.id);
+              // Sync custom game logos ONLY if server sent them
+              if (syncData?.customGameLogos && typeof syncData.customGameLogos === "object") {
+                const serverLogosMap = syncData.customGameLogos as Record<string, string>;
+                mergeCustomGameLogosMap(serverLogosMap);
+              }
+
+              // Sync games configuration (active state, display_order, additions/deletions) whenever sent by server
+              if (Array.isArray(syncData?.games) && syncData.games.length > 0) {
+                const serverGames = syncData.games as Game[];
+                const serverIds = new Set(serverGames.map((g) => g.id));
+                const prunedLocal = mockStore.games.filter((g) => serverIds.has(g.id));
+                mockStore.games = mergeGamesPreserveCustomLogos(prunedLocal, serverGames);
+                try {
+                  localStorage.setItem("pizarra_persisted_games", JSON.stringify(mockStore.games));
+                } catch {
+                  // ignore
+                }
+              }
+
+              // Sync appSettings from cloud/server into BoardSettingsContext and localStorage
+              if (syncData?.appSettings && typeof syncData.appSettings === "object") {
+                const rawIncoming = syncData.appSettings as Record<string, unknown>;
+                const parsedIncoming = parseAppSettingsFromSupabase(rawIncoming);
+                const incoming: AppSettings = {
+                  ...DEFAULT_APP_SETTINGS,
+                  ...(rawIncoming as Partial<AppSettings>),
+                  ...(parsedIncoming || {}),
+                  id: "global",
+                };
+                const incomingTime = incoming.updated_at
+                  ? new Date(incoming.updated_at).getTime()
+                  : 0;
+                let localParsed: AppSettings | null = null;
+                let localTime = 0;
+                try {
+                  const raw = localStorage.getItem("pizarra_app_settings");
+                  if (raw) {
+                    localParsed = JSON.parse(raw) as AppSettings;
+                    if (localParsed?.updated_at) {
+                      localTime = new Date(localParsed.updated_at).getTime();
+                    }
+                  }
+                } catch {
+                  // ignore
+                }
+                const visualChanged =
+                  !localParsed ||
+                  localParsed.background_color !== incoming.background_color ||
+                  localParsed.surface_color !== incoming.surface_color ||
+                  localParsed.primary_color !== incoming.primary_color ||
+                  localParsed.text_color !== incoming.text_color ||
+                  localParsed.card_color !== incoming.card_color ||
+                  localParsed.result_row_color !== incoming.result_row_color ||
+                  localParsed.font_family !== incoming.font_family ||
+                  localParsed.base_font_size !== incoming.base_font_size ||
+                  localParsed.card_style !== incoming.card_style ||
+                  localParsed.logo_size !== incoming.logo_size ||
+                  localParsed.font_size_scale !== incoming.font_size_scale ||
+                  localParsed.hero_card_scale !== incoming.hero_card_scale ||
+                  localParsed.animal_scale !== incoming.animal_scale ||
+                  JSON.stringify(localParsed.game_colors || {}) !==
+                    JSON.stringify(incoming.game_colors || {});
+
+                if (visualChanged && (incomingTime >= localTime || localTime === 0)) {
+                  updateSettings(incoming);
+                }
+              }
+
+              // Enqueue any recentAlerts / latestAlert broadcasted by server (only after initial load)
+              if (!isInitialLoadRef.current) {
+                if (Array.isArray(syncData?.recentAlerts) && syncData.recentAlerts.length > 0) {
+                  for (const rawAlert of syncData.recentAlerts) {
+                    if (
+                      rawAlert &&
+                      typeof rawAlert === "object" &&
+                      (rawAlert as Record<string, unknown>).id
+                    ) {
+                      const alert = rawAlert as ResultAlertItem;
+                      const enqueued = enqueueUniqueAlert(alert);
+                      if (enqueued) {
+                        scheduleHardReload(alert.id);
+                      }
                     }
                   }
                 }
-              }
-              if (syncData?.latestAlert && (syncData.latestAlert as Record<string, unknown>).id) {
-                const alert = syncData.latestAlert as ResultAlertItem;
-                const enqueued = enqueueUniqueAlert(alert);
-                if (enqueued) {
-                  scheduleHardReload(alert.id);
+                if (syncData?.latestAlert && (syncData.latestAlert as Record<string, unknown>).id) {
+                  const alert = syncData.latestAlert as ResultAlertItem;
+                  const enqueued = enqueueUniqueAlert(alert);
+                  if (enqueued) {
+                    scheduleHardReload(alert.id);
+                  }
                 }
               }
             }
+          } catch {
+            // server route may be temporarily busy
           }
-        } catch {
-          // server route may be temporarily busy
         }
 
         let loadedGames = cachedGamesDataRef.current;
@@ -1192,15 +1262,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
 
           // 2. Fallback to browser Supabase ONLY if /api/public/results/sync did not supply games
           if (!fetchedFromSource) {
-            const sbUrl = import.meta.env["VITE_SUPABASE_URL"];
-            const hasExternalSupabase =
-              typeof sbUrl === "string" &&
-              sbUrl.includes(".supabase.co") &&
-              !sbUrl.includes("ebpunrzbagmcdtammjqn.supabase.co") &&
-              !sbUrl.includes("dqpomustswauzejggfui.supabase.co") &&
-              !sbUrl.includes(".lovable.cloud");
-
-            if (hasExternalSupabase) {
+            if (isExternalSupabaseActive()) {
               try {
                 const { data: gamesData, error: gamesErr } = await supabase
                   .from("games")
@@ -1372,86 +1434,74 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         const today = lotteryDate();
 
         const serverRespondedOk = syncData !== null;
+
         if (!serverRespondedOk) {
           try {
-            const { data: sbTriples, error: sbTriplesErr } = await supabase
-              .from("triple_results")
-              .select("*")
-              .eq("draw_date", today)
-              .order("draw_time", { ascending: true });
-            if (!sbTriplesErr && Array.isArray(sbTriples) && sbTriples.length > 0) {
-              const mappedTriples: TripleResult[] = (
-                sbTriples as Array<Record<string, unknown>>
-              ).map((row) => ({
-                id: String(
-                  row["id"] ||
-                    `triple-${String(row["game_id"] || "")}-${String(row["draw_date"] || "")}-${String(row["draw_time"] || "")}`,
-                ),
-                game_id: String(row["game_id"] || ""),
-                game_slug: String(row["game_slug"] || row["game_id"] || ""),
-                draw_date: String(row["draw_date"] || today),
-                draw_time: String(row["draw_time"] || "").substring(0, 5),
-                triple_a: String(row["triple_a"] || ""),
-                ...(row["triple_b"] ? { triple_b: String(row["triple_b"]) } : {}),
-                ...(row["triple_c"] ? { triple_c: String(row["triple_c"]) } : {}),
-                ...(row["zodiac_sign"] ? { zodiac_sign: String(row["zodiac_sign"]) } : {}),
-                source: row["source"] === "manual" ? "manual" : "automatic",
-                created_at:
-                  typeof row["created_at"] === "string"
-                    ? row["created_at"]
-                    : new Date().toISOString(),
-              }));
-              const mergedTriples = mergeTripleResultsPreserveToday(
-                tripleResultsRef.current,
-                mappedTriples,
+            const [cloudAnimalsRes, cloudTriplesRes] = await Promise.all([
+              supabase
+                .from("results")
+                .select("*")
+                .eq("draw_date", today)
+                .order("draw_time", { ascending: true }),
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              (supabase as any).from("triple_results").select("*").eq("draw_date", today),
+            ]);
+
+            if (Array.isArray(cloudAnimalsRes?.data) && cloudAnimalsRes.data.length > 0) {
+              const mergedCloudAnimals = mergeResultsPreserveToday(
+                mockStore.results as Result[],
+                cloudAnimalsRes.data as Result[],
                 today,
               );
-              serverSyncedTriples = mergedTriples;
-              const tJson = JSON.stringify(mergedTriples);
-              if (lastTripleResultsJsonRef.current !== tJson) {
-                lastTripleResultsJsonRef.current = tJson;
-                tripleResultsRef.current = mergedTriples;
-                setTripleResults(mergedTriples);
-                try {
-                  localStorage.setItem("pizarra_triple_results", tJson);
-                } catch {
-                  // ignore
+              serverSyncedResults = mergedCloudAnimals;
+              mockStore.results = mergedCloudAnimals;
+              try {
+                localStorage.setItem("pizarra_mock_results", JSON.stringify(mergedCloudAnimals));
+              } catch {
+                // ignore
+              }
+            }
+
+            if (Array.isArray(cloudTriplesRes?.data) && cloudTriplesRes.data.length > 0) {
+              const validTriples = (cloudTriplesRes.data as TripleResult[]).filter(
+                (tr) =>
+                  tr &&
+                  tr.draw_date === today &&
+                  (tr.source === "manual" || !isFutureLotteryDrawTime(tr.draw_date, tr.draw_time)),
+              );
+              if (validTriples.length > 0) {
+                const mergedTriples = mergeTripleResultsPreserveToday(
+                  tripleResultsRef.current,
+                  validTriples,
+                  today,
+                );
+                serverSyncedTriples = mergedTriples;
+                const tJson = JSON.stringify(mergedTriples);
+                if (lastTripleResultsJsonRef.current !== tJson) {
+                  lastTripleResultsJsonRef.current = tJson;
+                  tripleResultsRef.current = mergedTriples;
+                  setTripleResults(mergedTriples);
+                  try {
+                    localStorage.setItem("pizarra_triple_results", tJson);
+                  } catch {
+                    // ignore
+                  }
                 }
               }
             }
           } catch {
-            // ignore if triple_results is unavailable
+            // ignore
           }
         }
 
-        const resultsPromises = await Promise.all(
-          loadedGames.map(async (g) => {
-            const matching = matchResultsForGame(g, serverSyncedResults, today);
-            if (matching.length > 0) {
-              return { gameId: g.id, results: matching };
-            }
-
-            // Only hit Supabase directly from browser when backend sync did not respond (avoids N redundant queries every poll)
-            if (!serverRespondedOk) {
-              try {
-                const { data } = await supabase
-                  .from("results")
-                  .select("*")
-                  .eq("game_id", g.id)
-                  .eq("draw_date", today)
-                  .order("draw_time", { ascending: true });
-                if (Array.isArray(data) && data.length > 0) {
-                  return { gameId: g.id, results: data as Result[] };
-                }
-              } catch {
-                // Fallback to mockStore.results
-              }
-            }
-
-            const fallbackResults = matchResultsForGame(g, mockStore.results as Result[], today);
-            return { gameId: g.id, results: fallbackResults };
-          }),
-        );
+        const resultsPromises = loadedGames.map((g) => {
+          const matching = matchResultsForGame(g, serverSyncedResults, today);
+          if (matching.length > 0) {
+            return { gameId: g.id, results: matching };
+          }
+          const fallbackResults = matchResultsForGame(g, mockStore.results as Result[], today);
+          return { gameId: g.id, results: fallbackResults };
+        });
 
         const map: Record<string, Result[]> = {};
         const newAlerts: ResultAlertItem[] = [];
@@ -1473,6 +1523,12 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           const frozenGameResults: Result[] = [];
 
           for (const rawRes of mergedForGame) {
+            if (
+              rawRes.source !== "manual" &&
+              isFutureLotteryDrawTime(rawRes.draw_date, rawRes.draw_time)
+            ) {
+              continue;
+            }
             const slotKey = rawRes.draw_time.substring(0, 5).replace(/^0/, "");
             const existingInSlot = prevGameResults.find(
               (pr) =>
@@ -1492,7 +1548,9 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
             let effectiveRes: Result;
             if (
               existingInSlot &&
-              (rawRes.source !== "manual" || existingInSlot.animal_number === canonical.number)
+              ((existingInSlot.source === "manual" && rawRes.source !== "manual") ||
+                (existingInSlot.animal_number === canonical.number &&
+                  existingInSlot.animal_name === canonical.name))
             ) {
               effectiveRes = existingInSlot;
             } else {
@@ -1700,16 +1758,16 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       }
     };
     const onCustomImagesLoaded = () => {
+      const mergedMap = { ...cachedImgMapRef.current, ...getInitialCachedAnimalImages() };
+      const mergedJson = JSON.stringify(mergedMap);
+      if (lastImgMapJsonRef.current !== mergedJson) {
+        lastImgMapJsonRef.current = mergedJson;
+        cachedImgMapRef.current = mergedMap;
+        animalImagesRef.current = mergedMap;
+        setAnimalImages(mergedMap);
+      }
       mediaLoadedRef.current = false;
-      const immediateMap: AnimalImageMap = {
-        ...getInitialCachedAnimalImages(),
-        ...cachedImgMapRef.current,
-      };
-      cachedImgMapRef.current = immediateMap;
-      animalImagesRef.current = immediateMap;
-      lastImgMapJsonRef.current = JSON.stringify(immediateMap);
-      setAnimalImages(immediateMap);
-      void fetchAll(true);
+      fetchAll();
     };
     const onServerSyncPayload = (ev: Event) => {
       const payload = (ev as CustomEvent<Record<string, unknown>>).detail;
@@ -1743,29 +1801,35 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     window.addEventListener("pizarra:custom-images-loaded", onCustomImagesLoaded);
     window.addEventListener("pizarra:server-sync-payload", onServerSyncPayload);
 
-    void ensureCustomCatalogLoaded();
+    const deferredCatalogTimer = window.setTimeout(() => {
+      void ensureCustomCatalogLoaded();
+    }, 1500);
 
     const realtimeChannel = supabase
       .channel("board-animal-media-sync")
       .on("postgres_changes", { event: "*", schema: "public", table: "results" }, () => {
         void fetchAll(false);
       })
+      .on("postgres_changes", { event: "*", schema: "public", table: "triple_results" }, () => {
+        void fetchAll(false);
+      })
       .on("postgres_changes", { event: "*", schema: "public", table: "animal_images" }, () => {
         mediaLoadedRef.current = false;
-        fetchAll();
+        fetchAll(false);
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "animal_entries" }, () => {
         mediaLoadedRef.current = false;
-        fetchAll();
+        fetchAll(false);
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "games" }, () => {
         gamesLoadedRef.current = false;
-        fetchAll();
+        fetchAll(false);
       })
       .subscribe();
 
     return () => {
       bc?.close();
+      window.clearTimeout(deferredCatalogTimer);
       window.removeEventListener("storage", onStorage);
       window.removeEventListener("pizarra:custom-images-loaded", onCustomImagesLoaded);
       window.removeEventListener("pizarra:server-sync-payload", onServerSyncPayload);

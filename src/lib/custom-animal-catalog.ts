@@ -10,86 +10,72 @@ let _catalogImageUrlSet: Set<string> = new Set();
 let _catalogByKey: Map<string, string> = new Map();
 let _loadPromise: Promise<CustomAnimalEntry[]> | null = null;
 
-async function fetchRawCatalog(): Promise<unknown> {
-  if (typeof window !== "undefined") {
-    try {
-      const origin =
-        typeof window.location?.origin === "string" && window.location.origin.startsWith("http")
-          ? window.location.origin
-          : "";
-      const res = await fetch(`${origin}/custom-animal-catalog.json`, {
-        headers: { Accept: "application/json" },
-      });
-      if (res.ok) {
-        return await res.json();
-      }
-    } catch {
-      // In jsdom test environments, fall through to filesystem read below
-    }
+function hydrateCatalogFromRaw(rawCatalog: unknown): CustomAnimalEntry[] {
+  if (!Array.isArray(rawCatalog)) {
+    _cachedCatalog = [];
+    return _cachedCatalog;
   }
-
-  // Server environment: try local filesystem first (Node.js dev/test/build),
-  // fallback to static CDN asset on Cloudflare Pages without bundling 7.5MB into _worker.js
-  try {
-    const fsMod = await import("node:fs/promises");
-    const pathMod = await import("node:path");
-    const filePath = pathMod.join(process.cwd(), "public", "custom-animal-catalog.json");
-    const content = await fsMod.readFile(filePath, "utf8");
-    return JSON.parse(content) as unknown;
-  } catch {
-    try {
-      const res = await fetch("https://pizarraanimal.servhm.com/custom-animal-catalog.json", {
-        headers: { Accept: "application/json" },
-      });
-      if (res.ok) {
-        return await res.json();
-      }
-    } catch {
-      // ignore
-    }
+  _cachedCatalog = (rawCatalog as CustomAnimalEntry[]).filter(
+    (item) =>
+      item &&
+      typeof item.game_id === "string" &&
+      typeof item.animal_number === "number" &&
+      typeof item.image_url === "string" &&
+      !item.image_url.includes("/api/media?file="),
+  );
+  _catalogImageUrlSet = new Set(_cachedCatalog.map((item) => item.image_url));
+  const nextMap = new Map<string, string>();
+  for (const item of _cachedCatalog) {
+    nextMap.set(`${item.game_id}:${item.animal_number}`, item.image_url);
   }
-  return [];
+  _catalogByKey = nextMap;
+  return _cachedCatalog;
 }
 
 /**
- * Carga diferida del catálogo maestro de 451 imágenes desde el archivo estático
- * `/custom-animal-catalog.json` en `public/`.
- * Al servirse como archivo estático desde Cloudflare Pages CDN, no se empaqueta
- * dentro de `dist/_worker.js` (manteniendo el Worker en ~2.5MB, muy por debajo
- * del límite de Cloudflare Free) y no consume peticiones del Worker.
+ * Carga diferida del catálogo maestro de imágenes (451 animalitos) desde `/custom-animal-catalog.json`
+ * servido como archivo estático en `public/` (cero peso en el bundle de Cloudflare Worker).
  */
 export async function loadCustomAnimalCatalog(): Promise<CustomAnimalEntry[]> {
-  if (_cachedCatalog) return _cachedCatalog;
+  if (_cachedCatalog && _cachedCatalog.length > 0) return _cachedCatalog;
   if (_loadPromise) return _loadPromise;
 
   _loadPromise = (async () => {
     try {
-      const rawCatalog = await fetchRawCatalog();
-      if (Array.isArray(rawCatalog)) {
-        _cachedCatalog = (rawCatalog as CustomAnimalEntry[]).filter(
-          (item) =>
-            item &&
-            typeof item.game_id === "string" &&
-            typeof item.animal_number === "number" &&
-            typeof item.image_url === "string" &&
-            !item.image_url.includes("/api/media?file="),
-        );
-        _catalogImageUrlSet = new Set(_cachedCatalog.map((item) => item.image_url));
-        const nextMap = new Map<string, string>();
-        for (const item of _cachedCatalog) {
-          nextMap.set(`${item.game_id}:${item.animal_number}`, item.image_url);
+      if (typeof window !== "undefined") {
+        const res = await fetch("/custom-animal-catalog.json", { cache: "force-cache" });
+        if (res.ok) {
+          const rawCatalog = (await res.json()) as unknown;
+          return hydrateCatalogFromRaw(rawCatalog);
         }
-        _catalogByKey = nextMap;
-      } else {
-        _cachedCatalog = [];
+        return _cachedCatalog ?? [];
       }
+
+      // Server-side (Node.js dev/build): read directly from public/custom-animal-catalog.json
+      try {
+        const fsMod = await import(/* @vite-ignore */ "node:fs");
+        const pathMod = await import(/* @vite-ignore */ "node:path");
+        const candidates = [
+          pathMod.join(process.cwd(), "public", "custom-animal-catalog.json"),
+          pathMod.join(process.cwd(), "dist", "custom-animal-catalog.json"),
+        ];
+        for (const filePath of candidates) {
+          if (fsMod.existsSync(filePath)) {
+            const parsed = JSON.parse(fsMod.readFileSync(filePath, "utf-8")) as unknown;
+            return hydrateCatalogFromRaw(parsed);
+          }
+        }
+      } catch {
+        // Cloudflare Workers runtime does not have local filesystem; static CDN serves /custom-animal-catalog.json
+      }
+
+      return _cachedCatalog ?? [];
     } catch (err) {
       console.warn("No se pudo cargar el catálogo diferido de animales:", err);
-      _cachedCatalog = [];
+      return _cachedCatalog ?? [];
     } finally {
       _loadPromise = null;
     }
-    return _cachedCatalog;
   })();
 
   return _loadPromise;
