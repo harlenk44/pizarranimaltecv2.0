@@ -1,16 +1,22 @@
-import { lotteryDate } from "@/lib/lottery-date";
+import { isFutureLotteryDrawTime, lotteryDate } from "@/lib/lottery-date";
 
 const KNOWN_GAME_ALIASES: Record<string, string> = {
-  // UUIDs to canonical slugs
+  // UUIDs (default + live Supabase) to canonical slugs
   "7d21a00b-0dfa-4bdc-9edf-8115802df1d6": "lotto-activo",
+  "d48546e4-1993-438a-a9de-64499762cce9": "lotto-activo",
   "01da9c54-392a-45e3-ab66-9a08befe7694": "guacharo",
+  "83988ab3-9d23-4fa1-9ac1-46914f70d2cc": "guacharo",
   "0519825d-e7ea-4e59-bf7d-cef2c832edd3": "guacharito",
+  "7115c101-6679-46c7-91a0-dbdabd1c78b2": "guacharito",
   "8f3aa087-6a0c-41a1-9ed3-5f6d5ed6918e": "selva-plus",
+  "90cf1adf-734f-4a17-9cee-dfd3c705e611": "selva-plus",
   "1efc5373-a547-4f7f-9955-845b5ede5ce2": "loto-chaim-a",
   "ca8a0400-0000-4000-8000-000000000006": "granjita",
   "0f766e00-0000-4000-8000-000000000007": "monje-millonario",
   "1e40af00-0000-4000-8000-000000000008": "lotto-activo-internacional",
   "b84da000-0000-4000-8000-000000000008": "lotto-activo-internacional",
+  "d953f80c-4335-4bc9-9f78-9b56193286fe": "lotoanimalito",
+  "61580ccf-5a2d-4d10-877e-4883515135e4": "lottopantera",
   "3b92f700-0000-4000-8000-000000000011": "la-ricachona",
   "4c82e900-0000-4000-8000-000000000012": "lotto-activo-rdominicana",
   "5d93fa00-0000-4000-8000-000000000013": "ruleta-activa",
@@ -81,7 +87,15 @@ export function getSorteoAlertKey(item: SorteoIdentifiable): string {
   return `sorteo:${game}:${date}:${time}`;
 }
 
-const STORAGE_KEY = "pizarra_alerted_sorteos_registry";
+const LEGACY_STORAGE_KEY = "pizarra_alerted_sorteos_registry";
+const STORAGE_KEY = "pizarra_alerted_sorteos_registry_v2";
+
+function isFutureAlertKey(key: string): boolean {
+  // Format: sorteo:<game>:<YYYY-MM-DD>:<HH>:<MM>
+  const match = key.match(/^sorteo:[^:]+:(\d{4}-\d{2}-\d{2}):(\d{2}:\d{2})$/);
+  if (!match) return false;
+  return isFutureLotteryDrawTime(match[1]!, match[2]!);
+}
 
 class SorteoAlertTracker {
   private inMemoryAlerted = new Set<string>();
@@ -93,12 +107,16 @@ class SorteoAlertTracker {
   private hydrateFromStorage(): void {
     if (typeof window === "undefined") return;
     try {
+      // Remove legacy key that may contain poisoned midnight future slots
+      if (localStorage.getItem(LEGACY_STORAGE_KEY) !== null) {
+        localStorage.removeItem(LEGACY_STORAGE_KEY);
+      }
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) {
           for (const key of parsed) {
-            if (typeof key === "string") {
+            if (typeof key === "string" && !isFutureAlertKey(key)) {
               this.inMemoryAlerted.add(key);
             }
           }
@@ -146,6 +164,7 @@ class SorteoAlertTracker {
     let changed = false;
     for (const item of items) {
       const key = typeof item === "string" ? item : getSorteoAlertKey(item);
+      if (isFutureAlertKey(key)) continue;
       if (!this.inMemoryAlerted.has(key)) {
         this.inMemoryAlerted.add(key);
         changed = true;

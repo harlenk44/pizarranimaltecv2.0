@@ -123,7 +123,12 @@ const KNOWN_UUID_TO_SLUG: Record<string, string> = MASTER_PRODUCTS_CATALOG.reduc
     }
     return acc;
   },
-  {} as Record<string, string>,
+  {
+    "d48546e4-1993-438a-a9de-64499762cce9": "lotto-activo",
+    "83988ab3-9d23-4fa1-9ac1-46914f70d2cc": "guacharo-activo",
+    "7115c101-6679-46c7-91a0-dbdabd1c78b2": "el-guacharito-millonario",
+    "90cf1adf-734f-4a17-9cee-dfd3c705e611": "selva-plus",
+  } as Record<string, string>,
 );
 
 export const DEFAULT_TRANSITION_SECONDS = 25;

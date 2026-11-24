@@ -859,6 +859,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
     return true;
   });
   const [showVoiceSettings, setShowVoiceSettings] = useState(false);
+  const [audioBlocked, setAudioBlocked] = useState(false);
   const [alertQueue, setAlertQueue] = useState<ResultAlertItem[]>([]);
   const [voiceEnabled, setVoiceEnabled] = useState<boolean>(() => {
     if (typeof window !== "undefined") {
@@ -939,7 +940,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
 
   const enqueueUniqueAlert = useCallback(
     (rawItem: ResultAlertItem): boolean => {
-      if (rawItem.gameId && !isGameAllowed(rawItem.gameId)) {
+      if (rawItem.gameId && !isGameAllowed(rawItem.gameId, rawItem.gameName)) {
         return false;
       }
       const item = resolveAlertWithAnimalImage(rawItem, animalImagesRef.current, gamesRef.current);
@@ -1573,6 +1574,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
               if (prevSig === undefined || prevSig !== sig) {
                 const candidate = {
                   gameId: gameObj.id,
+                  gameName: gameObj.name,
                   drawDate: effectiveRes.draw_date,
                   drawTime: effectiveRes.draw_time,
                 };
@@ -1629,6 +1631,9 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         // Check newly synced Triples results for real-time alert and voice announcements
         const todaysTriples = serverSyncedTriples.filter((tr) => tr.draw_date === today);
         for (const tr of todaysTriples) {
+          if (tr.source !== "manual" && isFutureLotteryDrawTime(tr.draw_date, tr.draw_time)) {
+            continue;
+          }
           const tripleKey = `triple:${tr.game_id}:${tr.draw_date}:${tr.draw_time}`;
           const sig = `${tr.triple_a}|${tr.triple_b ?? ""}|${tr.triple_c ?? ""}|${tr.zodiac_sign ?? ""}`;
           const prevSig = prevSignaturesRef.current.get(tripleKey);
@@ -1652,17 +1657,33 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
         }
 
         if (isInitialLoadRef.current) {
-          const existingItems: { gameId: string; drawDate: string; drawTime: string }[] = [];
+          const existingItems: {
+            gameId: string;
+            gameName?: string;
+            drawDate: string;
+            drawTime: string;
+          }[] = [];
           for (const r of resultsPromises) {
+            const gameObj = loadedGames.find((g) => g.id === r.gameId);
             for (const res of r.results) {
+              if (
+                res.source !== "manual" &&
+                isFutureLotteryDrawTime(res.draw_date, res.draw_time)
+              ) {
+                continue;
+              }
               existingItems.push({
                 gameId: res.game_id,
+                gameName: gameObj?.name,
                 drawDate: res.draw_date,
                 drawTime: res.draw_time,
               });
             }
           }
           for (const tr of todaysTriples) {
+            if (tr.source !== "manual" && isFutureLotteryDrawTime(tr.draw_date, tr.draw_time)) {
+              continue;
+            }
             existingItems.push({
               gameId: tr.game_id,
               drawDate: tr.draw_date,
@@ -1827,12 +1848,19 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
       })
       .subscribe();
 
+    const onAudioBlocked = () => setAudioBlocked(true);
+    const onAudioUnlocked = () => setAudioBlocked(false);
+    window.addEventListener("pizarra:audio-blocked", onAudioBlocked);
+    window.addEventListener("pizarra:audio-unlocked", onAudioUnlocked);
+
     return () => {
       bc?.close();
       window.clearTimeout(deferredCatalogTimer);
       window.removeEventListener("storage", onStorage);
       window.removeEventListener("pizarra:custom-images-loaded", onCustomImagesLoaded);
       window.removeEventListener("pizarra:server-sync-payload", onServerSyncPayload);
+      window.removeEventListener("pizarra:audio-blocked", onAudioBlocked);
+      window.removeEventListener("pizarra:audio-unlocked", onAudioUnlocked);
       supabase.removeChannel(realtimeChannel);
     };
   }, [enqueueUniqueAlert, fetchAll, scheduleHardReload, refreshSettings, updateSettings]);
@@ -2180,7 +2208,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
   const enrichedAlertQueue = useMemo(
     () =>
       alertQueue
-        .filter((item) => !item.gameId || isGameAllowed(item.gameId))
+        .filter((item) => !item.gameId || isGameAllowed(item.gameId, item.gameName))
         .map((item) => resolveAlertWithAnimalImage(item, animalImages, games)),
     [alertQueue, animalImages, games, isGameAllowed],
   );
@@ -2475,6 +2503,26 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
           onToggleVoice={handleVoiceToggle}
           onClose={handleAlertModalClose}
         />
+      )}
+
+      {/* Floating 1-tap audio unlock prompt shown ONLY if browser autoplay blocked automatic voice */}
+      {audioBlocked && voiceEnabled && (
+        <button
+          type="button"
+          onClick={() => {
+            setAudioBlocked(false);
+            import("@/lib/lottery-audio")
+              .then(({ ensureAudioUnlocked, playLotteryChime }) => {
+                ensureAudioUnlocked();
+                void playLotteryChime();
+              })
+              .catch(() => {});
+          }}
+          className="fixed bottom-10 right-4 z-40 flex items-center gap-2 px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs sm:text-sm shadow-2xl border-2 border-amber-200 animate-bounce cursor-pointer"
+        >
+          <Volume2 className="w-4 h-4 shrink-0" />
+          <span>Toca aquí para activar la voz automática</span>
+        </button>
       )}
 
       {/* Voice configuration modal */}

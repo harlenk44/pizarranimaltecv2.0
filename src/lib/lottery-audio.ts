@@ -94,6 +94,17 @@ export function ensureAudioUnlocked(): void {
         source.start(0);
         if (ctx.state === "running") {
           audioUnlocked = true;
+          window.dispatchEvent(new CustomEvent("pizarra:audio-unlocked"));
+        } else if (ctx.state === "suspended") {
+          ctx
+            .resume()
+            .then(() => {
+              if (ctx.state === "running") {
+                audioUnlocked = true;
+                window.dispatchEvent(new CustomEvent("pizarra:audio-unlocked"));
+              }
+            })
+            .catch(() => {});
         }
       }
     } catch {
@@ -1067,6 +1078,9 @@ export async function speakLotteryResult({
       onEnd,
     );
     if (!fallbackOk && myToken === activeSpeechToken) {
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("pizarra:audio-blocked"));
+      }
       onEnd?.();
     }
     return;
@@ -1084,14 +1098,17 @@ export async function speakLotteryResult({
     return;
   }
 
-  const fallbackStreamOk = await playNaturalSpanishAudio(
+  const hdFallbackOk = await playNaturalSpanishAudio(
     speechText,
     onStart,
     onEnd,
     myToken,
     currentSettings.rate,
   );
-  if (!fallbackStreamOk && myToken !== activeSpeechToken) {
+  if (!hdFallbackOk && myToken === activeSpeechToken) {
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("pizarra:audio-blocked"));
+    }
     onEnd?.();
   }
 }
