@@ -6,6 +6,7 @@ import {
   getAnimalName,
   getEmojiForNumber,
 } from "@/lib/animals";
+import { getOfficialAnimalsForGame, isRealAnimalMediaUrl } from "@/lib/official-animals";
 import type {
   Game,
   Result,
@@ -86,17 +87,44 @@ interface AnimalListItem {
   label: string | null;
 }
 
-async function fetchAnimalList(gameId: string): Promise<AnimalListItem[]> {
+function isStaleLegacyDefaultEntries(entries: AnimalEntry[], officialCount: number): boolean {
+  if (officialCount <= 38 || entries.length !== 38) return false;
+  const e36 = entries.find((e) => e.number === 36);
+  const e37 = entries.find((e) => e.number === 37);
+  return Boolean(
+    e36 &&
+    e36.name.toLowerCase().includes("cochinera") &&
+    e37 &&
+    e37.name.toLowerCase().includes("ballena"),
+  );
+}
+
+function orderAnimalListForDisplay(list: AnimalListItem[]): AnimalListItem[] {
+  return [...list].sort((a, b) => {
+    const aIs00 = a.label === "00";
+    const bIs00 = b.label === "00";
+    if (aIs00 && !bIs00) return -1;
+    if (!aIs00 && bIs00) return 1;
+    return a.number - b.number;
+  });
+}
+
+async function fetchAnimalList(gameId: string, gameSlug?: string): Promise<AnimalListItem[]> {
+  const official = getOfficialAnimalsForGame(gameSlug || gameId);
   const { data } = await supabase
     .from("animal_entries")
     .select("*")
     .eq("game_id", gameId)
     .order("number", { ascending: true });
   const entries = (data ?? []) as AnimalEntry[];
-  if (entries.length > 0) {
-    return entries.map((e) => ({ number: e.number, name: e.name, label: e.label }));
+  if (entries.length > 0 && !isStaleLegacyDefaultEntries(entries, official.length)) {
+    return orderAnimalListForDisplay(
+      entries.map((e) => ({ number: e.number, name: e.name, label: e.label })),
+    );
   }
-  return DEFAULT_ANIMALS.map((a) => ({ number: a.number, name: a.name, label: null }));
+  return orderAnimalListForDisplay(
+    official.map((a) => ({ number: a.number, name: a.name, label: a.label ?? null })),
+  );
 }
 
 function animalDisplayLabel(item: { number: number; label?: string | null }): string {
@@ -292,9 +320,10 @@ function ResultsManager({ games }: { games: Game[] }) {
 
   useEffect(() => {
     if (!selectedGame) return;
-    fetchAnimalList(selectedGame).then(setAnimalList);
+    const gameObj = games.find((g) => g.id === selectedGame);
+    fetchAnimalList(selectedGame, gameObj?.slug).then(setAnimalList);
     setAnimalNumber(0);
-  }, [selectedGame]);
+  }, [selectedGame, games]);
 
   const fetchResults = useCallback(async () => {
     if (!selectedGame) return;
@@ -1757,92 +1786,102 @@ function AnimalsManager({ games }: { games: Game[] }) {
   const fileRefs = useRef<Record<number, HTMLInputElement | null>>({});
   const bulkInputRef = useRef<HTMLInputElement | null>(null);
 
-  const fetchAll = useCallback(async (gameId: string) => {
-    if (!gameId) return;
-    setLoading(true);
+  const fetchAll = useCallback(
+    async (gameId: string) => {
+      if (!gameId) return;
+      setLoading(true);
+      const gameObj = games.find((g) => g.id === gameId);
+      const officialCatalog = getOfficialAnimalsForGame(gameObj?.slug || gameId);
 
-    const [imgRes, entriesRes] = await Promise.all([
-      supabase.from("animal_images").select("*").eq("game_id", gameId),
-      supabase
-        .from("animal_entries")
-        .select("*")
-        .eq("game_id", gameId)
-        .order("number", { ascending: true }),
-    ]);
+      const [imgRes, entriesRes] = await Promise.all([
+        supabase.from("animal_images").select("*").eq("game_id", gameId),
+        supabase
+          .from("animal_entries")
+          .select("*")
+          .eq("game_id", gameId)
+          .order("number", { ascending: true }),
+      ]);
 
-    const {
-      mockStore,
-      recoverCustomAnimalImagesFromLocalStorage,
-      mergeAnimalImagesPreserveCustom,
-      filterAdminCustomAnimalImages,
-      ensureCustomCatalogLoaded,
-    } = await import("@/lib/mock-db");
-    await ensureCustomCatalogLoaded();
-    const { resolveCanonicalAnimal } = await import("@/lib/official-animals");
-    const recoveredCustom = recoverCustomAnimalImagesFromLocalStorage();
-    if (recoveredCustom.length > 0) {
-      mockStore.animal_images = mergeAnimalImagesPreserveCustom(
-        mockStore.animal_images,
-        recoveredCustom,
-      );
-      try {
-        const customOnly = filterAdminCustomAnimalImages(mockStore.animal_images);
-        localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(customOnly));
-        if (customOnly.length > 0) {
-          localStorage.setItem("pizarra_user_custom_animal_images_v2", JSON.stringify(customOnly));
-          fetch("/api/public/results/sync", {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ animalImagesBatch: customOnly }),
-          }).catch(() => {});
+      const {
+        mockStore,
+        recoverCustomAnimalImagesFromLocalStorage,
+        mergeAnimalImagesPreserveCustom,
+        filterAdminCustomAnimalImages,
+        ensureCustomCatalogLoaded,
+      } = await import("@/lib/mock-db");
+      await ensureCustomCatalogLoaded();
+      const { resolveCanonicalAnimal } = await import("@/lib/official-animals");
+      const recoveredCustom = recoverCustomAnimalImagesFromLocalStorage();
+      if (recoveredCustom.length > 0) {
+        mockStore.animal_images = mergeAnimalImagesPreserveCustom(
+          mockStore.animal_images,
+          recoveredCustom,
+        );
+        try {
+          const customOnly = filterAdminCustomAnimalImages(mockStore.animal_images);
+          localStorage.setItem("pizarra_custom_animal_images", JSON.stringify(customOnly));
+          if (customOnly.length > 0) {
+            localStorage.setItem(
+              "pizarra_user_custom_animal_images_v2",
+              JSON.stringify(customOnly),
+            );
+            fetch("/api/public/results/sync", {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ animalImagesBatch: customOnly }),
+            }).catch(() => {});
+          }
+        } catch {
+          // ignore
         }
-      } catch {
-        // ignore
       }
-    }
 
-    const mergedForGame = mergeAnimalImagesPreserveCustom(
-      ((imgRes.data ?? []) as AnimalImage[]).filter((img) => img.game_id === gameId),
-      mockStore.animal_images.filter((img) => img.game_id === gameId),
-      recoveredCustom.filter((img) => img.game_id === gameId),
-    );
+      const mergedForGame = mergeAnimalImagesPreserveCustom(
+        ((imgRes.data ?? []) as AnimalImage[]).filter((img) => img.game_id === gameId),
+        mockStore.animal_images.filter((img) => img.game_id === gameId),
+        recoveredCustom.filter((img) => img.game_id === gameId),
+      );
 
-    const imgMap: Record<number, string> = {};
-    const entriesForLookup = (entriesRes.data ?? []) as AnimalEntry[];
-    for (const entry of entriesForLookup) {
-      const canonical = resolveCanonicalAnimal(gameId, entry.label ?? entry.number, entry.name);
-      if (canonical.imageUrl) {
-        imgMap[entry.number] = canonical.imageUrl;
+      const entries = (entriesRes.data ?? []) as AnimalEntry[];
+      const useDbEntries =
+        entries.length > 0 && !isStaleLegacyDefaultEntries(entries, officialCatalog.length);
+
+      const resolvedList: AnimalListItem[] = orderAnimalListForDisplay(
+        useDbEntries
+          ? entries.map((e) => ({ number: e.number, name: e.name, label: e.label }))
+          : officialCatalog.map((a) => ({
+              number: a.number,
+              name: a.name,
+              label: a.label ?? null,
+            })),
+      );
+
+      const imgMap: Record<number, string> = {};
+      for (const entry of resolvedList) {
+        const canonical = resolveCanonicalAnimal(
+          gameObj?.slug || gameId,
+          entry.label ?? entry.number,
+          entry.name,
+        );
+        if (canonical.imageUrl && isRealAnimalMediaUrl(canonical.imageUrl)) {
+          imgMap[entry.number] = canonical.imageUrl;
+        }
       }
-    }
-    for (const img of mergedForGame) {
-      imgMap[img.animal_number] = img.image_url;
-    }
-    setImages(imgMap);
+      for (const img of mergedForGame) {
+        imgMap[img.animal_number] = img.image_url;
+      }
+      setImages(imgMap);
 
-    const entries = (entriesRes.data ?? []) as AnimalEntry[];
-    if (entries.length > 0) {
-      const list = entries.map((e) => ({ number: e.number, name: e.name, label: e.label }));
-      setAnimalList(list);
-      setAnimalCount(list.length);
+      setAnimalList(resolvedList);
+      setAnimalCount(resolvedList.length);
       const namesMap: Record<number, string> = {};
-      for (const e of entries) namesMap[e.number] = e.name;
+      for (const item of resolvedList) namesMap[item.number] = item.name;
       setEditingNames(namesMap);
-    } else {
-      const defaultList = DEFAULT_ANIMALS.map((a) => ({
-        number: a.number,
-        name: a.name,
-        label: null,
-      }));
-      setAnimalList(defaultList);
-      setAnimalCount(38);
-      const namesMap: Record<number, string> = {};
-      for (const a of DEFAULT_ANIMALS) namesMap[a.number] = a.name;
-      setEditingNames(namesMap);
-    }
 
-    setLoading(false);
-  }, []);
+      setLoading(false);
+    },
+    [games],
+  );
 
   useEffect(() => {
     if (games.length > 0 && !selectedGame) {
@@ -1868,11 +1907,16 @@ function AnimalsManager({ games }: { games: Game[] }) {
   }
 
   function parseAnimalNumberFromFileName(fileName: string): number | null {
-    const base = fileName.replace(/\.[^.]+$/, "");
+    const base = fileName.replace(/\.[^.]+$/, "").trim();
     const normalizedFile = normalizeText(base);
 
     // Special check for "00" or "ballena"
-    if (base === "00" || normalizedFile === "00" || normalizedFile.includes("ballena")) {
+    if (
+      base === "00" ||
+      /^00(?:[\s._-]|$)/.test(base) ||
+      normalizedFile === "00" ||
+      normalizedFile.includes("ballena")
+    ) {
       const ballena = animalList.find(
         (a) => a.label === "00" || normalizeText(a.name) === "ballena",
       );
@@ -1880,15 +1924,23 @@ function AnimalsManager({ games }: { games: Game[] }) {
     }
 
     // Special check for "0" or "delfin"
-    if (base === "0" || normalizedFile === "0" || normalizedFile.includes("delfin")) {
+    if (
+      base === "0" ||
+      /^0(?:[\s._-]|$)/.test(base) ||
+      normalizedFile === "0" ||
+      normalizedFile.includes("delfin")
+    ) {
       const delfin = animalList.find(
         (a) => a.label === "0" || a.number === 0 || normalizeText(a.name) === "delfin",
       );
       if (delfin) return delfin.number;
     }
 
-    // 1. Try matching by animal name first
-    for (const animal of animalList) {
+    // 1. Try matching by animal name first (longest name first so "pavo real" beats "pavo" and "oso hormiguero" beats "oso")
+    const sortedByNameLength = [...animalList].sort(
+      (a, b) => normalizeText(b.name).length - normalizeText(a.name).length,
+    );
+    for (const animal of sortedByNameLength) {
       const normalizedAnimal = normalizeText(animal.name);
       if (normalizedAnimal.length >= 3 && normalizedFile.includes(normalizedAnimal)) {
         return animal.number;
@@ -1899,6 +1951,7 @@ function AnimalsManager({ games }: { games: Game[] }) {
     const match = base.match(/(\d+)/);
     if (!match) return null;
     const num = parseInt(match[1]!, 10);
+    if (animalList.some((a) => a.number === num)) return num;
     if (num >= 0 && num < animalCount) return num;
     return null;
   }
@@ -2258,20 +2311,26 @@ function AnimalsManager({ games }: { games: Game[] }) {
   function handleCountChange(newCount: number) {
     if (newCount < 1 || newCount > 200) return;
     setAnimalCount(newCount);
+    const gameObj = games.find((g) => g.id === selectedGame);
+    const officialCatalog = getOfficialAnimalsForGame(gameObj?.slug || selectedGame);
     const newList: AnimalListItem[] = [];
     for (let i = 0; i < newCount; i++) {
       const existing = animalList.find((a) => a.number === i);
       if (existing) {
         newList.push(existing);
       } else {
+        const officialEntry = officialCatalog.find((a) => a.number === i);
         const defaultAnimal = DEFAULT_ANIMALS[i % DEFAULT_ANIMALS.length]!;
-        const name =
-          i < DEFAULT_ANIMALS.length ? defaultAnimal.name : `${defaultAnimal.name} (${i})`;
-        newList.push({ number: i, name, label: null });
+        const name = officialEntry
+          ? officialEntry.name
+          : i < DEFAULT_ANIMALS.length
+            ? defaultAnimal.name
+            : `${defaultAnimal.name} (${i})`;
+        newList.push({ number: i, name, label: officialEntry?.label ?? null });
         setEditingNames((prev) => ({ ...prev, [i]: name }));
       }
     }
-    setAnimalList(newList);
+    setAnimalList(orderAnimalListForDisplay(newList));
   }
 
   function handleNameChange(number: number, name: string) {
@@ -2297,7 +2356,11 @@ function AnimalsManager({ games }: { games: Game[] }) {
     if (error) {
       setListMessage({ type: "err", text: error.message });
     } else {
-      setAnimalList(rows.map((r) => ({ number: r.number, name: r.name, label: r.label })));
+      setAnimalList(
+        orderAnimalListForDisplay(
+          rows.map((r) => ({ number: r.number, name: r.name, label: r.label })),
+        ),
+      );
       setListMessage({
         type: "ok",
         text: `Lista de ${animalCount} animales guardada correctamente`,

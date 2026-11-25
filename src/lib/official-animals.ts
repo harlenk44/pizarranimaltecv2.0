@@ -20,12 +20,16 @@ export interface CanonicalAnimalResolution {
   imageUrl: string;
 }
 
-// Map known game UUIDs to their canonical slug
+// Map known game UUIDs (default + live Supabase) to their canonical slug
 export const GAME_ID_TO_SLUG: Readonly<Record<string, string>> = {
   "7d21a00b-0dfa-4bdc-9edf-8115802df1d6": "lotto-activo",
+  "d48546e4-1993-438a-a9de-64499762cce9": "lotto-activo",
   "01da9c54-392a-45e3-ab66-9a08befe7694": "guacharo",
+  "83988ab3-9d23-4fa1-9ac1-46914f70d2cc": "guacharo",
   "0519825d-e7ea-4e59-bf7d-cef2c832edd3": "guacharito",
+  "7115c101-6679-46c7-91a0-dbdabd1c78b2": "guacharito",
   "8f3aa087-6a0c-41a1-9ed3-5f6d5ed6918e": "selva-plus",
+  "90cf1adf-734f-4a17-9cee-dfd3c705e611": "selva-plus",
   "1efc5373-a547-4f7f-9955-845b5ede5ce2": "loto-chaim-a",
   "ca8a0400-0000-4000-8000-000000000006": "granjita",
   "0f766e00-0000-4000-8000-000000000007": "monje-millonario",
@@ -290,6 +294,15 @@ export const OFFICIAL_ANIMALS: Record<string, OfficialAnimal[]> = {
 };
 
 /**
+ * Returns the official animal catalog for a given game UUID or slug.
+ */
+export function getOfficialAnimalsForGame(gameIdOrSlug?: string | null): OfficialAnimal[] {
+  const slug = resolveGameSlug(gameIdOrSlug);
+  const canonicalSlug = normalizeGameSlug(slug);
+  return OFFICIAL_ANIMALS[slug] ?? OFFICIAL_ANIMALS[canonicalSlug] ?? LOTTO_ACTIVO_ANIMALS;
+}
+
+/**
  * Converts a raw string/number code (strictly preserving "0" vs "00") into
  * the canonical internal integer number for a given lottery.
  */
@@ -506,9 +519,10 @@ export function resolveCanonicalAnimal(
       canonicalSlug === "guacharo-activo" ||
       canonicalSlug === "guacharo" ||
       canonicalSlug === "monje-millonario";
+    const isMonjePatronus = canonicalSlug === "monje-millonario" && canonicalNum === 75;
 
     customImg = pickReal(
-      isGuacharoFamily && guacharoLookupNum <= 76
+      !isMonjePatronus && isGuacharoFamily && guacharoLookupNum <= 76
         ? getEmbeddedCatalogImageUrl("01da9c54-392a-45e3-ab66-9a08befe7694", guacharoLookupNum)
         : undefined,
       !isGuacharoFamily && granjitaLookupNum <= 37
@@ -516,10 +530,10 @@ export function resolveCanonicalAnimal(
             getEmbeddedCatalogImageUrl("1e40af00-0000-4000-8000-000000000008", granjitaLookupNum) ??
             getEmbeddedCatalogImageUrl("ca8a0400-0000-4000-8000-000000000006", granjitaLookupNum))
         : undefined,
-      guacharoLookupNum <= 76
+      !isMonjePatronus && guacharoLookupNum <= 76
         ? getEmbeddedCatalogImageUrl("01da9c54-392a-45e3-ab66-9a08befe7694", guacharoLookupNum)
         : undefined,
-      guacharitoLookupNum <= 100
+      !isMonjePatronus && guacharitoLookupNum <= 100
         ? (getEmbeddedCatalogImageUrl(
             "0519825d-e7ea-4e59-bf7d-cef2c832edd3",
             guacharitoLookupNum,

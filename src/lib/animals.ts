@@ -258,6 +258,7 @@ export const ANIMAL_EMOJIS_BY_NAME: Record<string, string> = {
   HIPOPOTAMO: "🦛",
   TURPIAL: "🐤",
   GUACHARO: "🦇",
+  PATRONUS: "✨",
   RINOCERONTE: "🦏",
   PINGUINO: "🐧",
   ANTILOPE: "🦌",
