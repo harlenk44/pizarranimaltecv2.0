@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import type { Ad, AdPlacement } from "@/lib/types";
 import {
-  fetchAdsStore,
+  subscribeAdsStore,
   DEFAULT_AD_TICKER,
   type AdTickerConfig,
   type AdsStoreState,
@@ -20,9 +20,11 @@ export default function AdBanner({ placement, className = "" }: AdBannerProps) {
   const [activeIndex, setActiveIndex] = useState<number>(0);
   const [dismissed, setDismissed] = useState<Record<string, boolean>>({});
 
+  const placementKey = Array.isArray(placement) ? placement.join(",") : placement;
+
   const applyStore = useCallback(
     (store: AdsStoreState) => {
-      const allowedPlacements = new Set(Array.isArray(placement) ? placement : [placement]);
+      const allowedPlacements = new Set(placementKey.split(","));
       const todayStr = lotteryDate();
       const clockValid = todayStr >= "2025-01-01";
       const filtered = (store.ads || [])
@@ -41,44 +43,11 @@ export default function AdBanner({ placement, className = "" }: AdBannerProps) {
         setCarouselInterval(Math.max(3, store.ticker.carouselIntervalSeconds));
       }
     },
-    [placement],
+    [placementKey],
   );
 
   useEffect(() => {
-    let mounted = true;
-
-    const load = async () => {
-      const store = await fetchAdsStore();
-      if (mounted) applyStore(store);
-    };
-
-    load();
-    const poll = setInterval(load, 4000);
-
-    let bc: BroadcastChannel | null = null;
-    try {
-      bc = new BroadcastChannel("pizarra_ads_channel");
-      bc.onmessage = (event) => {
-        if (event.data?.type === "ADS_UPDATED" && event.data.payload && mounted) {
-          applyStore(event.data.payload as AdsStoreState);
-        }
-      };
-    } catch {
-      // ignore
-    }
-
-    const onCustomUpdate = (e: Event) => {
-      const detail = (e as CustomEvent<AdsStoreState>).detail;
-      if (detail && mounted) applyStore(detail);
-    };
-    window.addEventListener("pizarra:ads-updated", onCustomUpdate);
-
-    return () => {
-      mounted = false;
-      clearInterval(poll);
-      bc?.close();
-      window.removeEventListener("pizarra:ads-updated", onCustomUpdate);
-    };
+    return subscribeAdsStore(applyStore);
   }, [applyStore]);
 
   const visibleAds = ads.filter((a) => !dismissed[a.id]);
@@ -178,42 +147,11 @@ export function AdTickerBar() {
   const [ticker, setTicker] = useState<AdTickerConfig>(DEFAULT_AD_TICKER);
 
   useEffect(() => {
-    let mounted = true;
-
-    const load = async () => {
-      const store = await fetchAdsStore();
-      if (mounted && store.ticker) {
+    return subscribeAdsStore((store) => {
+      if (store.ticker) {
         setTicker(store.ticker);
       }
-    };
-
-    load();
-    const poll = setInterval(load, 10000);
-
-    let bc: BroadcastChannel | null = null;
-    try {
-      bc = new BroadcastChannel("pizarra_ads_channel");
-      bc.onmessage = (event) => {
-        if (event.data?.type === "ADS_UPDATED" && event.data.payload?.ticker && mounted) {
-          setTicker(event.data.payload.ticker as AdTickerConfig);
-        }
-      };
-    } catch {
-      // ignore
-    }
-
-    const onCustomUpdate = (e: Event) => {
-      const detail = (e as CustomEvent<AdsStoreState>).detail;
-      if (detail?.ticker && mounted) setTicker(detail.ticker);
-    };
-    window.addEventListener("pizarra:ads-updated", onCustomUpdate);
-
-    return () => {
-      mounted = false;
-      clearInterval(poll);
-      bc?.close();
-      window.removeEventListener("pizarra:ads-updated", onCustomUpdate);
-    };
+    });
   }, []);
 
   if (!ticker.enabled || !ticker.text.trim()) return null;

@@ -98,6 +98,7 @@ export function saveLocalAdsStore(state: Partial<AdsStoreState>): AdsStoreState 
     window.dispatchEvent(new CustomEvent("pizarra:ads-updated", { detail: next }));
   }
 
+  _lastFetchedAdsState = next;
   return next;
 }
 
@@ -182,10 +183,36 @@ export async function deleteAdFromStore(ad: Ad): Promise<AdsStoreState> {
     throw supaError;
   }
 
+  _lastFetchedAdsState = nextState;
   return nextState;
 }
 
-export async function fetchAdsStore(): Promise<AdsStoreState> {
+const ADS_POLL_INTERVAL_MS = 180_000; // 3 minutos (compartido por todos los banners/cintillo)
+const ADS_MIN_FETCH_GAP_MS = 2_000;
+
+let _lastFetchedAdsState: AdsStoreState | null = null;
+let _lastAdsFetchAt = 0;
+let _inFlightAdsFetch: Promise<AdsStoreState> | null = null;
+
+type AdsStoreListener = (state: AdsStoreState) => void;
+const _adsListeners = new Set<AdsStoreListener>();
+let _sharedPollTimer: ReturnType<typeof setInterval> | null = null;
+let _sharedBc: BroadcastChannel | null = null;
+let _sharedRealtimeChannel: ReturnType<typeof supabase.channel> | null = null;
+let _sharedDomListenersAttached = false;
+
+function notifyAdsSubscribers(state: AdsStoreState) {
+  _lastFetchedAdsState = state;
+  for (const listener of _adsListeners) {
+    try {
+      listener(state);
+    } catch {
+      // ignore subscriber errors
+    }
+  }
+}
+
+async function runFetchAdsStore(): Promise<AdsStoreState> {
   const local = loadLocalAdsStore();
   let serverTicker: AdTickerConfig = local.ticker;
 
@@ -200,9 +227,9 @@ export async function fetchAdsStore(): Promise<AdsStoreState> {
       // Supabase respondió con la lista autoritativa actual (incluso si está vacía)
       const authoritativeAds = data as Ad[];
 
-      // Leer el ticker del servidor si existe
+      // Leer el ticker del servidor si existe (solo lectura, sin PUT redundante)
       try {
-        const res = await fetch(getMediaApiUrl(`?store=ads&_t=${Date.now()}`), {
+        const res = await fetch(getMediaApiUrl("?store=ads"), {
           cache: "no-store",
         });
         if (res.ok) {
@@ -232,13 +259,8 @@ export async function fetchAdsStore(): Promise<AdsStoreState> {
         }
       }
 
-      // Sincronizar servidor de medios con el estado real
-      fetch(getMediaApiUrl("?store=ads"), {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(freshState),
-      }).catch(() => {});
-
+      _lastAdsFetchAt = Date.now();
+      notifyAdsSubscribers(freshState);
       return freshState;
     }
   } catch (err) {
@@ -247,7 +269,7 @@ export async function fetchAdsStore(): Promise<AdsStoreState> {
 
   // 2. Segunda opción: Servidor de medios /api/media?store=ads
   try {
-    const res = await fetch(getMediaApiUrl(`?store=ads&_t=${Date.now()}`), {
+    const res = await fetch(getMediaApiUrl("?store=ads"), {
       cache: "no-store",
     });
     if (res.ok) {
@@ -273,6 +295,8 @@ export async function fetchAdsStore(): Promise<AdsStoreState> {
         }
       }
 
+      _lastAdsFetchAt = Date.now();
+      notifyAdsSubscribers(serverState);
       return serverState;
     }
   } catch {
@@ -280,9 +304,137 @@ export async function fetchAdsStore(): Promise<AdsStoreState> {
   }
 
   // 3. Fallback en caso de desconexión total
-  return {
+  const fallbackState: AdsStoreState = {
     ads: local.ads,
     ticker: local.ticker,
+  };
+  notifyAdsSubscribers(fallbackState);
+  return fallbackState;
+}
+
+export async function fetchAdsStore(): Promise<AdsStoreState> {
+  if (_inFlightAdsFetch) {
+    return _inFlightAdsFetch;
+  }
+  _inFlightAdsFetch = runFetchAdsStore().finally(() => {
+    _inFlightAdsFetch = null;
+  });
+  return _inFlightAdsFetch;
+}
+
+function handleSharedCustomUpdate(e: Event) {
+  const detail = (e as CustomEvent<AdsStoreState>).detail;
+  if (detail) {
+    notifyAdsSubscribers(detail);
+  }
+}
+
+function handleSharedVisibilityChange() {
+  if (typeof document === "undefined" || document.visibilityState !== "visible") return;
+  if (Date.now() - _lastAdsFetchAt >= ADS_POLL_INTERVAL_MS) {
+    void fetchAdsStore();
+  }
+}
+
+function startSharedAdsSync() {
+  if (typeof window === "undefined") return;
+
+  if (!_sharedDomListenersAttached) {
+    _sharedDomListenersAttached = true;
+    window.addEventListener("pizarra:ads-updated", handleSharedCustomUpdate);
+    document.addEventListener("visibilitychange", handleSharedVisibilityChange);
+  }
+
+  if (!_sharedBc) {
+    try {
+      _sharedBc = new BroadcastChannel("pizarra_ads_channel");
+      _sharedBc.onmessage = (event) => {
+        if (event.data?.type === "ADS_UPDATED" && event.data.payload) {
+          notifyAdsSubscribers(event.data.payload as AdsStoreState);
+        }
+      };
+    } catch {
+      _sharedBc = null;
+    }
+  }
+
+  if (!_sharedRealtimeChannel) {
+    try {
+      _sharedRealtimeChannel = supabase
+        .channel("pizarra-ads-realtime")
+        .on("postgres_changes", { event: "*", schema: "public", table: "ads" }, () => {
+          void fetchAdsStore();
+        })
+        .subscribe();
+    } catch {
+      _sharedRealtimeChannel = null;
+    }
+  }
+
+  if (!_sharedPollTimer) {
+    _sharedPollTimer = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        return;
+      }
+      void fetchAdsStore();
+    }, ADS_POLL_INTERVAL_MS);
+  }
+
+  if (!_lastFetchedAdsState || Date.now() - _lastAdsFetchAt >= ADS_MIN_FETCH_GAP_MS) {
+    void fetchAdsStore();
+  }
+}
+
+function stopSharedAdsSync() {
+  if (_sharedPollTimer) {
+    clearInterval(_sharedPollTimer);
+    _sharedPollTimer = null;
+  }
+  if (_sharedBc) {
+    try {
+      _sharedBc.close();
+    } catch {
+      // ignore
+    }
+    _sharedBc = null;
+  }
+  if (_sharedRealtimeChannel) {
+    try {
+      void supabase.removeChannel(_sharedRealtimeChannel);
+    } catch {
+      // ignore
+    }
+    _sharedRealtimeChannel = null;
+  }
+  if (_sharedDomListenersAttached && typeof window !== "undefined") {
+    window.removeEventListener("pizarra:ads-updated", handleSharedCustomUpdate);
+    document.removeEventListener("visibilitychange", handleSharedVisibilityChange);
+    _sharedDomListenersAttached = false;
+  }
+}
+
+/**
+ * Suscripción compartida para todos los banners y el cintillo de publicidad.
+ * Usa un único temporizador de 3 min (pausado en segundo plano), BroadcastChannel
+ * y Supabase Realtime en lugar de un setInterval independiente por componente.
+ */
+export function subscribeAdsStore(listener: AdsStoreListener): () => void {
+  _adsListeners.add(listener);
+
+  // Entrega inmediata desde caché en memoria o localStorage para evitar parpadeos
+  listener(_lastFetchedAdsState ?? loadLocalAdsStore());
+
+  if (_adsListeners.size === 1) {
+    startSharedAdsSync();
+  } else if (!_lastFetchedAdsState && !_inFlightAdsFetch) {
+    void fetchAdsStore();
+  }
+
+  return () => {
+    _adsListeners.delete(listener);
+    if (_adsListeners.size === 0) {
+      stopSharedAdsSync();
+    }
   };
 }
 
