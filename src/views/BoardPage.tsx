@@ -844,7 +844,7 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
   const fetchInFlightRef = useRef<boolean>(false);
   const fetchSeqRef = useRef<number>(0);
   const lastWorkerSyncAtRef = useRef<number>(0);
-  const workerJitterMsRef = useRef<number>(Math.floor(Math.random() * 25_000));
+  const workerJitterMsRef = useRef<number>(Math.floor(Math.random() * 10_000));
   const [autoRotate, setAutoRotate] = useState<boolean>(() => {
     if (typeof window !== "undefined") {
       const saved = localStorage.getItem("pizarra_auto_rotate_views");
@@ -1009,13 +1009,10 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
               (hour === 7 && minute < 40);
             if (isOffHours) return 900_000; // 15 min overnight
             const isPeakDrawWindow =
-              (minute >= 0 && minute <= 10) ||
-              (minute >= 15 && minute <= 22) ||
-              (minute >= 30 && minute <= 40) ||
-              (minute >= 45 && minute <= 53);
-            return isPeakDrawWindow ? 150_000 : 360_000; // 2.5 min peak, 6 min off-peak
+              (minute >= 0 && minute <= 25) || (minute >= 30 && minute <= 56);
+            return isPeakDrawWindow ? 60_000 : 180_000; // 60s en ventanas de publicación, 3 min fuera de ventana
           } catch {
-            return 240_000;
+            return 90_000;
           }
         };
 
@@ -1040,10 +1037,9 @@ export default function BoardPage({ onAdminClick }: BoardPageProps) {
             if (lastSettingsVersionRef.current)
               q.set("settingsVersion", String(lastSettingsVersionRef.current));
 
-            const syncRes = await fetch(
-              `/api/public/results/sync?${q.toString()}`,
-              force ? { cache: "no-store" } : undefined,
-            );
+            const syncRes = await fetch(`/api/public/results/sync?${q.toString()}`, {
+              cache: "no-store",
+            });
             // Discard stale out-of-order response if a newer fetch already started
             if (reqSeq !== fetchSeqRef.current) return;
 

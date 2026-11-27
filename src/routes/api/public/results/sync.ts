@@ -1745,7 +1745,17 @@ async function syncResultsWithSupabase(force = false): Promise<void> {
           );
           consolidateInMemoryGamesAndResults();
           saveServerResults();
-          // Seed cloud-persisted draw cache so synchronizeAutomaticResults skips redundant RPCs
+          // Seed both RPC skip caches so cold Worker isolates never re-write already-persisted draws
+          if (rpcPushCacheDate !== today) {
+            rpcPushCacheDate = today;
+            pushedAnimalRpcKeys.clear();
+            pushedTripleRpcKeys.clear();
+          }
+          for (const row of cloudMapped) {
+            pushedAnimalRpcKeys.add(
+              `${row.game_id}|${row.draw_date}|${row.draw_time.slice(0, 5)}|${row.animal_number}|${row.animal_name.trim().toLowerCase()}`,
+            );
+          }
           import("@/lib/result-sync.server")
             .then(({ markCloudDrawPersisted }) => {
               for (const row of cloudMapped) {
@@ -2514,116 +2524,20 @@ async function triggerBackgroundSync(forceWait = false): Promise<void> {
       // Sincronizar juegos primero para asegurar que mockStore.games tenga los UUIDs oficiales de Supabase
       await syncGamesWithSupabase(false).catch(() => {});
 
-      const [
-        { synchronizeAutomaticResults, markCloudDrawPersisted },
-        { getCachedMultiloteriasItems },
-        { synchronizeArrejuntaoOfficialData },
-        { synchronizeGuacharoOfficialData },
-        { synchronizeGuacharitoOfficialData },
-        { synchronizeSelvaPlusOfficialData },
-        { synchronizeLottoActivoOfficialData },
-      ] = await Promise.all([
+      const [{ synchronizeAutomaticResults }, { getCachedMultiloteriasItems }] = await Promise.all([
         import("@/lib/result-sync.server"),
         import("@/lib/multiloterias-provider.server"),
-        import("@/lib/arrejuntao-provider.server"),
-        import("@/lib/guacharo-provider.server"),
-        import("@/lib/guacharito-provider.server"),
-        import("@/lib/selva-plus-provider.server"),
-        import("@/lib/lotto-activo-provider.server"),
       ]);
 
-      const [
-        reportsSettled,
-        arrejuntaoSettled,
-        guacharoSettled,
-        guacharitoSettled,
-        selvaPlusSettled,
-        lottoActivoSettled,
-      ] = await Promise.allSettled([
+      // synchronizeAutomaticResults() already executes all official providers (Lotto Activo,
+      // Guácharo, Guacharito, Selva Plus, Arrejuntao, LoteriaDeHoy, TuAzar, Multiloterias),
+      // and triplesPromise handles all triples (including Arrejuntao triples) without duplicate scraping.
+      const [reportsSettled] = await Promise.allSettled([
         synchronizeAutomaticResults(),
-        synchronizeArrejuntaoOfficialData({
-          currentDate: today,
-          forceRefresh: forceWait,
-          resolveGameId: resolveOfficialGameIdBySlug,
-          currentAnimalResults: mockStore.results,
-        }),
-        synchronizeGuacharoOfficialData({
-          currentDate: today,
-          forceRefresh: forceWait,
-          resolveGameId: resolveOfficialGameIdBySlug,
-          currentAnimalResults: mockStore.results,
-          onPersistDraw: markCloudDrawPersisted,
-        }),
-        synchronizeGuacharitoOfficialData({
-          currentDate: today,
-          forceRefresh: forceWait,
-          resolveGameId: resolveOfficialGameIdBySlug,
-          currentAnimalResults: mockStore.results,
-          onPersistDraw: markCloudDrawPersisted,
-        }),
-        synchronizeSelvaPlusOfficialData({
-          currentDate: today,
-          forceRefresh: forceWait,
-          resolveGameId: resolveOfficialGameIdBySlug,
-          currentAnimalResults: mockStore.results,
-          onPersistDraw: markCloudDrawPersisted,
-        }),
-        synchronizeLottoActivoOfficialData({
-          currentDate: today,
-          forceRefresh: forceWait,
-          resolveGameId: resolveOfficialGameIdBySlug,
-          currentAnimalResults: mockStore.results,
-          onPersistDraw: markCloudDrawPersisted,
-        }),
         triplesPromise,
-        syncLicensesWithSupabase().catch(() => null),
-        syncAnimalImagesWithSupabase().catch(() => null),
       ]);
 
       const reports = reportsSettled.status === "fulfilled" ? reportsSettled.value : [];
-      if (arrejuntaoSettled.status === "fulfilled") {
-        const arrRes = arrejuntaoSettled.value;
-        if (arrRes.payload.tripleResults.length > 0) {
-          applyIncomingTriplesToServer(arrRes.payload.tripleResults, today);
-        }
-        if (arrRes.upsertedResults.length > 0) {
-          mockStore.results = sanitizeResultsList(
-            mergeResultsPreserveToday(mockStore.results, arrRes.upsertedResults),
-          );
-        }
-      }
-      if (guacharoSettled.status === "fulfilled") {
-        const guaRes = guacharoSettled.value;
-        if (guaRes.upsertedResults.length > 0) {
-          mockStore.results = sanitizeResultsList(
-            mergeResultsPreserveToday(mockStore.results, guaRes.upsertedResults),
-          );
-        }
-      }
-      if (guacharitoSettled.status === "fulfilled") {
-        const gtoRes = guacharitoSettled.value;
-        if (gtoRes.upsertedResults.length > 0) {
-          mockStore.results = sanitizeResultsList(
-            mergeResultsPreserveToday(mockStore.results, gtoRes.upsertedResults),
-          );
-        }
-      }
-      if (selvaPlusSettled.status === "fulfilled") {
-        const spRes = selvaPlusSettled.value;
-        if (spRes.upsertedResults.length > 0) {
-          mockStore.results = sanitizeResultsList(
-            mergeResultsPreserveToday(mockStore.results, spRes.upsertedResults),
-          );
-        }
-      }
-      if (lottoActivoSettled.status === "fulfilled") {
-        const laRes = lottoActivoSettled.value;
-        if (laRes.upsertedResults.length > 0) {
-          mockStore.results = sanitizeResultsList(
-            mergeResultsPreserveToday(mockStore.results, laRes.upsertedResults),
-          );
-        }
-      }
 
       consolidateInMemoryGamesAndResults();
       saveServerResults();
@@ -2952,6 +2866,35 @@ function serveOnDemandAnimalImage(animalImageParam: string, labelParam: string):
   return new Response("Not found", { status: 404 });
 }
 
+function scheduleCloudflareWaitUntil(request: Request, task: Promise<unknown>): void {
+  try {
+    const reqAny = request as unknown as {
+      runtime?: { cloudflare?: { context?: { waitUntil?: (p: Promise<unknown>) => void } } };
+      cloudflare?: { context?: { waitUntil?: (p: Promise<unknown>) => void } };
+      context?: {
+        cloudflare?: { ctx?: { waitUntil?: (p: Promise<unknown>) => void } };
+        waitUntil?: (p: Promise<unknown>) => void;
+      };
+      ctx?: { waitUntil?: (p: Promise<unknown>) => void };
+    };
+    const owners = [
+      reqAny.runtime?.cloudflare?.context,
+      reqAny.cloudflare?.context,
+      reqAny.context?.cloudflare?.ctx,
+      reqAny.context,
+      reqAny.ctx,
+    ];
+    for (const owner of owners) {
+      if (owner && typeof owner.waitUntil === "function") {
+        owner.waitUntil(task.catch(() => {}));
+        return;
+      }
+    }
+  } catch {
+    // Non-Cloudflare runtime or context unavailable
+  }
+}
+
 export const Route = createFileRoute("/api/public/results/sync")({
   server: {
     handlers: {
@@ -2993,6 +2936,9 @@ export const Route = createFileRoute("/api/public/results/sync")({
               newTripleCount: 0,
             }))
           : null;
+        if (triplesSyncInFlight) {
+          scheduleCloudflareWaitUntil(request, triplesSyncInFlight);
+        }
 
         // 1. Sincronizar games[], licenses[], appSettings y results[] desde Supabase en paralelo respetando TTL
         await Promise.race([
@@ -3019,7 +2965,7 @@ export const Route = createFileRoute("/api/public/results/sync")({
         }
 
         // 3. Trigger full animalitos scraper sync when core LoteriaDeHoy lotteries (Guácharo, Guacharito, Selva Plus, Lotto Activo)
-        //    are missing in RAM or interval elapsed, and await with bounded timeout so Cloudflare Workers never freezes the sync mid-flight.
+        //    are missing in RAM or interval elapsed, and register with Cloudflare ctx.waitUntil so persistence never cuts off mid-flight.
         const isStaleSync = Date.now() - lastAutoSyncTimestamp >= AUTO_SYNC_INTERVAL_MS;
         const isCoreAnimalitosMissing = areCoreAnimalitosMissingForDate(serverToday);
         if (!initialAutoSyncDone || isCoreAnimalitosMissing || isStaleSync || forceCloudSync) {
@@ -3027,9 +2973,10 @@ export const Route = createFileRoute("/api/public/results/sync")({
           const syncPromise = triggerBackgroundSync(
             isCoreAnimalitosMissing || forceCloudSync,
           ).catch(() => {});
+          scheduleCloudflareWaitUntil(request, syncPromise);
           await Promise.race([
             syncPromise,
-            new Promise((resolve) => setTimeout(resolve, isCoreAnimalitosMissing ? 4500 : 2500)),
+            new Promise((resolve) => setTimeout(resolve, isCoreAnimalitosMissing ? 5500 : 4500)),
           ]);
         }
 
